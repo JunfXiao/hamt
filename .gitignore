@@ -1,0 +1,9 @@
+# Rust Build Files
+target
+
+# VS Code Configs
+.vscode
+
+# TRNSYS Head Files (Copyright Protected)
+**/lib/TRNDll64.lib
+**/lib/TRNDll64.dll
