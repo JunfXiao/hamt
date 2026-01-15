@@ -1,15 +1,15 @@
 /// Boundary conditions for the simulation.
 #[derive(Debug, Clone)]
 pub struct BoundaryCondition {
-    /// Temperature of the outside air [TODO: Confirm the Unit].
+    /// Temperature of the outside air [°C].
     pub temp_outside_air: f64,
-    /// Temperature of the inside air [TODO: Confirm the Unit].
+    /// Temperature of the inside air [°C].
     pub temp_inside_air: f64,
-    /// Relative humidity of the outside air [TODO: Confirm the Unit].
+    /// Relative humidity of the outside air [-].
     pub rh_outside_air: f64,
-    /// Relative humidity of the inside air [TODO: Confirm the Unit].
+    /// Relative humidity of the inside air [-].
     pub rh_inside_air: f64,
-    /// Pressure of the air [TODO: Confirm the Unit].
+    /// Pressure of the air [Pa].
     pub pressure_air: f64,
 }
 

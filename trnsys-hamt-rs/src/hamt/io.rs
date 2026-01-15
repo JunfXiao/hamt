@@ -80,7 +80,7 @@ pub fn load_hamt_data<P: AsRef<Path>>(
             //     }
             // }
             _ => {
-                // Handle other properties or ignore.
+                // TODO: Handle other properties or ignore.
             }
         }
     }

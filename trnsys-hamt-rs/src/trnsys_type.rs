@@ -54,9 +54,7 @@ impl TrnSysType {
         materials.insert("Brick".to_string(), mat1);
 
         let mut constructions = HashMap::new();
-        let mut con1 = Construction::new("SimpleWall".to_string());
-        con1.layer_names.push("Brick".to_string());
-        constructions.insert("SimpleWall".to_string(), con1);
+        todo!("Read Construction");
 
         let surface_area: f64 = (&state.params[1]).into();
         let surfaces_to_init = vec![(
@@ -89,7 +87,7 @@ impl TrnSysType {
             manager.calculate_timestep()?;
 
             // Map outputs
-            if let Some(surface_state) = manager.surface_states.get(0) {
+            if let Some(surface_state) = manager.surface.get(0) {
                 let outputs = vec![
                     surface_state.temp_surf_out,
                     surface_state.temp_surf_in,

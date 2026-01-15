@@ -20,38 +20,40 @@ pub fn interp(curve: &Curve, in_value: f64) -> (f64, f64) {
         return (0.0, 0.0);
     }
 
-    // Find the position of in_value
-    let pos = curve
-        .x
-        .binary_search_by(|probe| probe.partial_cmp(&in_value).unwrap());
+    if in_value.is_nan() {
+        return (curve.y[0], 0.0);
+    }
 
-    let (out_value, grad) = match pos {
-        Ok(i) => (curve.y[i], 0.0), // Exact match
-        Err(i) => {
-            if i == 0 {
-                // Before the first point
-                (curve.y[0], 0.0)
-            } else if i >= curve.x.len() {
-                // After the last point
-                (*curve.y.last().unwrap(), 0.0)
-            } else {
-                // Between two points
-                let x1 = curve.x[i - 1];
-                let x2 = curve.x[i];
-                let y1 = curve.y[i - 1];
-                let y2 = curve.y[i];
-
-                let grad = if (x2 - x1).abs() > 1e-9 {
-                    (y2 - y1) / (x2 - x1)
-                } else {
-                    0.0
-                };
-                let val = y1 + grad * (in_value - x1);
-                (val, grad)
+    let mut upper_index: Option<usize> = None;
+    for (i, &xv) in curve.x.iter().enumerate() {
+        match xv.partial_cmp(&in_value) {
+            Some(std::cmp::Ordering::Equal) => return (curve.y[i], 0.0),
+            Some(std::cmp::Ordering::Greater) => {
+                upper_index = Some(i);
+                break;
             }
+            _ => {}
         }
-    };
-    (out_value, grad)
+    }
+
+    match upper_index {
+        Some(0) => (curve.y[0], 0.0),
+        Some(i) => {
+            let x1 = curve.x[i - 1];
+            let x2 = curve.x[i];
+            let y1 = curve.y[i - 1];
+            let y2 = curve.y[i];
+
+            let grad = if (x2 - x1).abs() > 1e-9 {
+                (y2 - y1) / (x2 - x1)
+            } else {
+                0.0
+            };
+            let val = y1 + grad * (in_value - x1);
+            (val, grad)
+        }
+        None => (*curve.y.last().unwrap(), 0.0),
+    }
 }
 
 /// Calculates saturation vapor pressure as a function of temperature.

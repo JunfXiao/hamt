@@ -1,5 +1,7 @@
 //! Defines the data structures for materials and constructions used in the HAMT model.
 
+use std::sync::{Arc, RwLock};
+
 /// Represents a 2D data curve, typically from material property measurements.
 ///
 /// This is used to store properties that vary with a single independent variable,
@@ -29,10 +31,17 @@ impl Curve {
 #[derive(Debug, Clone)]
 pub struct Material {
     pub name: String,
-    // Basic thermal properties
+
+    /// Thickness of the material [m].
     pub thickness: f64,
+
+    /// Conductivity of the material [W/(m·K)].
     pub conductivity: f64,
+
+    /// Density of the material [kg/m³].
     pub density: f64,
+
+    /// Specific heat of the material [J/(kg·K)].
     pub spec_heat: f64,
 
     // HAMT-specific properties
@@ -94,14 +103,12 @@ impl Material {
 pub struct Construction {
     pub name: String,
     /// An ordered list of material names that make up the construction.
-    pub layer_names: Vec<String>,
+    pub layers: Vec<Arc<Material>>,
+    
 }
 
 impl Construction {
-    pub fn new(name: String) -> Self {
-        Self {
-            name,
-            layer_names: Vec::new(),
-        }
+    pub fn new(name: String, layers: Vec<Arc<Material>>) -> Self {
+        Self { name, layers }
     }
 }

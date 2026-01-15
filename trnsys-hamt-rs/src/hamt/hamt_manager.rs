@@ -4,26 +4,26 @@
 use tracing::warn;
 
 use super::boundary::BoundaryCondition;
-use crate::hamt::cell::{SubCell, ADJACENT_CELLS_MAX};
+use super::surface::Surface;
+use crate::hamt::cell::{Cell, ADJACENT_CELLS_MAX};
 use crate::hamt::material::{Construction, Material};
 use crate::hamt::physics;
 use crate::trnsys::error::TrnSysError;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// Manages the state and execution of the HAMT simulation for all surfaces.
 #[derive(Debug, Clone)]
 pub struct HamtManager {
     /// A flat vector containing all cells for all simulated surfaces.
-    pub cells: Vec<SubCell>,
+    pub cells: Vec<Cell>,
 
     /// Materials registry; cells hold Arc references directly.
     pub materials: Vec<Arc<Material>>,
     /// Constructions registry; surfaces hold Arc references directly.
     pub constructions: Vec<Arc<Construction>>,
 
-    /// State and index information for each individual surface being simulated.
-    pub surface_states: Vec<SurfaceState>,
+    pub surface: Surface,
 
     /// Boundary conditions for the simulation.
     pub boundary_condition: BoundaryCondition,
@@ -32,55 +32,18 @@ pub struct HamtManager {
     pub settings: HamtSettings,
 }
 
-/// Holds the indices and reporting variables for a single surface.
-#[derive(Debug, Clone, Default)]
-pub struct SurfaceState {
-    pub name: String,
-    pub construction_name: String,
-    /// Construction reference, if known.
-    pub construction: Option<Arc<Construction>>,
-    pub area: f64,
-
-    // Indices mapping into the main `cells` vector
-    pub first_cell: usize,
-    pub last_cell: usize,
-    pub ext_cell: usize,     // Exterior virtual cell
-    pub int_cell: usize,     // Interior virtual cell
-    pub ext_con_cell: usize, // Exterior convection cell
-    pub int_con_cell: usize, // Interior convection cell
-    pub ext_rad_cell: usize,
-    pub ext_sky_cell: usize,
-    pub ext_grn_cell: usize,
-    pub user_def_cell: usize, // Cell at user-defined depth
-
-    // Boundary conditions / Flags
-    pub ext_vtc_flag: bool,
-    pub int_vtc_flag: bool,
-    pub ext_vtc: f64,
-    pub int_vtc: f64,
-
-    // Reporting Variables (Outputs)
-    pub temp_surf_out: f64,
-    pub temp_surf_in: f64,
-    pub rh_surf_out: f64,
-    pub rh_surf_in: f64,
-    pub temp_surf_user_def: f64,
-    pub rh_surf_user_def: f64,
-    pub water_surf_user_def: f64,
-    pub q_surf_ext: f64,
-    pub q_surf_int: f64,
-    pub m_surf_ext: f64,
-    pub m_surf_int: f64,
-    pub water_total: f64,
-}
-
 /// Global settings for the HAMT simulation.
 #[derive(Debug, Clone)]
 pub struct HamtSettings {
+    /// Timestep [s].
     pub timestep: f64,
+    /// Maximum nonlinear iterations (count).
     pub max_iterations: i32,
+    /// Temperature convergence tolerance [K or °C].
     pub temp_convergence_tolerance: f64,
+    /// Relative humidity convergence tolerance [-].
     pub rh_convergence_tolerance: f64,
+    /// Flag to enable latent heat coupling (dimensionless).
     pub latent_heat_enabled: bool,
 }
 
@@ -89,80 +52,89 @@ impl HamtManager {
     pub fn new(
         settings: HamtSettings,
         materials: HashMap<String, Material>,
-        constructions: HashMap<String, Construction>,
-        surfaces_to_init: &[(String, String, f64)], // Tuples of (surface_name, construction_name, area)
-        boundary_condition: BoundaryCondition,
+        layer_names: Vec<String>,
+        construction_name: String,
+        surface_name: String,
+        surface_area: f64,
     ) -> Result<Self, TrnSysError> {
-        let mut materials_vec = Vec::new();
+        let mut cells: Vec<Cell> = Vec::new();
+        let mut layers: Vec<Arc<Material>> = Vec::with_capacity(layer_names.len());
+
         let mut material_map = HashMap::new();
-        for (name, mat) in materials.into_iter() {
-            let arc = Arc::new(mat);
-            materials_vec.push(arc.clone());
-            if let Some(_) = material_map.insert(name, arc) {
-                warn!(
-                    "Duplicated Material {} appeared more than once, it is replaced.",
-                    name
-                );
-            }
+        for mat_name in layer_names.into_iter() {
+            let mat_arc = material_map.get(&mat_name).cloned().ok_or_else(|| {
+                TrnSysError::HamtError(format!(
+                    "Material '{}' not found for surface '{}'",
+                    mat_name, surface_name
+                ))
+            })?;
+            layers.push(mat_arc);
         }
 
-        let mut constructions_vec = Vec::new();
-        let mut construction_map = HashMap::new();
-        for (name, con) in constructions.into_iter() {
-            let arc = Arc::new(con);
-            constructions_vec.push(arc.clone());
-            construction_map.insert(name, arc);
-        }
-
-        let mut cells = Vec::new();
-        let mut surface_states = Vec::new();
-
-        for (name, construction_name, area) in surfaces_to_init.iter() {
-            let con_arc = construction_map
-                .get(construction_name)
-                .cloned()
-                .ok_or_else(|| {
-                    TrnSysError::HamtError(format!(
-                        "Construction '{}' not found for surface '{}'",
-                        construction_name, name
-                    ))
-                })?;
-            // Minimal single-cell allocation per surface to keep indexing valid.
-            let base = cells.len();
-            let mut cell = SubCell::default();
-            cell.s_id = surface_states.len() as i32;
-            cell.material = con_arc
-                .layer_names
-                .get(0)
-                .and_then(|mat_name| material_map.get(mat_name).cloned());
-            cells.push(cell);
-
-            let surf = SurfaceState {
-                name: name.clone(),
-                construction_name: construction_name.clone(),
-                construction: Some(con_arc.clone()),
-                area: *area,
-                first_cell: base,
-                last_cell: base,
-                ext_cell: base,
-                int_cell: base,
-                ext_con_cell: base,
-                int_con_cell: base,
-                ext_rad_cell: base,
-                ext_sky_cell: base,
-                ext_grn_cell: base,
-                user_def_cell: base,
-                ..SurfaceState::default()
+        let con_arc: Construction = Construction {
+            name: construction_name,
+            layers: layers,
+        };
+        let base = cells.len();
+        let mut prev_index: Option<usize> = None;
+        for (layer_idx, mat_arc) in con_arc.layers.iter().enumerate() {
+            let thickness = mat_arc.thickness.max(1.0e-6);
+            let mut cell = Cell {
+                material: Some(mat_arc.clone()),
+                length: [thickness, 0.0],
+                volume: *area * thickness,
+                overlap: [*area, *area],
+                dist: [thickness / 2.0, thickness / 2.0],
+                adjs: [0, 0],
+                adjsl: [0, 0],
             };
-            // flags/defaults already set by Default
-            surface_states.push(surf);
+
+            let idx = cells.len();
+            if let Some(prev) = prev_index {
+                let prev_half = cells[prev].length[0] / 2.0;
+                let mid_dist = prev_half + thickness / 2.0;
+                cells[prev].adjs[1] = idx as i32;
+                cells[prev].adjsl[1] = 0;
+                cells[idx].adjs[0] = prev as i32;
+                cells[idx].adjsl[0] = 1;
+                cells[prev].dist[1] = mid_dist;
+                cells[idx].dist[0] = mid_dist;
+                cells[idx].overlap[0] = *area;
+            }
+            cells.push(cell);
+            prev_index = Some(idx);
         }
+
+        // Skip surfaces with no valid layers
+        let Some(last_cell) = prev_index else {
+            continue;
+        };
+        let first_cell = base;
+
+        let surf = Surface {
+            name: name.clone(),
+            construction_name: construction_name.clone(),
+            construction: Some(con_arc.clone()),
+            area: *area,
+            first_cell,
+            last_cell,
+            ext_cell: first_cell,
+            int_cell: last_cell,
+            ext_con_cell: first_cell,
+            int_con_cell: last_cell,
+            ext_rad_cell: first_cell,
+            ext_sky_cell: first_cell,
+            ext_grn_cell: first_cell,
+            user_def_cell: first_cell,
+            ..Surface::default()
+        };
+        surface_states.push(surf);
 
         Ok(Self {
             cells,
             materials: materials_vec,
             constructions: constructions_vec,
-            surface_states,
+            surface: surface_states,
             settings,
             boundary_condition,
         })
@@ -171,7 +143,7 @@ impl HamtManager {
     /// Executes the iterative solver for one time step.
     /// This is a Rust translation of the `CalcHeatBalHAMT` subroutine.
     pub fn calculate_timestep(&mut self) -> Result<(), TrnSysError> {
-        for s_idx in 0..self.surface_states.len() {
+        for s_idx in 0..self.surface.len() {
             let (
                 first_cell,
                 last_cell,
@@ -182,7 +154,7 @@ impl HamtManager {
                 int_con_cell,
                 surface_name,
             ) = {
-                let surface = &self.surface_states[s_idx];
+                let surface = &self.surface[s_idx];
                 (
                     surface.first_cell,
                     surface.last_cell,
@@ -218,9 +190,38 @@ impl HamtManager {
             for itter in 0..=self.settings.max_iterations {
                 // Update moisture-dependent properties for all material cells
                 for cid in first_cell..=last_cell {
-                    if let Some(mat) = self.cells[cid].material.as_ref() {
-                        // Placeholder for property update using material curves.
-                        // self.cells[cid].w_thermal_c = physics::interp(&mat.thermal_conductivity, self.cells[cid].water).0;
+                    if let Some(mat_arc) = self.cells[cid].material.clone() {
+                        // Update base thermo properties
+                        self.cells[cid].density = mat_arc.density;
+                        self.cells[cid].spech = mat_arc.spec_heat;
+
+                        // Sorption isotherm: water content vs RH
+                        let (theta, dtheta_drh) =
+                            physics::interp(&mat_arc.sorption_isotherm, self.cells[cid].rh_p1);
+                        self.cells[cid].water = theta.max(0.0);
+                        self.cells[cid].dwd_phi = dtheta_drh;
+
+                        // Thermal conductivity vs water content (fallback to dry conductivity)
+                        let (lambda, _) =
+                            physics::interp(&mat_arc.thermal_conductivity, self.cells[cid].water);
+                        self.cells[cid].w_thermal_c = if lambda > 0.0 {
+                            lambda
+                        } else {
+                            mat_arc.conductivity
+                        };
+
+                        // Vapor diffusion factor vs RH
+                        let (mu, _) =
+                            physics::interp(&mat_arc.vapor_diffusion, self.cells[cid].rh_p1);
+                        if mu > 0.0 {
+                            self.cells[cid].mu = mu;
+                        }
+
+                        // Liquid transport coefficient vs water content
+                        let (dw, _) = physics::interp(&mat_arc.suction, self.cells[cid].water);
+                        if dw > 0.0 {
+                            self.cells[cid].dw = dw;
+                        }
                     }
                     self.cells[cid].vp =
                         physics::rh_to_vp(self.cells[cid].rh, self.cells[cid].temp);
@@ -323,7 +324,7 @@ impl HamtManager {
             let water_total: f64 = (first_cell..=last_cell)
                 .map(|cid| self.cells[cid].water * self.cells[cid].volume)
                 .sum();
-            let surf_state = &mut self.surface_states[s_idx];
+            let surf_state = &mut self.surface[s_idx];
             surf_state.temp_surf_out = self.cells[ext_cell].temp_p1;
             surf_state.temp_surf_in = self.cells[int_cell].temp_p1;
             surf_state.rh_surf_out = self.cells[ext_cell].rh_p1;

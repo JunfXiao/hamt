@@ -1,5 +1,8 @@
 //! Defines the core `SubCell` struct, representing a finite volume element in the 1D HAMT model.
 
+use super::material::Material;
+use std::sync::Arc;
+
 /// Maximum number of adjacent cells a single cell can have.
 pub const ADJACENT_CELLS_MAX: usize = 6;
 
@@ -9,14 +12,12 @@ pub const ADJACENT_CELLS_MAX: usize = 6;
 /// single finite difference node. The names are kept consistent with the legacy
 /// Fortran and EnergyPlus implementations for easier comparison.
 #[derive(Debug, Clone)]
-pub struct SubCell {
+pub struct Cell {
     //
     // ========== Constant Properties (set at initialization) ==========
     //
     /// Shared reference to the material; `None` indicates a virtual/boundary cell.
-    pub material: Option<std::sync::Arc<crate::hamt::material::Material>>,
-    /// ID of the surface (construction) this cell belongs to.
-    pub s_id: i32,
+    pub material: Option<Arc<Material>>,
     /// The volume of the cell [m³].
     pub volume: f64,
     /// The geometric center of the cell along the primary axis [m].
@@ -90,7 +91,7 @@ pub struct SubCell {
     pub rh_p: f64,
 }
 
-impl Default for SubCell {
+impl Default for Cell {
     /// Creates a new `SubCell` with default "invalid" or zeroed values.
     fn default() -> Self {
         Self {
