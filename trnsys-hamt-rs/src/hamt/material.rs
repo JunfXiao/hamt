@@ -99,16 +99,18 @@ impl Material {
 }
 
 /// Represents a construction, which is an ordered sequence of material layers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Construction {
     pub name: String,
     /// An ordered list of material names that make up the construction.
-    pub layers: Vec<Arc<Material>>,
-    
+    pub layer_names: Vec<String>,
 }
 
 impl Construction {
-    pub fn new(name: String, layers: Vec<Arc<Material>>) -> Self {
-        Self { name, layers }
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            layer_names: Vec::new(),
+        }
     }
 }

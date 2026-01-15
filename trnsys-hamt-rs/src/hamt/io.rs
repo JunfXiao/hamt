@@ -39,8 +39,6 @@ pub fn load_hamt_data<P: AsRef<Path>>(
             continue;
         }
 
-        // This is a simplified parser. A more robust solution would use a dedicated
-        // CSV parsing library and handle multi-line records properly.
         let parts: Vec<&str> = record.split(',').map(|s| s.trim()).collect();
         let keyword = parts[0];
 
@@ -49,36 +47,45 @@ pub fn load_hamt_data<P: AsRef<Path>>(
                 if let Some(mat) = current_material.take() {
                     materials.insert(mat.name.clone(), mat);
                 }
-                let name = parts[1].to_string();
+                let name = parts.get(1).map(|s| s.to_string()).ok_or_else(|| {
+                    TrnSysError::HamtError("Material keyword found with no name".to_string())
+                })?;
                 let mat = Material::new(name);
-                // The Fortran code reads subsequent lines for the material data.
-                // This simplified parser assumes a more direct format for now.
-                // A real implementation needs to handle the multi-line parsing state.
                 current_material = Some(mat);
             }
             "Construction" => {
                 if let Some(mat) = current_material.take() {
                     materials.insert(mat.name.clone(), mat);
                 }
-                let name = parts[1].to_string();
-                let mut con = Construction::new(name.clone());
-                let num_layers: usize = parts[2].parse().map_err(|e| {
-                    TrnSysError::HamtError(format!("invalid layer count '{}': {e}", parts[2]))
+                let name = parts.get(1).map(|s| s.to_string()).ok_or_else(|| {
+                    TrnSysError::HamtError("Construction keyword found with no name".to_string())
                 })?;
-                con.layer_names = parts[3..3 + num_layers]
+                let num_layers: usize =
+                    parts.get(2).and_then(|s| s.parse().ok()).ok_or_else(|| {
+                        TrnSysError::HamtError(format!(
+                            "Invalid or missing layer count for Construction '{}'",
+                            name
+                        ))
+                    })?;
+
+                if parts.len() < 3 + num_layers {
+                    return Err(TrnSysError::HamtError(format!(
+                        "Construction '{}' has {} layers but not enough names provided",
+                        name, num_layers
+                    )));
+                }
+
+                let layer_names = parts[3..3 + num_layers]
                     .iter()
                     .map(|s| s.to_string())
                     .collect();
+
+                let mut con = Construction::new(name.clone());
+                con.layer_names = layer_names;
                 constructions.insert(name, con);
             }
             // In a full implementation, we would handle all the
             // "MaterialProperty:HeatAndMoistureTransfer:*" keywords here.
-            // For example:
-            // "MaterialProperty:HeatAndMoistureTransfer:SorptionIsotherm" => {
-            //     if let Some(mat) = &mut current_material {
-            //         // parse the isotherm data and assign it to mat.sorption_isotherm
-            //     }
-            // }
             _ => {
                 // TODO: Handle other properties or ignore.
             }

@@ -1,4 +1,4 @@
-//! Defines the core `SubCell` struct, representing a finite volume element in the 1D HAMT model.
+//! Defines the core `Cell` struct, representing a finite volume element in the 1D HAMT model.
 
 use super::material::Material;
 use std::sync::Arc;
@@ -11,7 +11,7 @@ pub const ADJACENT_CELLS_MAX: usize = 6;
 /// This struct holds all the geometric, material, and state information for a
 /// single finite difference node. The names are kept consistent with the legacy
 /// Fortran and EnergyPlus implementations for easier comparison.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Cell {
     //
     // ========== Constant Properties (set at initialization) ==========
@@ -91,40 +91,33 @@ pub struct Cell {
     pub rh_p: f64,
 }
 
-impl Default for Cell {
-    /// Creates a new `SubCell` with default "invalid" or zeroed values.
-    fn default() -> Self {
-        Self {
-            material: None,
-            s_id: -1,
-            volume: 0.0,
-            origin: [0.0; 3],
-            length: [0.0; 3],
-            overlap: [0.0; ADJACENT_CELLS_MAX],
-            dist: [0.0; ADJACENT_CELLS_MAX],
-            adjs: [-1; ADJACENT_CELLS_MAX],
-            adjsl: [-1; ADJACENT_CELLS_MAX],
-            density: 0.0,
-            spech: 0.0,
-            mu: -1.0,
-            w_thermal_c: 0.0,
-            dwd_phi: -1.0,
-            dw: -1.0,
-            htc: -1.0,
-            vtc: -1.0,
-            q_adds: 0.0,
-            temp: 20.0,
-            temp_p1: 20.0,
-            temp_p2: 20.0,
-            rh: 0.5,
-            rh_p1: 0.5,
-            rh_p2: 0.5,
-            vp: 0.0,
-            vp_p1: 0.0,
-            vp_sat: 0.0,
-            water: 0.0,
-            w_report: 0.0,
-            rh_p: 50.0,
+impl Cell {
+    /// Creates a new `Cell` for a boundary condition.
+    pub fn new_boundary(runor: f64, length: f64) -> Self {
+        let mut cell = Self::default();
+        cell.length[0] = length;
+        cell.origin[0] = length / 2.0 + runor;
+        cell
+    }
+
+    /// Creates a new `Cell` from a material layer.
+    pub fn new_material(
+        material: Arc<Material>,
+        length: f64,
+        origin: f64,
+        volume: f64,
+        surface_area: f64,
+    ) -> Self {
+        let mut cell = Self::default();
+        cell.material = Some(material.clone());
+        cell.density = material.density;
+        cell.spech = material.spec_heat;
+        cell.length[0] = length;
+        cell.origin[0] = origin;
+        cell.volume = volume;
+        for i in 0..ADJACENT_CELLS_MAX {
+            cell.overlap[i] = surface_area;
         }
+        cell
     }
 }
