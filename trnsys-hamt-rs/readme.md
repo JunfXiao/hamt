@@ -73,11 +73,11 @@ For a detailed breakdown, see [Data Storage Requirements](./doc/calculation_step
 The interface is identical to the legacy Fortran `Type395_mh.f90`.
 
 **Parameters:**
-1.  Number of wall layers
+1.  Number of wall layers (No Actual Use...)
 2.  Surface area (m²)
 3.  Logical unit (LU) for HAMT data file
 4.  *(Unused)*
-5.  Depth for user-defined node output (m)
+5.  Depth of the user-defined node for additional heat gain/loss (m)
 6.  Flag to enable/disable report file writing
 7.  Output interval for report files (hours)
 8.  Output file ID string

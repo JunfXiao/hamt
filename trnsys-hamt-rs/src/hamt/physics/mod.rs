@@ -1,6 +1,7 @@
 //! Contains pure physics and psychrometric functions for the HAMT model.
 
 use crate::hamt::material::Curve;
+pub mod geometry;
 
 /// Universal gas constant for water vapor [J/kg·K].
 pub const R_V: f64 = 461.52;

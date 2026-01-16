@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use crate::hamt::hamt_manager::HamtManager;
 use crate::storage::StoreProvider;
 use crate::trnsys::iteration_mode::IterationMode;
@@ -25,6 +27,7 @@ pub(crate) struct TrnSysState<D = (), S = ()> {
     // pub(crate) variable_store: Vec<TrnSysValue>,
     pub(crate) dynamic_store: Option<Box<dyn StoreProvider<D>>>,
     pub(crate) static_store: Option<Box<dyn StoreProvider<S>>>,
+
     pub hamt_manager: Option<HamtManager>,
 }
 
@@ -82,5 +85,9 @@ impl TrnSysState {
                 value: get_output_value(i),
             })
             .collect();
+    }
+
+    pub fn get_hamt_mgr(&mut self) -> HamtManager {
+        self.hamt_manager.expect("HAMT Manager shouldn't be empty!")
     }
 }

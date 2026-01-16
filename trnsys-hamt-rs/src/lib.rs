@@ -46,7 +46,7 @@ fn entrance() {
     }
 }
 
-fn main(mut state: &mut TrnSysState) -> Result<(), TrnSysError> {
+fn main(mut state: &mut TrnSysState) -> Result<()> {
     let type_instance = TRNSYS_TYPE_INSTANCE.clone();
 
     if is_version_signing_time() {

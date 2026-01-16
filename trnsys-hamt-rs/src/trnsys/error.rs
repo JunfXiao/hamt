@@ -16,6 +16,8 @@ pub enum TrnSysError {
     InputError(#[from] InputError),
     #[error("IO Error: {0}")]
     IoError(#[from] io::Error),
+    #[error("Cannot Unlock Variable: {0}")]
+    LockError(String),
     #[error("Cannot convert {param}: {message}")]
     ConversionError { param: String, message: String },
     #[error("HAMT error: {0}")]
@@ -35,6 +37,9 @@ impl TrnSysErrorHandler for TrnSysError {
             }
             TrnSysError::GeneralError(msg) => {
                 error!("General TRNSYS error: {}", msg);
+            }
+            TrnSysError::LockError(var_name) => {
+                error!("Lock error on variable: {}", var_name);
             }
             TrnSysError::ConversionError { param, message } => {
                 error!("Conversion error on {}: {}", param, message);
@@ -56,6 +61,16 @@ pub enum InputError {
     BadInput { index: i32, message: String },
     #[error("Bad Parameter at {index}: {message}")]
     BadParameter { index: i32, message: String },
+    #[error("Duplicate {item} found: {name}")]
+    DuplicateItem { item: String, name: String },
+    #[error("Missing {item}: {name}")]
+    MissingItem { item: String, name: String },
+    #[error("Wrong {item} definition in \"{name}\": {reason}")]
+    WrongDefinition {
+        item: String,
+        name: String,
+        reason: String,
+    },
 }
 
 impl TrnSysErrorHandler for InputError {
@@ -66,6 +81,10 @@ impl TrnSysErrorHandler for InputError {
             }
             InputError::BadParameter { index, message } => {
                 found_bad_parameter(index.clone(), Severity::Fatal, &format!("{:?}", self));
+            }
+
+            err => {
+                found_bad_parameter(0, Severity::Fatal, &format!("{}", err));
             }
         }
     }

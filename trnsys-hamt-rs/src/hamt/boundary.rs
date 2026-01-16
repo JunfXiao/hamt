@@ -11,6 +11,9 @@ pub struct BoundaryCondition {
     pub rh_inside_air: f64,
     /// Pressure of the air [Pa].
     pub pressure_air: f64,
+
+    // Placeholder for future boundary conditions
+    pub is_raining: bool,
 }
 
 impl Default for BoundaryCondition {
@@ -21,6 +24,7 @@ impl Default for BoundaryCondition {
             rh_outside_air: 0.5,
             rh_inside_air: 0.5,
             pressure_air: 101325.0,
+            is_raining: false,
         }
     }
 }
@@ -39,6 +43,7 @@ impl BoundaryCondition {
             rh_outside_air,
             rh_inside_air,
             pressure_air,
+            is_raining: false,
         }
     }
 }
