@@ -120,7 +120,7 @@ pub fn wvdc(temp_celsius: f64, amb_pressure: f64) -> f64 {
 /// * `rho_vapor` - Vapor density in air [kg/m³].
 /// # Returns
 /// * `rh` - Relative humidity [0-1].
-pub fn psy_rh_fn_tdb_rhov(t_db_celsius: f64, rho_vapor: f64) -> f64 {
+pub fn rh_from_t_vd(t_db_celsius: f64, rho_vapor: f64) -> f64 {
     if rho_vapor <= 0.0 {
         return 0.0;
     }
@@ -136,7 +136,7 @@ pub fn psy_rh_fn_tdb_rhov(t_db_celsius: f64, rho_vapor: f64) -> f64 {
 /// # Arguments
 /// * `t_db_celsius` - Dry-bulb temperature [°C].
 /// * `rh` - Relative humidity [0-1].
-pub fn psy_rhov_fn_tdb_rh(t_db_celsius: f64, rh: f64) -> f64 {
+pub fn vd_from_t_rh(t_db_celsius: f64, rh: f64) -> f64 {
     let p_sat = psy_psat_fn_temp(t_db_celsius);
     (p_sat * rh) / (R_V * (t_db_celsius + KELVIN_CONV))
 }

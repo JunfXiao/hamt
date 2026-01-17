@@ -22,8 +22,11 @@ pub struct HamtManager {
     /// Construction for the surface.
     pub construction: Arc<Construction>,
 
+    /// The surface's state of last converged time step (t-1).
     pub surface_prev: Surface,
+    /// The surface's state of current time step (t) in **last iteration**.
     pub surface_curr: Surface,
+    /// The surface's state of current time step (t) in **current iteration**.
     pub surface_next: Surface,
 
     /// Boundary conditions for the simulation.
@@ -70,8 +73,8 @@ impl HamtManager {
         self.surface_next.calculate_timestep(
             &self.settings,
             &self.boundary_condition,
-            &self.surface_prev.cells,
-            &self.surface_curr.cells,
+            &self.surface_prev,
+            &self.surface_curr,
         )?;
 
         // iteration-level rotation: curr <-> next
@@ -84,7 +87,8 @@ impl HamtManager {
         // Current timestep ends. Now, `surface_next` becomes `surface_prev`.
         mem::swap(&mut self.surface_prev, &mut self.surface_next);
         // `surface_curr` should have the value of the previous timestep's `surface_next`.
-        self.surface_curr.override_cell_state(&self.surface_prev);
+        self.surface_curr
+            .override_cell_state(&self.surface_prev.cells);
 
         Ok(())
     }

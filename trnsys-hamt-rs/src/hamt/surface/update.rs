@@ -10,9 +10,12 @@ impl Surface {
         &mut self,
         settings: &HamtSettings,
         bc: &BoundaryCondition,
-        _surface_prev: &ArcArray3<Cell>,
-        surface_curr: &ArcArray3<Cell>,
+        surface_prev: &Surface,
+        surface_curr: &Surface,
     ) -> Result<bool> {
+        let surface_prev_cells = surface_prev.cells;
+        let surface_curr_cells = surface_curr.cells;
+
         // TODO: Recheck
         let dt = settings.timestep;
         let dims = self.cells.raw_dim();
@@ -21,9 +24,8 @@ impl Surface {
         assert_eq!(dims[2], 1, "Only 1D surfaces are supported");
 
         // 0) Copy current iteration state into the writable buffer
-        for (cell_next, cell_src) in self.cells.iter_mut().zip(surface_curr.iter()) {
-            *cell_next = cell_src.clone();
-        }
+        // TODO: Is this necessary?
+        self.override_cell_state(&surface_curr_cells);
 
         // 1) Apply boundary conditions to boundary cells in the working (next) buffer
         // Exterior
@@ -36,8 +38,8 @@ impl Surface {
                 format!("Cell index {:?} of surface_next is out of bounds", idx)
             })?;
             cell.cell_temp = bc.temp_outside_air;
-            let rho_vapor = physics::psy_rhov_fn_tdb_rh(bc.temp_outside_air, bc.rh_outside_air);
-            cell.cell_rh = physics::psy_rh_fn_tdb_rhov(bc.temp_outside_air, rho_vapor);
+            let rho_vapor = physics::vd_from_t_rh(bc.temp_outside_air, bc.rh_outside_air);
+            cell.cell_rh = physics::rh_from_t_vd(bc.temp_outside_air, rho_vapor);
         }
 
         // Interior
@@ -50,8 +52,8 @@ impl Surface {
                 format!("Cell index {:?} of surface_next is out of bounds", idx)
             })?;
             cell.cell_temp = bc.temp_inside_air;
-            let rho_vapor = physics::psy_rhov_fn_tdb_rh(bc.temp_inside_air, bc.rh_inside_air);
-            cell.cell_rh = physics::psy_rh_fn_tdb_rhov(bc.temp_inside_air, rho_vapor);
+            let rho_vapor = physics::vd_from_t_rh(bc.temp_inside_air, bc.rh_inside_air);
+            cell.cell_rh = physics::rh_from_t_vd(bc.temp_inside_air, rho_vapor);
         }
 
         // Flattened scratch arrays (previous iteration state for the nonlinear solver)
@@ -313,11 +315,11 @@ impl Surface {
             };
         }
 
-        Ok(converged && self.check_convergence(surface_curr, &self.cells, settings))
+        Ok(converged && self.check_convergence(surface_curr_cells, &self.cells, settings))
     }
 
-    pub fn override_cell_state(&mut self, ref_surface: &Surface) {
-        for (cell_curr, cell_ref) in self.cells.iter_mut().zip(&ref_surface.cells) {
+    pub fn override_cell_state(&mut self, ref_cells: &ArcArray3<Cell>) {
+        for (cell_curr, cell_ref) in self.cells.iter_mut().zip(ref_cells) {
             cell_curr.cell_temp = cell_ref.cell_temp;
             cell_curr.cell_rh = cell_ref.cell_rh;
         }
