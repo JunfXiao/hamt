@@ -1,6 +1,11 @@
+use anyhow::Ok;
 use ndarray::ArcArray3;
+use tracing::debug;
 
-use crate::hamt::cell::{BoundaryLocation, Cell, CellType};
+use crate::hamt::cell::{BoundaryLocation, Cell, CellType, ADJACENT_CELLS_MAX};
+use crate::hamt::{boundary::BoundaryCondition, hamt_manager::HamtSettings, physics};
+use crate::trnsys::error::TrnSysError;
+use anyhow::{Context, Result};
 use std::{collections::HashMap, sync::Arc};
 
 /// Snapshot of on-demand surface reporting values.
@@ -21,7 +26,7 @@ pub struct SurfaceReport {
 }
 
 /// Holds geometry, cells, and utilities for a single surface.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Surface {
     /// Surface name.
     pub name: String,
@@ -53,7 +58,10 @@ impl Surface {
             construction_name,
             area,
             cells,
-            ..Default::default()
+            cells_idx_map: HashMap::new(),
+            ext_vtc: None,
+            int_vtc: None,
+            user_defined_depth: None,
         };
         surface.init_cells_idx_map();
         surface
@@ -65,7 +73,7 @@ impl Surface {
             let cell_type = cell.cell_type.clone();
             self.cells_idx_map
                 .entry(cell_type)
-                .or_insert(Vec::new())
+                .or_insert(Vec::with_capacity(self.cells.len())) // For performance
                 .push([x, y, z]);
         }
     }
@@ -80,19 +88,35 @@ impl Surface {
     }
 
     /// Compute all reporting values on demand.
-    pub fn report(&self) -> SurfaceReport {
-        let temp_surf_out = self.avg_boundary(BoundaryLocation::Exterior, |c| c.cell_temp);
-        let temp_surf_in = self.avg_boundary(BoundaryLocation::Interior, |c| c.cell_temp);
-        let rh_surf_out = self.avg_boundary(BoundaryLocation::Exterior, |c| c.cell_rh);
-        let rh_surf_in = self.avg_boundary(BoundaryLocation::Interior, |c| c.cell_rh);
+    pub fn report(&self) -> Result<SurfaceReport> {
+        let temp_surf_out = self
+            .avg_boundary(BoundaryLocation::Exterior, |c| c.cell_temp)
+            .with_context(|| "Failed to calculate exterior surface temperature")?;
+        let temp_surf_in = self
+            .avg_boundary(BoundaryLocation::Interior, |c| c.cell_temp)
+            .with_context(|| "Failed to calculate interior surface temperature")?;
+        let rh_surf_out = self
+            .avg_boundary(BoundaryLocation::Exterior, |c| c.cell_rh)
+            .with_context(|| "Failed to calculate exterior surface relative humidity")?;
+        let rh_surf_in = self
+            .avg_boundary(BoundaryLocation::Interior, |c| c.cell_rh)
+            .with_context(|| "Failed to calculate interior surface relative humidity")?;
 
         let (temp_surf_user_def, rh_surf_user_def, water_surf_user_def) =
             self.user_defined_values();
 
-        let q_surf_ext = self.heat_flux(BoundaryLocation::Exterior);
-        let q_surf_int = self.heat_flux(BoundaryLocation::Interior);
-        let m_surf_ext = self.moisture_flux(BoundaryLocation::Exterior);
-        let m_surf_int = self.moisture_flux(BoundaryLocation::Interior);
+        let q_surf_ext = self
+            .heat_flux(BoundaryLocation::Exterior)
+            .with_context(|| "Failed to calculate exterior surface heat flux")?;
+        let q_surf_int = self
+            .heat_flux(BoundaryLocation::Interior)
+            .with_context(|| "Failed to calculate interior surface heat flux")?;
+        let m_surf_ext = self
+            .moisture_flux(BoundaryLocation::Exterior)
+            .with_context(|| "Failed to calculate exterior surface moisture flux")?;
+        let m_surf_int = self
+            .moisture_flux(BoundaryLocation::Interior)
+            .with_context(|| "Failed to calculate interior surface moisture flux")?;
 
         let water_total = self
             .cells_idx_map
@@ -104,11 +128,11 @@ impl Surface {
             .flatten()
             .map(|[x, y, z]| {
                 let cell = &self.cells[[*x, *y, *z]];
-                cell.water * cell.volume
+                cell.volumetric_water * cell.volume
             })
             .sum();
 
-        SurfaceReport {
+        Ok(SurfaceReport {
             temp_surf_out,
             temp_surf_in,
             rh_surf_out,
@@ -121,36 +145,41 @@ impl Surface {
             m_surf_ext,
             m_surf_int,
             water_total,
-        }
+        })
     }
 
     /// Find the boundary cells for a given location.
-    fn boundary_cells(&self, location: BoundaryLocation) -> impl Iterator<Item = [usize; 3]> + '_ {
+    fn boundary_cells(&self, location: BoundaryLocation) -> impl Iterator<Item = &[usize; 3]> + '_ {
         self.cells_idx_map
             .iter()
             .filter(
                 move |(ctype, _)| matches!(ctype, CellType::Boundary(_, loc) if *loc == location),
             )
-            .flat_map(|(_, idxs)| idxs.clone())
+            .flat_map(|(_, idxs)| idxs)
     }
 
     /// Calculates the average value of a function over the boundary cells of a surface.
     /// The "average value" is calculated as the sum of the function values divided by the total area of the boundary cells perpendicular to the surface depth direction (x axis).
-    fn avg_boundary<F>(&self, location: BoundaryLocation, f: F) -> f64
+    fn avg_boundary<F>(&self, location: BoundaryLocation, f: F) -> Result<f64>
     where
         F: Fn(&Cell) -> f64,
     {
         let mut sum = 0.0;
         let mut sum_area = 0.0;
-        for [x, y, z] in self.boundary_cells(location) {
-            let cell = &self.cells[[x, y, z]];
-            sum += f(cell);
-            sum_area += cell.length.area_along(0);
+        {
+            for idx in self.boundary_cells(location) {
+                let cell = self
+                    .cells
+                    .get(*idx)
+                    .with_context(|| format!("Cell index {:?} is invalid", idx))?;
+                sum += f(cell);
+                sum_area += cell.size.area_along(0);
+            }
         }
         if sum_area > 0.0 {
-            sum / sum_area
+            Ok(sum / sum_area)
         } else {
-            0.0
+            Ok(0.0)
         }
     }
 
@@ -181,7 +210,7 @@ impl Surface {
 
         if let Some(([x, y, z], _)) = best {
             let cell = &self.cells[[x, y, z]];
-            (cell.cell_temp, cell.cell_rh, cell.water)
+            (cell.cell_temp, cell.cell_rh, cell.volumetric_water)
         } else {
             (0.0, 0.0, 0.0)
         }
@@ -214,35 +243,43 @@ impl Surface {
     ///
     /// ## Output
     /// - `avg_flux`: average heat flux across the surface boundary [W/m²].
-    fn heat_flux(&self, location: BoundaryLocation) -> f64 {
+    fn heat_flux(&self, location: BoundaryLocation) -> Result<f64> {
         // Total Heat Flux in W
         let mut total_flux = 0.0;
         let mut total_area = 0.0;
 
         for idx in self.boundary_cells(location.clone()) {
-            if let Some(n_idx) = self.neighbor_toward_center(idx, &location) {
-                let b = &self.cells[idx];
-                let n = &self.cells[n_idx];
+            if let Some(n_idx) = self.neighbor_toward_center(*idx, &location) {
+                let b = self
+                    .cells
+                    .get(*idx)
+                    .with_context(|| format!("Failed to get boundary cell {:?}", idx))?;
+                let n = self.cells.get(n_idx).with_context(|| {
+                    format!(
+                        "Failed to get neighbor cell {:?} for boundary cell {:?}",
+                        n_idx, idx
+                    )
+                })?;
                 let delta_t = b.cell_temp - n.cell_temp;
 
                 // Prefer boundary HTC, fallback to conduction
                 let flux_w_m2 = if b.htc > 0.0 {
                     b.htc * delta_t
-                } else if b.w_thermal_c > 0.0 && b.length.x() > 0.0 {
-                    (b.w_thermal_c / b.length.x()) * delta_t
+                } else if b.w_thermal_c > 0.0 && b.size.x() > 0.0 {
+                    (b.w_thermal_c / b.size.x()) * delta_t
                 } else {
                     0.0
                 };
-                let cell_area = b.length.area_along(0);
+                let cell_area = b.size.area_along(0);
                 total_flux += flux_w_m2 * cell_area;
                 total_area += cell_area;
             }
         }
 
         if total_area > 0.0 {
-            total_flux / total_area
+            Ok(total_flux / total_area)
         } else {
-            0.0
+            Ok(0.0)
         }
     }
 
@@ -259,16 +296,22 @@ impl Surface {
     ///
     /// ## Output
     /// - `avg_flux`: average moisture flux across the surface boundary [kg/(m²·s)].
-    fn moisture_flux(&self, location: BoundaryLocation) -> f64 {
+    fn moisture_flux(&self, location: BoundaryLocation) -> Result<f64> {
         // Accumulated flux in [kg/s]
         let mut accum_flux = 0.0;
         let mut total_area = 0.0;
 
         for idx in self.boundary_cells(location.clone()) {
-            if let Some(n_idx) = self.neighbor_toward_center(idx, &location) {
-                let b = &self.cells[idx];
-                let n = &self.cells[n_idx];
-                let delta_vp = b.vp - n.vp;
+            let b = self
+                .cells
+                .get(*idx)
+                .with_context(|| format!("Cannot get boundary cell index {:?}", idx))?;
+            if let Some(n_idx) = self.neighbor_toward_center(*idx, &location) {
+                let n = self
+                    .cells
+                    .get(n_idx)
+                    .with_context(|| format!("Cannot get neighbor cell index {:?}", n_idx))?;
+                let delta_vp = b.cell_vp - n.cell_vp;
 
                 let flux = if let Some(vtc) = match &location {
                     BoundaryLocation::Exterior => self.ext_vtc.or(Some(b.vtc)),
@@ -280,7 +323,7 @@ impl Surface {
                     0.0
                 };
 
-                let cell_area = b.length.area_along(0);
+                let cell_area = b.size.area_along(0);
 
                 accum_flux += flux * cell_area;
                 total_area += cell_area;
@@ -288,9 +331,126 @@ impl Surface {
         }
 
         if total_area > 0.0 {
-            accum_flux / total_area
+            Ok(accum_flux / total_area)
+        } else {
+            Ok(0.0)
+        }
+    }
+
+    /// Executes a single-timestep update assuming `self` is the writable `surface_next`.
+    /// Reads from `surface_prev` (t-1) and `surface_curr` (current iteration state).
+    ///
+    /// Returns `true` if no further iterations are needed and the convergence criteria is met.
+    pub fn calculate_timestep(
+        &mut self,
+        settings: &HamtSettings,
+        bc: &BoundaryCondition,
+        _surface_prev: &ArcArray3<Cell>,
+        surface_curr: &ArcArray3<Cell>,
+    ) -> Result<bool> {
+        // Collect indices first to avoid simultaneous immutable/mutable borrows of `self`.
+        let exterior_idxs: Vec<[usize; 3]> = self
+            .boundary_cells(BoundaryLocation::Exterior)
+            .map(|v| v.to_owned())
+            .collect();
+        for idx in exterior_idxs {
+            let cell = self.cells.get_mut(idx).with_context(|| {
+                format!("Cell index {:?} of surface_next is out of bounds", idx)
+            })?;
+
+            cell.cell_temp = bc.temp_outside_air;
+
+            let rho_vapor = physics::psy_rhov_fn_tdb_rh(bc.temp_outside_air, bc.rh_outside_air);
+
+            cell.cell_rh = physics::psy_rh_fn_tdb_rhov(bc.temp_outside_air, rho_vapor);
+        }
+
+        let interior_idxs: Vec<[usize; 3]> = self
+            .boundary_cells(BoundaryLocation::Interior)
+            .map(|v| v.to_owned())
+            .collect();
+        for idx in interior_idxs {
+            let cell = self.cells.get_mut(idx).with_context(|| {
+                format!("Cell index {:?} of surface_next is out of bounds", idx)
+            })?;
+
+            cell.cell_temp = bc.temp_inside_air;
+
+            let rho_vapor = physics::psy_rhov_fn_tdb_rh(bc.temp_inside_air, bc.rh_inside_air);
+
+            cell.cell_rh = physics::psy_rh_fn_tdb_rhov(bc.temp_inside_air, rho_vapor);
+        }
+
+        // 2) Placeholder for full coupled heat/moisture solve (to be added)
+
+        //    This should iterate and update `self.cells` using `surface_curr` and material props.
+
+        // 3) Convergence check (next vs curr). Caller can use returned deltas if needed.
+
+        Ok(self.check_convergence(surface_curr, &self.cells, settings))
+    }
+
+    /// Calculates thermal and vapor resistances for a cell's face.
+    fn calculate_resistances(&self, cell: &Cell, face_idx: usize, pressure: f64) -> (f64, f64) {
+        let overlap = cell.overlap[face_idx];
+        let dist = cell.dist[face_idx];
+
+        let therm_r = if cell.htc > 0.0 {
+            1.0 / (overlap * cell.htc)
+        } else if cell.material.is_some() && cell.w_thermal_c > 0.0 {
+            dist / (overlap * cell.w_thermal_c)
         } else {
             0.0
+        };
+
+        let vapor_r = if cell.vtc > 0.0 {
+            1.0 / (overlap * cell.vtc)
+        } else if cell.material.is_some() {
+            let wvdc = physics::wvdc(cell.cell_temp, pressure);
+            (dist * cell.mu) / (overlap * wvdc)
+        } else {
+            0.0
+        };
+
+        (therm_r, vapor_r)
+    }
+
+    /// Checks the maximum change in temperature and RH across cells for convergence.
+    pub fn check_convergence(
+        &self,
+        curr: &ArcArray3<Cell>,
+        next: &ArcArray3<Cell>,
+        settings: &HamtSettings,
+    ) -> bool {
+        for (((x, y, z), cell_curr), cell_next) in curr.indexed_iter().zip(next) {
+            let delta_t = (cell_next.cell_temp - cell_curr.cell_temp).abs();
+
+            if delta_t > settings.temp_convergence_tolerance {
+                debug!(
+                    "Temperature change at ({}, {}, {}) exceeded tolerance: {}",
+                    x, y, z, delta_t
+                );
+                return false;
+            }
+
+            let delta_rh = cell_next.cell_rh - cell_curr.cell_rh;
+
+            if delta_rh.abs() > settings.rh_convergence_tolerance {
+                debug!(
+                    "Relative humidity change at ({}, {}, {}) exceeded tolerance: {}",
+                    x, y, z, delta_rh
+                );
+                return false;
+            }
+        }
+
+        true
+    }
+
+    pub fn override_cell_state(&mut self, ref_surface: &Surface) {
+        for (cell_curr, cell_ref) in self.cells.iter_mut().zip(&ref_surface.cells) {
+            cell_curr.cell_temp = cell_ref.cell_temp;
+            cell_curr.cell_rh = cell_ref.cell_rh;
         }
     }
 }

@@ -118,6 +118,8 @@ pub fn wvdc(temp_celsius: f64, amb_pressure: f64) -> f64 {
 /// # Arguments
 /// * `t_db_celsius` - Dry-bulb temperature [°C].
 /// * `rho_vapor` - Vapor density in air [kg/m³].
+/// # Returns
+/// * `rh` - Relative humidity [0-1].
 pub fn psy_rh_fn_tdb_rhov(t_db_celsius: f64, rho_vapor: f64) -> f64 {
     if rho_vapor <= 0.0 {
         return 0.0;

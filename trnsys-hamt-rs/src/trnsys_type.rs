@@ -93,10 +93,9 @@ impl TrnSysType {
                     message: "Output File ID must be an integer".to_string(),
                 })?;
 
-        let settings = HamtSettings::default();
-
         let manager = HamtManager::new(
-            settings,
+            None,
+            None,
             construction,
             format!("S256_{}", get_current_unit()),
             surface_area,
@@ -119,11 +118,11 @@ impl TrnSysType {
     /// Called at each TRNSYS call within a timestep.
     pub fn iterate(&self, state: &mut TrnSysState) -> Result<Vec<TrnSysValue>> {
         if let Some(manager) = &mut state.hamt_manager {
-            manager.calculate_timestep()?;
+            manager.iter_in_timestep()?;
 
             // Map outputs
-            if let Some(surface_state) = manager.surface_curr.get(0) {
-                let report = surface_state.report();
+            {
+                let report = manager.surface_next.report()?;
                 let outputs = vec![
                     report.temp_surf_out,
                     report.temp_surf_in,
@@ -150,10 +149,12 @@ impl TrnSysType {
 
     /// End of timestep.
     pub fn end_of_timestep(&self, state: &mut TrnSysState) -> Result<()> {
-        if let Some(manager) = &mut state.hamt_manager {
-            manager.update_history();
-        }
-        Ok(())
+        state
+            .hamt_manager
+            .as_mut()
+            .with_context(|| "End of timestep")?
+            .tick_timestep()
+            .with_context(|| "Ticking to next timestep")
     }
 
     /// Default outputs used during start time before real iteration.

@@ -137,17 +137,6 @@ pub struct Material {
     /// Initial temperature for cells of this material [°C].
     pub initial_temp: f64,
 
-    /// Initial relative humidity for cells of this material [0-1].
-    pub initial_rh: f64,
-
-    /// Characteristic size for cell division [m].
-    pub div_size: f64,
-
-    /// Minimum number of divisions for a layer of this material.
-    pub div_min: i32,
-
-    /// Maximum number of divisions for a layer of this material.
-    pub div_max: i32,
 }
 
 impl PartialEq for Material {
@@ -183,10 +172,6 @@ impl Default for Material {
             vapor_diffusion_resistance: Curve::new(),
             thermal_conductivity: Curve::new(),
             initial_temp: 20.0,
-            initial_rh: 0.5,
-            div_size: 0.005,
-            div_min: 3,
-            div_max: 50,
         }
     }
 }
@@ -197,6 +182,16 @@ impl Material {
             name,
             ..Default::default()
         }
+    }
+
+    pub fn initiaal_water_density(&self) -> f64 {
+        self.initial_water_content * self.density
+    }
+
+    pub fn initial_rh(&self) -> f64 {
+        self.sorption_isotherm
+            .interpolate(self.initiaal_water_density())
+            .0
     }
 }
 

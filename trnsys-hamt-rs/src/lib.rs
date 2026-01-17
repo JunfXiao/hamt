@@ -2,6 +2,7 @@ use crate::logging::init_tracing;
 use crate::trnsys::error::{TrnSysError, TrnSysErrorHandler};
 use crate::trnsys::logging::cleanup_tracing;
 use crate::trnsys_type::TrnSysType;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::ops::DerefMut;
 use std::sync::{Arc, LazyLock, RwLock};
@@ -40,8 +41,8 @@ fn entrance() {
     match main(state.deref_mut()) {
         Ok(_) => {}
         Err(e) => {
-            e.handle_in_trnsys(state.deref_mut());
             error!("{:?}", e);
+            e.handle_in_trnsys(state.deref_mut());
         }
     }
 }

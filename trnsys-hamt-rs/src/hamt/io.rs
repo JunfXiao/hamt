@@ -363,7 +363,9 @@ fn parse_idf_content(content: &str) -> Result<HashMap<(HamtProperty, String), Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
+    #[traced_test]
     #[test]
     fn test_parse_idf_content() {
         let idf_content = include_str!("../../fixtures/idf_example.idf");
@@ -372,5 +374,7 @@ mod tests {
         std::fs::write(&temp_path, idf_content).unwrap();
         let library = load_hamt_data(&temp_path).unwrap();
         assert!(library.get_material("05_AGEPAN_THD_jr_0.035").is_ok());
+
+        info!("Library: {:#?}", library)
     }
 }

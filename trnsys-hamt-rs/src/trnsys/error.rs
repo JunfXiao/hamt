@@ -54,6 +54,16 @@ impl TrnSysErrorHandler for TrnSysError {
     }
 }
 
+impl TrnSysErrorHandler for anyhow::Error {
+    fn handle_in_trnsys(&self, state: &TrnSysState) {
+        if let Some(trnsys_err) = self.downcast_ref::<TrnSysError>() {
+            trnsys_err.handle_in_trnsys(state);
+        } else {
+            error!("Unhandled Application Error: {:?}", self);
+        }
+    }
+}
+
 /// Input Error for TRNSYS
 #[derive(Error, Debug)]
 pub enum InputError {

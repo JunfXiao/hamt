@@ -86,8 +86,4 @@ impl TrnSysState {
             })
             .collect();
     }
-
-    pub fn get_hamt_mgr(&mut self) -> HamtManager {
-        self.hamt_manager.expect("HAMT Manager shouldn't be empty!")
-    }
 }

@@ -1,6 +1,10 @@
 //! Defines the core `Cell` struct, representing a finite volume element in the 1D HAMT model.
 
-use crate::hamt::{boundary::BoundaryCondition, hamt_manager::HamtSettings, physics::geometry::Pt};
+use crate::hamt::{
+    boundary::BoundaryCondition,
+    hamt_manager::HamtSettings,
+    physics::geometry::{Pt3D, Size3D},
+};
 
 use super::material::Material;
 use std::sync::{Arc, Mutex};
@@ -12,6 +16,7 @@ pub const ADJACENT_CELLS_MAX: usize = 6;
 pub enum CellType {
     Material(Arc<Material>),
     Boundary(Boundary, BoundaryLocation),
+    Virtual(BoundaryLocation),
 }
 
 impl Default for CellType {
@@ -26,6 +31,7 @@ pub enum Boundary {
     Radiation,
     Sky,
     Ground,
+    Virtual,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -56,14 +62,14 @@ pub struct Cell {
     /// - `x`: The surface depth/thickness direction.
     /// - `y`: The surface width direction.
     /// - `z`: The surface height direction.
-    pub origin: Pt,
+    pub origin: Pt3D,
 
     /// The dimensions (length) of the cell in each direction [m]. For 1D, only the first element is used.
     /// ## Coordinates:
     /// - `x`: The surface depth/thickness direction.
     /// - `y`: The surface width direction.
     /// - `z`: The surface height direction.
-    pub length: Pt,
+    pub size: Size3D,
 
     /// The area of overlap with adjacent cell in x, y and z direction [m²].
     #[deprecated = "Lagecy FORTRAN Code"]
@@ -140,17 +146,22 @@ pub struct Cell {
     #[deprecated = "Use `cells_curr.cell_rh` Surface State"]
     pub rh_p2: f64,
 
+    /// Vapor pressure [Pa].
+    pub cell_vp: f64,
+
+    #[deprecated = "Use `cells_curr.cell_vp` Surface State"]
     /// Vapor pressure [Pa]. Updated each iteration.
     pub vp: f64,
 
-    /// Vapor pressure at the current iteration.
+    #[deprecated = "Use `cells_next.cell_rh` Surface State"]
+    /// Vapor pressure at the end of current iteration.
     pub vp_p1: f64,
 
     /// Saturation vapor pressure [Pa]. Updated each iteration.
     pub vp_sat: f64,
 
     /// Volumetric water content [kg/m³]. Updated each iteration.
-    pub water: f64,
+    pub volumetric_water: f64,
 
     /// Water content for reporting purposes [kg/kg].
     pub w_report: f64,
@@ -160,83 +171,50 @@ pub struct Cell {
 }
 
 impl Cell {
-    /// Creates a new `Cell` for a boundary condition.
-    /// This will move the base point to the surface of the newly created cell.
-    pub fn new_boundary(
-        boundary: Boundary,
-        location: BoundaryLocation,
-        base_pt: &mut Pt,
-        length: f64,
-        area: f64,
-    ) -> Self {
-        let dummy_length = area.sqrt();
-        let mut cell = Self {
-            cell_type: CellType::Boundary(boundary, location),
-            length: Pt(length, dummy_length, dummy_length),
-            origin: base_pt.clone(),
-            ..Self::default()
+    pub fn new(cell_type: CellType, origin: Pt3D, size: Size3D) -> Self {
+        let mut c = Self {
+            cell_type,
+            size,
+            origin,
+            ..Default::default()
         };
-        cell.origin += cell.length / 2.0;
-        *base_pt += cell.length;
-        cell
+        c.read_from_material();
+
+        c
     }
 
-    /// Creates a new `Cell` from a material layer.
-    pub fn new_material_by_area(
-        material: Arc<Material>,
-        depth: f64,
-        origin: f64,
-        area: f64,
-    ) -> Self {
-        let dummy_length = area.sqrt();
-        let mut cell = Self {
-            cell_type: CellType::Material(material.clone()),
-            length: Pt(depth, dummy_length, dummy_length),
-            origin: Pt(origin, 0.0, 0.0),
-            density: material.density,
-            ..Self::default()
-        };
-        cell.density = material.density;
-        cell.spech = material.spec_heat;
+    fn read_from_material(&mut self) {
+        match &self.cell_type {
+            CellType::Material(material) => {
+                // Link the material reference and initialize geometry and state from it
+                self.material = Some(material.clone());
+                self.volume = self.size.volume();
 
-        cell.volume = cell.length.volume();
+                // Constant properties
+                self.density = material.density;
+                self.spech = material.spec_heat;
 
-        cell
-    }
+                // Initial conditions (temperature and RH)
+                self.cell_temp = material.initial_temp;
+                self.temp = material.initial_temp;
+                self.temp_p1 = material.initial_temp;
+                self.temp_p2 = material.initial_temp;
 
-    /// Update the cell's calculated properties based on the current `cell_temp` and `cell_rh`.
-    pub fn update(&mut self, settings: &HamtSettings, boundary: &BoundaryCondition) {
-        // 1. Update Vapor Pressure and Saturation Vapor Pressure
-        self.vp_sat = crate::hamt::physics::psy_psat_fn_temp(self.cell_temp);
-        self.vp = crate::hamt::physics::rh_to_vp(self.cell_rh, self.cell_temp);
+                self.cell_rh = material.initial_rh();
+                self.rh = material.initial_rh();
+                self.rh_p1 = material.initial_rh();
+                self.rh_p2 = material.initial_rh();
 
-        // 2. If it is a Material cell, update material properties
-        if let Some(mat) = &self.material {
-            // Interpolate Sorption Curve: RH -> Water Content [kg/m³] and dwdphi
-            let (water_content, dwdphi) = mat.sorption_isotherm.interpolate(self.cell_rh);
-            self.water = water_content;
-            self.dwd_phi = dwdphi;
+                // Initial water content: kg/kg -> kg/m³ using material density
+                self.volumetric_water = material.initial_water_content * material.density;
+                self.w_report = material.initial_water_content;
 
-            // Interpolate Thermal Conductivity: Water Content -> Lambda [W/m·K]
-            let (tc, _) = mat.thermal_conductivity.interpolate(self.water);
-            self.w_thermal_c = tc;
-
-            // Interpolate Vapor Diffusion Resistance Factor: RH -> Mu [-]
-            let (mu, _) = mat.vapor_diffusion_resistance.interpolate(self.cell_rh);
-            self.mu = mu;
-
-            // Interpolate Liquid Transport Coefficient: Water Content -> Dw [s]
-            let (dw, _) = if settings.rain_enabled && boundary.is_raining {
-                mat.suction.interpolate(self.water)
-            } else {
-                mat.redistribution.interpolate(self.water)
-            };
-
-            self.dw = dw;
-
-            // Update reporting variables
-            self.w_report = self.water / self.density;
-            self.rh_p = self.cell_rh * 100.0;
+                // Reported RH [%]
+                self.rh_p = self.cell_rh * 100.0;
+            }
+            _ => {
+                // Do nothing for non-material cells (boundary & virtual)
+            }
         }
     }
 }
