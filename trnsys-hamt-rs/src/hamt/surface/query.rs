@@ -1,83 +1,7 @@
-use anyhow::Ok;
-use ndarray::ArcArray3;
-use tracing::debug;
-
-use crate::hamt::cell::{BoundaryLocation, Cell, CellType, ADJACENT_CELLS_MAX};
-use crate::hamt::{boundary::BoundaryCondition, hamt_manager::HamtSettings, physics};
-use crate::trnsys::error::TrnSysError;
+use super::*;
 use anyhow::{Context, Result};
-use std::{collections::HashMap, sync::Arc};
-
-/// Snapshot of on-demand surface reporting values.
-#[derive(Debug, Clone, Default)]
-pub struct SurfaceReport {
-    pub temp_surf_out: f64,
-    pub temp_surf_in: f64,
-    pub rh_surf_out: f64,
-    pub rh_surf_in: f64,
-    pub temp_surf_user_def: f64,
-    pub rh_surf_user_def: f64,
-    pub water_surf_user_def: f64,
-    pub q_surf_ext: f64,
-    pub q_surf_int: f64,
-    pub m_surf_ext: f64,
-    pub m_surf_int: f64,
-    pub water_total: f64,
-}
-
-/// Holds geometry, cells, and utilities for a single surface.
-#[derive(Debug, Clone)]
-pub struct Surface {
-    /// Surface name.
-    pub name: String,
-    /// Name of the construction used by this surface.
-    pub construction_name: String,
-    /// Surface area [m²].
-    pub area: f64,
-    /// Cell lattice.
-    pub cells: ArcArray3<Cell>,
-
-    // ========= Cell Index Helpers =========
-    cells_idx_map: HashMap<CellType, Vec<[usize; 3]>>,
-
-    // ========= Boundary Conditions / Flags =========
-    /// Exterior vapor transfer coefficient [kg/(m²·s·Pa)].
-    ext_vtc: Option<f64>,
-    /// Interior vapor transfer coefficient [kg/(m²·s·Pa)].
-    int_vtc: Option<f64>,
-
-    // ========= Optional user-defined probe =========
-    /// Depth (m) at which user-defined reporting is performed.
-    pub user_defined_depth: Option<f64>,
-}
 
 impl Surface {
-    pub fn new(name: String, area: f64, construction_name: String, cells: ArcArray3<Cell>) -> Self {
-        let mut surface = Surface {
-            name,
-            construction_name,
-            area,
-            cells,
-            cells_idx_map: HashMap::new(),
-            ext_vtc: None,
-            int_vtc: None,
-            user_defined_depth: None,
-        };
-        surface.init_cells_idx_map();
-        surface
-    }
-
-    fn init_cells_idx_map(&mut self) {
-        self.cells_idx_map.clear();
-        for ((x, y, z), cell) in self.cells.indexed_iter() {
-            let cell_type = cell.cell_type.clone();
-            self.cells_idx_map
-                .entry(cell_type)
-                .or_insert(Vec::with_capacity(self.cells.len())) // For performance
-                .push([x, y, z]);
-        }
-    }
-
     /// Compatibility helper for callers that previously expected a vector of surfaces.
     pub fn get(&self, idx: usize) -> Option<&Self> {
         if idx == 0 {
@@ -149,7 +73,10 @@ impl Surface {
     }
 
     /// Find the boundary cells for a given location.
-    fn boundary_cells(&self, location: BoundaryLocation) -> impl Iterator<Item = &[usize; 3]> + '_ {
+    pub fn boundary_cells(
+        &self,
+        location: BoundaryLocation,
+    ) -> impl Iterator<Item = &[usize; 3]> + '_ {
         self.cells_idx_map
             .iter()
             .filter(
@@ -160,7 +87,7 @@ impl Surface {
 
     /// Calculates the average value of a function over the boundary cells of a surface.
     /// The "average value" is calculated as the sum of the function values divided by the total area of the boundary cells perpendicular to the surface depth direction (x axis).
-    fn avg_boundary<F>(&self, location: BoundaryLocation, f: F) -> Result<f64>
+    pub fn avg_boundary<F>(&self, location: BoundaryLocation, f: F) -> Result<f64>
     where
         F: Fn(&Cell) -> f64,
     {
@@ -187,7 +114,7 @@ impl Surface {
     /// If no user-defined depth is provided, it returns the mid-depth of the surface.
     /// # Returns
     /// A tuple containing the (cell_temp, cell_rh, water) of the depth.
-    fn user_defined_values(&self) -> (f64, f64, f64) {
+    pub fn user_defined_values(&self) -> (f64, f64, f64) {
         let target_depth = self.user_defined_depth.unwrap_or_else(|| {
             // default to mid-depth if not provided
             let dims = self.cells.raw_dim();
@@ -217,7 +144,7 @@ impl Surface {
     }
 
     /// Returns the neighbor cell index toward the center of the surface along the x-axis.
-    fn neighbor_toward_center(
+    pub fn neighbor_toward_center(
         &self,
         idx: [usize; 3],
         location: &BoundaryLocation,
@@ -243,7 +170,7 @@ impl Surface {
     ///
     /// ## Output
     /// - `avg_flux`: average heat flux across the surface boundary [W/m²].
-    fn heat_flux(&self, location: BoundaryLocation) -> Result<f64> {
+    pub fn heat_flux(&self, location: BoundaryLocation) -> Result<f64> {
         // Total Heat Flux in W
         let mut total_flux = 0.0;
         let mut total_area = 0.0;
@@ -296,7 +223,7 @@ impl Surface {
     ///
     /// ## Output
     /// - `avg_flux`: average moisture flux across the surface boundary [kg/(m²·s)].
-    fn moisture_flux(&self, location: BoundaryLocation) -> Result<f64> {
+    pub fn moisture_flux(&self, location: BoundaryLocation) -> Result<f64> {
         // Accumulated flux in [kg/s]
         let mut accum_flux = 0.0;
         let mut total_area = 0.0;
@@ -335,59 +262,6 @@ impl Surface {
         } else {
             Ok(0.0)
         }
-    }
-
-    /// Executes a single-timestep update assuming `self` is the writable `surface_next`.
-    /// Reads from `surface_prev` (t-1) and `surface_curr` (current iteration state).
-    ///
-    /// Returns `true` if no further iterations are needed and the convergence criteria is met.
-    pub fn calculate_timestep(
-        &mut self,
-        settings: &HamtSettings,
-        bc: &BoundaryCondition,
-        _surface_prev: &ArcArray3<Cell>,
-        surface_curr: &ArcArray3<Cell>,
-    ) -> Result<bool> {
-        // Collect indices first to avoid simultaneous immutable/mutable borrows of `self`.
-        let exterior_idxs: Vec<[usize; 3]> = self
-            .boundary_cells(BoundaryLocation::Exterior)
-            .map(|v| v.to_owned())
-            .collect();
-        for idx in exterior_idxs {
-            let cell = self.cells.get_mut(idx).with_context(|| {
-                format!("Cell index {:?} of surface_next is out of bounds", idx)
-            })?;
-
-            cell.cell_temp = bc.temp_outside_air;
-
-            let rho_vapor = physics::psy_rhov_fn_tdb_rh(bc.temp_outside_air, bc.rh_outside_air);
-
-            cell.cell_rh = physics::psy_rh_fn_tdb_rhov(bc.temp_outside_air, rho_vapor);
-        }
-
-        let interior_idxs: Vec<[usize; 3]> = self
-            .boundary_cells(BoundaryLocation::Interior)
-            .map(|v| v.to_owned())
-            .collect();
-        for idx in interior_idxs {
-            let cell = self.cells.get_mut(idx).with_context(|| {
-                format!("Cell index {:?} of surface_next is out of bounds", idx)
-            })?;
-
-            cell.cell_temp = bc.temp_inside_air;
-
-            let rho_vapor = physics::psy_rhov_fn_tdb_rh(bc.temp_inside_air, bc.rh_inside_air);
-
-            cell.cell_rh = physics::psy_rh_fn_tdb_rhov(bc.temp_inside_air, rho_vapor);
-        }
-
-        // 2) Placeholder for full coupled heat/moisture solve (to be added)
-
-        //    This should iterate and update `self.cells` using `surface_curr` and material props.
-
-        // 3) Convergence check (next vs curr). Caller can use returned deltas if needed.
-
-        Ok(self.check_convergence(surface_curr, &self.cells, settings))
     }
 
     /// Calculates thermal and vapor resistances for a cell's face.
@@ -445,12 +319,5 @@ impl Surface {
         }
 
         true
-    }
-
-    pub fn override_cell_state(&mut self, ref_surface: &Surface) {
-        for (cell_curr, cell_ref) in self.cells.iter_mut().zip(&ref_surface.cells) {
-            cell_curr.cell_temp = cell_ref.cell_temp;
-            cell_curr.cell_rh = cell_ref.cell_rh;
-        }
     }
 }
