@@ -2,10 +2,9 @@ use anyhow::Ok;
 use ndarray::ArcArray3;
 use tracing::debug;
 
-use crate::hamt::cell::{BoundaryLocation, Cell, CellType, ADJACENT_CELLS_MAX};
+use crate::hamt::cell::{BoundaryLocation, Cell, CellType};
 use crate::hamt::{boundary::BoundaryCondition, hamt_manager::HamtSettings, physics};
-use crate::trnsys::error::TrnSysError;
-use anyhow::{Context, Result};
+use anyhow::Result;
 pub mod init;
 pub mod query;
 pub mod update;
@@ -53,4 +52,3 @@ pub struct Surface {
     /// Depth (m) at which user-defined reporting is performed.
     pub user_defined_depth: Option<f64>,
 }
-

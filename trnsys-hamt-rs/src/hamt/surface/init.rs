@@ -114,7 +114,7 @@ impl Surface {
 
                 let size = get_size(length);
 
-                let mut cell = Cell::new(
+                let cell = Cell::new(
                     CellType::Material(mat_arc.clone()),
                     get_origin(base_pt, size),
                     size,

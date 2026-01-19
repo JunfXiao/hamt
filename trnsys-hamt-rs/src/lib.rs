@@ -1,8 +1,8 @@
 use crate::logging::init_tracing;
-use crate::trnsys::error::{TrnSysError, TrnSysErrorHandler};
+use crate::trnsys::error::TrnSysErrorHandler;
 use crate::trnsys::logging::cleanup_tracing;
 use crate::trnsys_type::TrnSysType;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::HashMap;
 use std::ops::DerefMut;
 use std::sync::{Arc, LazyLock, RwLock};

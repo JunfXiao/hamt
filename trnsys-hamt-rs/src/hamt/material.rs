@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use crate::trnsys::error::{self, InputError, TrnSysError};
+use crate::trnsys::error::{InputError, TrnSysError};
 use anyhow::{Context, Ok, Result};
 use tracing::error;
 
@@ -109,34 +109,38 @@ pub struct Material {
 
     // HAMT data curves
     /// Sorption Isotherm curve (Water Content vs. RH).
-    /// X: Relative Humidity [-]
-    /// Y: Water Content [kg/m³]
+    ///
+    /// - X: Relative Humidity [-]
+    /// - Y: Water Content [kg/m³]
     pub sorption_isotherm: Curve,
 
     /// Water Transport Coefficient Suction curve (Liquid Transport Coefficient vs. Water Content).
-    /// X: Water Content [kg/m³]
-    /// Y: Liquid Transport Coefficient [m²/s]
+    ///
+    /// - X: Water Content [kg/m³]
+    /// - Y: Liquid Transport Coefficient [m²/s]
     pub suction: Curve,
 
     /// Water Transport Coefficient Redistribution curve (Liquid Transport Coefficient vs. Water Content for drying).
-    /// X: Water Content [kg/m³]
-    /// Y: Liquid Transport Coefficient [m²/s]
+    ///
+    /// - X: Water Content [kg/m³]
+    /// - Y: Liquid Transport Coefficient [m²/s]
     pub redistribution: Curve,
 
     /// Vapor Diffusion Resistance curve (mu vs. RH).
-    /// X: Relative Humidity [-]
-    /// Y: Vapor Diffusion Resistance [-]
+    ///
+    /// - X: Relative Humidity [-]
+    /// - Y: Vapor Diffusion Resistance [-]
     pub vapor_diffusion_resistance: Curve,
 
     /// Thermal Conductivity curve (Conductivity vs. Water Content).
-    /// X: Water Content [kg/m³]
-    /// Y: Thermal Conductivity [W/mK]
+    ///
+    /// - X: Water Content [kg/m³]
+    /// - Y: Thermal Conductivity [W/mK]
     pub thermal_conductivity: Curve,
 
     // Discretization parameters
     /// Initial temperature for cells of this material [°C].
     pub initial_temp: f64,
-
 }
 
 impl PartialEq for Material {

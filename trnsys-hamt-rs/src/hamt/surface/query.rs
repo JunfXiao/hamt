@@ -264,39 +264,10 @@ impl Surface {
         }
     }
 
-    /// Calculates thermal and vapor resistances for a cell's face.
-    fn calculate_resistances(&self, cell: &Cell, face_idx: usize, pressure: f64) -> (f64, f64) {
-        let overlap = cell.overlap[face_idx];
-        let dist = cell.dist[face_idx];
-
-        let therm_r = if cell.htc > 0.0 {
-            1.0 / (overlap * cell.htc)
-        } else if cell.material.is_some() && cell.w_thermal_c > 0.0 {
-            dist / (overlap * cell.w_thermal_c)
-        } else {
-            0.0
-        };
-
-        let vapor_r = if cell.vtc > 0.0 {
-            1.0 / (overlap * cell.vtc)
-        } else if cell.material.is_some() {
-            let wvdc = physics::wvdc(cell.cell_temp, pressure);
-            (dist * cell.mu) / (overlap * wvdc)
-        } else {
-            0.0
-        };
-
-        (therm_r, vapor_r)
-    }
-
     /// Checks the maximum change in temperature and RH across cells for convergence.
-    pub fn check_convergence(
-        &self,
-        curr: &ArcArray3<Cell>,
-        next: &ArcArray3<Cell>,
-        settings: &HamtSettings,
-    ) -> bool {
-        for (((x, y, z), cell_curr), cell_next) in curr.indexed_iter().zip(next) {
+    pub fn check_convergence(&self, other: &Surface, settings: &HamtSettings) -> bool {
+        for (((x, y, z), cell_curr), cell_next) in self.cells.indexed_iter().zip(other.cells.iter())
+        {
             let delta_t = (cell_next.cell_temp - cell_curr.cell_temp).abs();
 
             if delta_t > settings.temp_convergence_tolerance {

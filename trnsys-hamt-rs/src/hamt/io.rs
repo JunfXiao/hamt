@@ -92,7 +92,7 @@ impl HamtProperty {
 /// The file is parsed handling comments (starting with '!') and multi-line entities
 /// ending with ';'.
 pub fn load_hamt_data<P: AsRef<Path>>(path: P) -> Result<MaterialLibrary> {
-    let mut file = File::open(path.as_ref().clone())?;
+    let mut file = File::open(path.as_ref())?;
     let mut content = String::new();
     file.read_to_string(&mut content)
         .with_context(|| format!("Reading file '{:?}'", path.as_ref()))?;

@@ -2,16 +2,11 @@
 
 use super::boundary::BoundaryCondition;
 use super::surface::Surface;
-use crate::hamt::cell::{self, Boundary, BoundaryLocation, Cell, CellType, ADJACENT_CELLS_MAX};
 use crate::hamt::material::{Construction, Material};
-use crate::hamt::physics;
 use crate::hamt::physics::geometry::{Pt3D, Size3D};
-use crate::trnsys::error::TrnSysError;
-use anyhow::{Context, Ok, Result};
-use ndarray::{s, ArcArray3, ViewRepr};
-use std::f64::consts::PI;
+use anyhow::Result;
+use std::mem;
 use std::sync::Arc;
-use std::{default, mem};
 
 /// Manages the state and execution of the HAMT simulation for a surface.
 #[derive(Debug, Clone)]
@@ -67,29 +62,35 @@ impl HamtManager {
         })
     }
 
-    /// Executes one iteration of the timestep by producing `surface_next` from `surface_curr` (with `surface_prev` available if needed).
-    /// After this call, `surface_curr` and `surface_next` are swapped (iteration rotation).
-    pub fn iter_in_timestep(&mut self) -> Result<()> {
-        self.surface_next.calculate_timestep(
-            &self.settings,
-            &self.boundary_condition,
-            &self.surface_prev,
-            &self.surface_curr,
-        )?;
+    /// Solves for the current timestep by iterating until convergence.
+    pub fn solve_timestep(&mut self) -> Result<bool> {
+        for _ in 0..self.settings.max_iterations {
+            self.surface_next.calculate_iteration(
+                &self.settings,
+                &self.boundary_condition,
+                &self.surface_prev,
+                &self.surface_curr,
+            )?;
 
-        // iteration-level rotation: curr <-> next
-        mem::swap(&mut self.surface_curr, &mut self.surface_next);
-        Ok(())
+            if self
+                .surface_curr
+                .check_convergence(&self.surface_next, &self.settings)
+            {
+                mem::swap(&mut self.surface_curr, &mut self.surface_next);
+                return Ok(true); // Converged
+            }
+
+            mem::swap(&mut self.surface_curr, &mut self.surface_next);
+        }
+
+        Ok(false) // Not converged
     }
 
     /// Executes after the timestep has been calculated.
     pub fn tick_timestep(&mut self) -> Result<()> {
-        // Current timestep ends. Now, `surface_next` becomes `surface_prev`.
-        mem::swap(&mut self.surface_prev, &mut self.surface_next);
-        // `surface_curr` should have the value of the previous timestep's `surface_next`.
-        self.surface_curr
-            .override_cell_state(&self.surface_prev.cells);
-
+        // The converged state is in `surface_curr`. This becomes the previous state for the next timestep.
+        self.surface_prev = self.surface_curr.clone();
+        // `surface_next` is scratch space, so its contents don't matter between steps.
         Ok(())
     }
 }

@@ -16,6 +16,7 @@ pub const W_DENSITY: f64 = 1000.0;
 
 /// Linearly interpolates a value from a curve.
 /// Also optionally returns the gradient at the interpolation point.
+#[deprecated = "Please use `Curve::interp`"]
 pub fn interp(curve: &Curve, in_value: f64) -> (f64, f64) {
     if curve.x.is_empty() {
         return (0.0, 0.0);

@@ -1,13 +1,10 @@
-use crate::hamt::boundary::BoundaryCondition;
-use crate::hamt::hamt_manager::{HamtManager, HamtSettings};
+use crate::hamt::hamt_manager::HamtManager;
 use crate::hamt::io::load_hamt_data;
-use crate::hamt::material::{Construction, Material};
 use crate::trnsys::error::{InputError, TrnSysError};
 use crate::trnsys::iteration_mode::IterationMode;
 use crate::trnsys::param::TrnSysValue;
 use crate::trnsys::*;
 use anyhow::{Context, Result};
-use std::collections::HashMap;
 use std::path::Path;
 use tracing::warn;
 
@@ -79,13 +76,13 @@ impl TrnSysType {
                 name: "No Construction Found.".to_string(),
             }))?;
 
-        let user_defined_depth: f64 = (&state.params[4]).into();
+        let _user_defined_depth: f64 = (&state.params[4]).into();
 
-        let enable_report_writing: bool = f64::from((&state.params[5])) > 0.0;
+        let _enable_report_writing: bool = f64::from(&state.params[5]) > 0.0;
 
-        let output_interval_hr: f64 = (&state.params[6]).into();
+        let _output_interval_hr: f64 = (&state.params[6]).into();
 
-        let output_file_id: i32 =
+        let _output_file_id: i32 =
             (&state.params[7])
                 .try_into()
                 .map_err(|_| InputError::BadParameter {
@@ -105,7 +102,7 @@ impl TrnSysType {
     }
 
     /// Start of simulation (first timestep): initialize HAMT mesh/state.
-    pub fn simulation_starts(&self, state: &mut TrnSysState) -> Result<(), TrnSysError> {
+    pub fn simulation_starts(&self, _state: &mut TrnSysState) -> Result<(), TrnSysError> {
         Ok(())
     }
 
@@ -118,7 +115,7 @@ impl TrnSysType {
     /// Called at each TRNSYS call within a timestep.
     pub fn iterate(&self, state: &mut TrnSysState) -> Result<Vec<TrnSysValue>> {
         if let Some(manager) = &mut state.hamt_manager {
-            manager.iter_in_timestep()?;
+            manager.solve_timestep()?;
 
             // Map outputs
             {
