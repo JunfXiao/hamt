@@ -4,9 +4,14 @@ use super::boundary::BoundaryCondition;
 use super::surface::Surface;
 use crate::hamt::material::{Construction, Material};
 use crate::hamt::physics::geometry::{Pt3D, Size3D};
+use crate::hamt::uom;
+use crate::hamt::uom::dimensions::{Temperature, Time};
 use anyhow::Result;
 use std::mem;
 use std::sync::Arc;
+use uom::dimensions::Area;
+use uom::dimensions::Length;
+use uom::units;
 
 /// Manages the state and execution of the HAMT simulation for a surface.
 #[derive(Debug, Clone)]
@@ -39,7 +44,7 @@ impl HamtManager {
         initial_boundary: Option<BoundaryCondition>,
         construction: Arc<Construction>,
         surface_name: String,
-        surface_area: f64,
+        surface_area: Area<f64>,
     ) -> Result<Self> {
         let settings = settings.unwrap_or_default();
         let initial_boundary = initial_boundary.unwrap_or_default();
@@ -99,11 +104,11 @@ impl HamtManager {
 #[derive(Debug, Clone)]
 pub struct HamtSettings {
     /// Timestep [s].
-    pub timestep: f64,
+    pub timestep: Time<f64>,
     /// Maximum nonlinear iterations (count).
     pub max_iterations: i32,
     /// Temperature convergence tolerance [K or °C].
-    pub temp_convergence_tolerance: f64,
+    pub temp_convergence_tolerance: Temperature<f64>,
     /// Relative humidity convergence tolerance [-].
     pub rh_convergence_tolerance: f64,
     /// Base Cell Depth [m]
@@ -113,29 +118,29 @@ pub struct HamtSettings {
     /// Flag to indicate if rain is present on the exterior surface.
     pub rain_enabled: bool,
     /// Cell division size [m]
-    pub div_length: f64,
+    pub div_length: Length<f64>,
     /// Minimum cell amount for a material after division
     pub min_div: i32,
     /// Maximum cell amount for a material after division
     pub max_div: i32,
     /// Allowed length for adjacent check [m]
-    pub adj_length: f64,
+    pub adj_length: Length<f64>,
 }
 
 impl Default for HamtSettings {
     fn default() -> Self {
         Self {
-            timestep: 3600.0,
+            timestep: 3600.0 * units::seconds,
             max_iterations: 150,
-            temp_convergence_tolerance: 0.0001,
+            temp_convergence_tolerance: 0.0001 * units::kelvin,
             rh_convergence_tolerance: 0.0001,
-            base_cell_size: Pt3D(0.1, 0.0, 0.0),
+            base_cell_size: Pt3D(0.1 * units::meter, 0.0 * units::meter, 0.0 * units::meter),
             latent_heat_enabled: true,
             rain_enabled: false,
-            div_length: 0.05,
+            div_length: 0.05 * units::meter,
             min_div: 3,
             max_div: 20,
-            adj_length: 0.00005,
+            adj_length: 0.00005 * units::meter,
         }
     }
 }

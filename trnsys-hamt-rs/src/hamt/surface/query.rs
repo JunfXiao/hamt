@@ -1,29 +1,34 @@
+use crate::hamt::{
+    physics::KELVIN_CONV,
+    uom::{
+        Dimension, Quantity, WaterContentQty,
+        dimensions::{Density, Pressure, WaterContent},
+        units::square_meter,
+    },
+};
+
 use super::*;
 use anyhow::{Context, Result};
 
 impl Surface {
     /// Compatibility helper for callers that previously expected a vector of surfaces.
     pub fn get(&self, idx: usize) -> Option<&Self> {
-        if idx == 0 {
-            Some(self)
-        } else {
-            None
-        }
+        if idx == 0 { Some(self) } else { None }
     }
 
     /// Compute all reporting values on demand.
     pub fn report(&self) -> Result<SurfaceReport> {
         let temp_surf_out = self
-            .avg_boundary(BoundaryLocation::Exterior, |c| c.cell_temp)
+            .avg_virtual_cell(BoundaryLocation::Exterior, |c| c.cell_temp)
             .with_context(|| "Failed to calculate exterior surface temperature")?;
         let temp_surf_in = self
-            .avg_boundary(BoundaryLocation::Interior, |c| c.cell_temp)
+            .avg_virtual_cell(BoundaryLocation::Interior, |c| c.cell_temp)
             .with_context(|| "Failed to calculate interior surface temperature")?;
         let rh_surf_out = self
-            .avg_boundary(BoundaryLocation::Exterior, |c| c.cell_rh)
+            .avg_virtual_cell(BoundaryLocation::Exterior, |c| c.cell_rh)
             .with_context(|| "Failed to calculate exterior surface relative humidity")?;
         let rh_surf_in = self
-            .avg_boundary(BoundaryLocation::Interior, |c| c.cell_rh)
+            .avg_virtual_cell(BoundaryLocation::Interior, |c| c.cell_rh)
             .with_context(|| "Failed to calculate interior surface relative humidity")?;
 
         let (temp_surf_user_def, rh_surf_user_def, water_surf_user_def) =
@@ -42,7 +47,7 @@ impl Surface {
             .moisture_flux(BoundaryLocation::Interior)
             .with_context(|| "Failed to calculate interior surface moisture flux")?;
 
-        let water_total = self
+        let water_total: Mass<f64> = self
             .cells_idx_map
             .iter()
             .filter_map(|(ctype, idxs)| match ctype {
@@ -52,7 +57,9 @@ impl Surface {
             .flatten()
             .map(|[x, y, z]| {
                 let cell = &self.cells[[*x, *y, *z]];
-                cell.volumetric_water * cell.volume
+                let water = cell.volumetric_water;
+                let volume = cell.volume;
+                water * volume
             })
             .sum();
 
@@ -73,40 +80,43 @@ impl Surface {
     }
 
     /// Find the boundary cells for a given location.
-    pub fn boundary_cells(
+    pub fn virtual_cells(
         &self,
         location: BoundaryLocation,
     ) -> impl Iterator<Item = &[usize; 3]> + '_ {
         self.cells_idx_map
             .iter()
-            .filter(
-                move |(ctype, _)| matches!(ctype, CellType::Boundary(_, loc) if *loc == location),
-            )
+            .filter(move |(ctype, _)| matches!(ctype, CellType::Virtual(loc) if *loc == location))
             .flat_map(|(_, idxs)| idxs)
     }
 
     /// Calculates the average value of a function over the boundary cells of a surface.
     /// The "average value" is calculated as the sum of the function values divided by the total area of the boundary cells perpendicular to the surface depth direction (x axis).
-    pub fn avg_boundary<F>(&self, location: BoundaryLocation, f: F) -> Result<f64>
+    pub fn avg_virtual_cell<F, const D: Dimension>(
+        &self,
+        location: BoundaryLocation,
+        f: F,
+    ) -> Result<Quantity<f64, D>>
     where
-        F: Fn(&Cell) -> f64,
+        F: Fn(&Cell) -> Quantity<f64, D>,
     {
-        let mut sum = 0.0;
+        let mut sum = Quantity::<f64, D>(0.0);
         let mut sum_area = 0.0;
         {
-            for idx in self.boundary_cells(location) {
+            for idx in self.virtual_cells(location) {
                 let cell = self
                     .cells
                     .get(*idx)
                     .with_context(|| format!("Cell index {:?} is invalid", idx))?;
-                sum += f(cell);
-                sum_area += cell.size.area_along(0);
+                let area = cell.size.area_along(0).value_in(square_meter);
+                sum += f(cell) * area;
+                sum_area += area;
             }
         }
-        if sum_area > 0.0 {
+        if sum_area > Quantity(0.0) {
             Ok(sum / sum_area)
         } else {
-            Ok(0.0)
+            Ok(Quantity(0.0))
         }
     }
 
@@ -114,18 +124,18 @@ impl Surface {
     /// If no user-defined depth is provided, it returns the mid-depth of the surface.
     /// # Returns
     /// A tuple containing the (cell_temp, cell_rh, water) of the depth.
-    pub fn user_defined_values(&self) -> (f64, f64, f64) {
+    pub fn user_defined_values(&self) -> (Temperature<f64>, Dimensionless<f64>, Density<f64>) {
         let target_depth = self.user_defined_depth.unwrap_or_else(|| {
             // default to mid-depth if not provided
             let dims = self.cells.raw_dim();
             if dims[0] > 0 {
-                (dims[0] as f64) / 2.0
+                Quantity((dims[0]) as f64 / 2.0)
             } else {
-                0.0
+                Quantity(0.0)
             }
         });
 
-        let mut best: Option<([usize; 3], f64)> = None;
+        let mut best: Option<([usize; 3], Length<f64>)> = None;
         for ((x, y, z), cell) in self.cells.indexed_iter() {
             let depth = cell.origin.x();
             let dist = (depth - target_depth).abs();
@@ -139,7 +149,7 @@ impl Surface {
             let cell = &self.cells[[x, y, z]];
             (cell.cell_temp, cell.cell_rh, cell.volumetric_water)
         } else {
-            (0.0, 0.0, 0.0)
+            (Quantity(0.0), Quantity(0.0), Quantity(0.0))
         }
     }
 
@@ -170,43 +180,46 @@ impl Surface {
     ///
     /// ## Output
     /// - `avg_flux`: average heat flux across the surface boundary [W/m²].
-    pub fn heat_flux(&self, location: BoundaryLocation) -> Result<f64> {
+    pub fn heat_flux(&self, location: BoundaryLocation) -> Result<EnergyFlux<f64>> {
         // Total Heat Flux in W
-        let mut total_flux = 0.0;
-        let mut total_area = 0.0;
+        let mut total_flux = Quantity(0.0);
+        let mut total_area = Quantity(0.0);
 
-        for idx in self.boundary_cells(location.clone()) {
+        for idx in self.virtual_cells(location.clone()) {
             if let Some(n_idx) = self.neighbor_toward_center(*idx, &location) {
                 let b = self
                     .cells
                     .get(*idx)
-                    .with_context(|| format!("Failed to get boundary cell {:?}", idx))?;
+                    .with_context(|| format!("Failed to get virtual cell {:?}", idx))?;
                 let n = self.cells.get(n_idx).with_context(|| {
                     format!(
-                        "Failed to get neighbor cell {:?} for boundary cell {:?}",
+                        "Failed to get neighbor cell {:?} for virtual cell {:?}",
                         n_idx, idx
                     )
                 })?;
-                let delta_t = b.cell_temp - n.cell_temp;
+                let delta_t = (b.cell_temp - n.cell_temp);
 
                 // Prefer boundary HTC, fallback to conduction
-                let flux_w_m2 = if b.htc > 0.0 {
-                    b.htc * delta_t
-                } else if b.w_thermal_c > 0.0 && b.size.x() > 0.0 {
-                    (b.w_thermal_c / b.size.x()) * delta_t
+                let htc = b.htc;
+                let k = b.w_thermal_c;
+
+                let flux_w_m2k = if htc > Quantity(0.0) {
+                    htc
+                } else if k > Quantity(0.0) && b.size.x() > Quantity(0.0) {
+                    (k / b.size.x())
                 } else {
-                    0.0
+                    Quantity(0.0)
                 };
                 let cell_area = b.size.area_along(0);
-                total_flux += flux_w_m2 * cell_area;
+                total_flux += flux_w_m2k * delta_t * cell_area;
                 total_area += cell_area;
             }
         }
 
-        if total_area > 0.0 {
+        if total_area > Quantity(0.0) {
             Ok(total_flux / total_area)
         } else {
-            Ok(0.0)
+            Ok(Quantity(0.0))
         }
     }
 
@@ -223,12 +236,12 @@ impl Surface {
     ///
     /// ## Output
     /// - `avg_flux`: average moisture flux across the surface boundary [kg/(m²·s)].
-    pub fn moisture_flux(&self, location: BoundaryLocation) -> Result<f64> {
+    pub fn moisture_flux(&self, location: BoundaryLocation) -> Result<MassFlux<f64>> {
         // Accumulated flux in [kg/s]
-        let mut accum_flux = 0.0;
+        let mut accum_flux: MassFlux<f64> = Quantity(0.0);
         let mut total_area = 0.0;
 
-        for idx in self.boundary_cells(location.clone()) {
+        for idx in self.virtual_cells(location.clone()) {
             let b = self
                 .cells
                 .get(*idx)
@@ -238,29 +251,27 @@ impl Surface {
                     .cells
                     .get(n_idx)
                     .with_context(|| format!("Cannot get neighbor cell index {:?}", n_idx))?;
-                let delta_vp = b.cell_vp - n.cell_vp;
 
-                let flux = if let Some(vtc) = match &location {
+                let vtc: Option<VaporTransportCoeff<f64>> = match &location {
                     BoundaryLocation::Exterior => self.ext_vtc.or(Some(b.vtc)),
                     BoundaryLocation::Interior => self.int_vtc.or(Some(b.vtc)),
-                } {
-                    // flux = vtc * Δvp → kg/(m²·s)
-                    vtc * delta_vp
-                } else {
-                    0.0
                 };
 
-                let cell_area = b.size.area_along(0);
+                if let Some(vtc) = vtc {
+                    let delta_vp: Pressure<f64> = b.cell_vp - n.cell_vp;
 
-                accum_flux += flux * cell_area;
-                total_area += cell_area;
+                    let cell_area: f64 = b.size.area_along(0).value_in(square_meter);
+
+                    accum_flux += vtc * delta_vp * cell_area;
+                    total_area += cell_area;
+                }
             }
         }
 
         if total_area > 0.0 {
             Ok(accum_flux / total_area)
         } else {
-            Ok(0.0)
+            Ok(Quantity(0.0))
         }
     }
 
@@ -268,11 +279,16 @@ impl Surface {
     pub fn check_convergence(&self, other: &Surface, settings: &HamtSettings) -> bool {
         for (((x, y, z), cell_curr), cell_next) in self.cells.indexed_iter().zip(other.cells.iter())
         {
-            let delta_t = (cell_next.cell_temp - cell_curr.cell_temp).abs();
+            let temp_tol = settings
+                .temp_convergence_tolerance
+                .value_in(diman::si::units::kelvin);
+            let delta_t = (cell_next.cell_temp - cell_curr.cell_temp)
+                .value_in(diman::si::units::kelvin)
+                .abs();
 
-            if delta_t > settings.temp_convergence_tolerance {
+            if delta_t > temp_tol {
                 debug!(
-                    "Temperature change at ({}, {}, {}) exceeded tolerance: {}",
+                    "Temperature change at ({}, {}, {}) exceeded tolerance: {:?}",
                     x, y, z, delta_t
                 );
                 return false;
@@ -282,7 +298,7 @@ impl Surface {
 
             if delta_rh.abs() > settings.rh_convergence_tolerance {
                 debug!(
-                    "Relative humidity change at ({}, {}, {}) exceeded tolerance: {}",
+                    "Relative humidity change at ({}, {}, {}) exceeded tolerance: {:#?}",
                     x, y, z, delta_rh
                 );
                 return false;

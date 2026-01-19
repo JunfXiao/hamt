@@ -1,5 +1,11 @@
 //! Defines the core `Cell` struct, representing a finite volume element in the 1D HAMT model.
 
+use crate::hamt::uom::dimensions::{
+    Density, Dimensionless, HeatTransferCoeff, LiquidTransportCoeff, Power, Pressure,
+    SpecificHeatCapacity, Temperature, ThermalConductivity, VaporTransportCoeff, Volume,
+    WaterContent,
+};
+use crate::hamt::uom::{Quantity, units};
 use crate::hamt::{
     boundary::BoundaryCondition,
     hamt_manager::HamtSettings,
@@ -54,7 +60,7 @@ pub struct Cell {
     pub cell_type: CellType,
 
     /// The volume of the cell [m³].
-    pub volume: f64,
+    pub volume: Volume<f64>,
 
     /// The geometric center of the cell along the primary axis [m].
     /// ## Coordinates:
@@ -74,76 +80,74 @@ pub struct Cell {
     // ========== Material Properties (potentially state-dependent) ==========
     //
     /// Density of the dry material [kg/m³].
-    pub density: f64,
+    pub density: Density<f64>,
 
     /// Specific heat capacity of the dry material [J/kg·K].
-    pub spech: f64,
+    pub spech: SpecificHeatCapacity<f64>,
 
     /// Water vapor diffusion resistance factor [-].
     ///
     /// Updated by [Cell::calc_dependent_state]
-    pub mu: f64,
+    pub mu: Dimensionless<f64>,
 
     /// Moisture-dependent thermal conductivity [W/m·K]. Updated each iteration.
+
     ///
+
     /// Updated by [Cell::calc_dependent_state]
-    pub w_thermal_c: f64,
+    pub w_thermal_c: ThermalConductivity<f64>,
 
     /// Moisture storage capacity (derivative of sorption isotherm w.r.t. RH) [kg/m³].
-    ///
-    /// Updated by [Cell::calc_dependent_state]
-    pub dwd_phi: f64,
 
-    /// Liquid water transport coefficient [s].
+    ///
+
+    /// Updated by [Cell::calc_dependent_state]
+    pub dwd_phi: Density<f64>,
+
+    /// Liquid water transport coefficient [m²/s].
     ///
     /// Updated by [Cell::calc_dependent_state]
-    pub dw: f64,
+    pub dw: LiquidTransportCoeff<f64>,
 
     //
+
     // ========== Boundary Condition Properties ==========
+
     //
     /// Heat transfer coefficient for boundary cells [W/m²·K].
-    pub htc: f64,
+    pub htc: HeatTransferCoeff<f64>,
+
     /// Vapor transfer coefficient for boundary cells [kg/m²·s·Pa].
-    pub vtc: f64,
+    pub vtc: VaporTransportCoeff<f64>,
+
     /// Additional heat source term [W].
-    pub q_adds: f64,
+    pub q_adds: Power<f64>,
 
     //
     // ========== State Variables (evolve over time) ==========
     //
     /// The calculated temperature at the current iteration.
-    pub cell_temp: f64,
+    pub cell_temp: Temperature<f64>,
 
     /// Cell Relative Humidity [0-1].
     ///
     /// Updated by [Cell::calc_dependent_state]
-    pub cell_rh: f64,
+    pub cell_rh: Dimensionless<f64>,
 
     /// Vapor pressure [Pa].
     ///
     /// Updated by [Cell::calc_dependent_state]
-    pub cell_vp: f64,
+    pub cell_vp: Pressure<f64>,
 
     /// Saturation vapor pressure [Pa]. Updated each iteration.
     ///
     /// Updated by [Cell::calc_dependent_state]
-    pub vp_sat: f64,
+    pub vp_sat: Pressure<f64>,
 
     /// Volumetric water content [kg/m³]. Updated each iteration.
     ///
     /// Updated by [Cell::calc_dependent_state]
-    pub volumetric_water: f64,
-
-    /// Water content for reporting purposes [kg/kg].
-    ///
-    /// Updated by [Cell::calc_dependent_state]
-    pub w_report: f64,
-
-    /// Relative humidity in percent for reporting purposes [%].
-    ///
-    /// Updated by [Cell::calc_dependent_state]
-    pub rh_p: f64,
+    pub volumetric_water: Density<f64>,
 }
 
 impl Cell {
@@ -187,11 +191,7 @@ impl Cell {
                 self.cell_rh = material.initial_rh();
 
                 // Initial water content: kg/kg -> kg/m³ using material density
-                self.volumetric_water = material.initial_water_content * material.density;
-                self.w_report = material.initial_water_content;
-
-                // Reported RH [%]
-                self.rh_p = self.cell_rh * 100.0;
+                self.volumetric_water = material.density * material.initial_water_content;
             }
             _ => {
                 // Do nothing for non-material cells (boundary & virtual)
@@ -203,13 +203,17 @@ impl Cell {
         let t_curr = self.cell_temp;
         let rh_curr = self.cell_rh;
 
-        self.vp_sat = physics::psy_psat_fn_temp(t_curr);
-        self.cell_vp = rh_curr * self.vp_sat;
-        self.rh_p = self.cell_rh * 100.0;
+        let vp_sat_pa = physics::psy_psat_fn_temp(t_curr);
+
+        self.vp_sat = vp_sat_pa;
+
+        self.cell_vp = rh_curr * vp_sat_pa;
 
         if let CellType::Material(mat) = &self.cell_type {
             let (water, dwdphi) = mat.sorption_isotherm.interpolate(rh_curr);
+
             self.volumetric_water = water;
+
             self.dwd_phi = dwdphi;
 
             let (dw, _) = if bc.is_raining && settings.rain_enabled {
@@ -217,17 +221,25 @@ impl Cell {
             } else {
                 mat.redistribution.interpolate(water)
             };
+
             self.dw = dw;
 
             let (mu, _) = mat.vapor_diffusion_resistance.interpolate(rh_curr);
+
             self.mu = mu;
 
             let (k, _) = mat.thermal_conductivity.interpolate(water);
-            self.w_thermal_c = if k > 0.0 { k } else { mat.conductivity };
 
-            if self.density > 0.0 {
-                self.w_report = self.volumetric_water / self.density;
-            }
+            self.w_thermal_c = if k > Quantity(0.0) {
+                k
+            } else {
+                mat.conductivity
+            };
+
+            let volumetric_water = self
+                .volumetric_water
+                .value_in(units::kilograms_per_cubic_meter);
+            let density = self.density.value_in(units::kilograms_per_cubic_meter);
         }
     }
 
@@ -237,7 +249,13 @@ impl Cell {
         self.cell_vp = ref_cell.cell_vp;
         self.vp_sat = ref_cell.vp_sat;
         self.volumetric_water = ref_cell.volumetric_water;
-        self.w_report = ref_cell.w_report;
-        self.rh_p = ref_cell.rh_p;
+    }
+
+    pub fn water_content(&self) -> WaterContent<f64> {
+        if self.density.value_unchecked() > 0.0 {
+            (self.volumetric_water / self.density)
+        } else {
+            Quantity(0.0)
+        }
     }
 }

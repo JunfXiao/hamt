@@ -3,6 +3,7 @@
 use tracing::{info, warn};
 
 use crate::hamt::material::{Curve, Material, MaterialLibrary, SurfaceVaporCoef};
+use crate::hamt::uom::{Dimension, Quantity};
 use crate::trnsys::error::{InputError, TrnSysError};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -112,13 +113,17 @@ pub fn load_hamt_data<P: AsRef<Path>>(path: P) -> Result<MaterialLibrary> {
             // Params: [Roughness, Thickness, Conductivity, Density, SpecHeat, ThAbs, SolAbs, VisAbs]
             let mat = Material {
                 name: name.clone(),
-                thickness: parse_number(&params[1], "Thickness")?,
-                conductivity: parse_number(&params[2], "Heat Conductivity")?,
-                density: parse_number(&params[3], "Density")?,
-                spec_heat: parse_number(&params[4], "Specific Heat")?,
-                thermal_absorptance: parse_number(&params[5], "Thermal Absorptance")?,
-                solar_absorptance: parse_number(&params[6], "Solar Absorptance")?,
-                visible_absorptance: parse_number(&params[7], "Visible Absorptance")?,
+                thickness: crate::hamt::uom::units::meter
+                    * parse_number::<f64>(&params[1], "Thickness")?,
+                conductivity: crate::hamt::uom::units::watts_per_meter_kelvin
+                    * parse_number::<f64>(&params[2], "Heat Conductivity")?,
+                density: crate::hamt::uom::units::kilograms_per_cubic_meter
+                    * parse_number::<f64>(&params[3], "Density")?,
+                spec_heat: crate::hamt::uom::units::joules_per_kilogram_kelvin
+                    * parse_number::<f64>(&params[4], "Specific Heat")?,
+                thermal_absorptance: Quantity(parse_number(&params[5], "Thermal Absorptance")?),
+                solar_absorptance: Quantity(parse_number(&params[6], "Solar Absorptance")?),
+                visible_absorptance: Quantity(parse_number(&params[7], "Visible Absorptance")?),
                 ..Default::default()
             };
             materials.insert(name.clone(), mat);
@@ -130,8 +135,9 @@ pub fn load_hamt_data<P: AsRef<Path>>(path: P) -> Result<MaterialLibrary> {
         if let Some(mat) = materials.get_mut(name) {
             match prop {
                 HamtProperty::Settings => {
-                    mat.porosity = parse_number(&params[0], "Porosity")?;
-                    mat.initial_water_content = parse_number(&params[1], "Initial Water Content")?;
+                    mat.porosity = Quantity(parse_number(&params[0], "Porosity")?);
+                    mat.initial_water_content =
+                        Quantity(parse_number(&params[1], "Initial Water Content")?);
                 }
                 HamtProperty::SorptionIsotherm => {
                     mat.sorption_isotherm = parse_curve(params, "SorptionIsotherm")?;
@@ -241,9 +247,12 @@ fn parse_number<T: FromStr>(input: &str, field_name: &str) -> Result<T, TrnSysEr
 }
 
 /// Helper to parse curve data (count, x, y pairs).
-fn parse_curve(params: &[String], name: &str) -> Result<Curve, TrnSysError> {
+fn parse_curve<const DX: Dimension, const DY: Dimension>(
+    params: &[String],
+    name: &str,
+) -> Result<Curve<DX, DY>, TrnSysError> {
     if params.is_empty() {
-        return Ok(Curve::new());
+        return Ok(Curve::<DX, DY>::new(Vec::new(), Vec::new()));
     }
 
     let count: usize = parse_number(&params[0], &format!("{} point count", name))?;
@@ -266,13 +275,13 @@ fn parse_curve(params: &[String], name: &str) -> Result<Curve, TrnSysError> {
     }
 
     for i in 0..count {
-        let x_val = parse_number(&params[1 + i * 2], &format!("{} x[{}]", name, i))?;
-        let y_val = parse_number(&params[1 + i * 2 + 1], &format!("{} y[{}]", name, i))?;
-        x.push(x_val);
-        y.push(y_val);
+        let x_val: f64 = parse_number(&params[1 + i * 2], &format!("{} x[{}]", name, i))?;
+        let y_val: f64 = parse_number(&params[1 + i * 2 + 1], &format!("{} y[{}]", name, i))?;
+        x.push(Quantity::<f64, DX>(x_val));
+        y.push(Quantity::<f64, DY>(y_val));
     }
 
-    Ok(Curve { x, y })
+    Ok(Curve::new(x, y))
 }
 
 /// Parses the text content into a structured HashMap.

@@ -2,45 +2,50 @@ use std::ops;
 
 use tracing::error;
 
+use crate::hamt::uom::{
+    AreaQty, VolumeQty,
+    dimensions::{Area, Length},
+};
+
 /// A point or vector in 3D space.
 /// ## Coordinates:
 /// - `x`: The surface depth/thickness direction.
 /// - `y`: The surface width direction.
 /// - `z`: The surface height direction.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Pt3D(pub f64, pub f64, pub f64);
+pub struct Pt3D(pub Length<f64>, pub Length<f64>, pub Length<f64>);
 
 /// Size3 is a type alias for Pt, representing a 3D size.
 pub type Size3D = Pt3D;
 
 impl Pt3D {
-    pub fn new(x: f64, y: f64, z: f64) -> Self {
+    pub fn new(x: Length<f64>, y: Length<f64>, z: Length<f64>) -> Self {
         Pt3D(x, y, z)
     }
 
-    pub fn x(&self) -> f64 {
+    pub fn x(&self) -> Length<f64> {
         self.0
     }
-    pub fn y(&self) -> f64 {
+    pub fn y(&self) -> Length<f64> {
         self.1
     }
-    pub fn z(&self) -> f64 {
+    pub fn z(&self) -> Length<f64> {
         self.2
     }
 
-    pub fn area_along(&self, axis: i32) -> f64 {
+    pub fn area_along(&self, axis: i32) -> Area<f64> {
         match axis {
             0 => self.1 * self.2,
             1 => self.0 * self.2,
             2 => self.0 * self.1,
             _ => {
                 error!("Invalid axis for area: {}", axis);
-                0.0
+                AreaQty::<f64>::zero()
             }
         }
     }
 
-    pub fn volume(&self) -> f64 {
+    pub fn volume(&self) -> VolumeQty<f64> {
         self.0 * self.1 * self.2
     }
 }

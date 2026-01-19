@@ -1,6 +1,11 @@
+use crate::hamt::uom::{
+    Quantity,
+    dimensions::{Pressure, ThermalResistance, Time, VaporResistance},
+};
+
 use super::*;
 use anyhow::Result;
-use rayon::iter::IntoParallelRefMutIterator;
+use diman::si::units;
 
 impl Surface {
     /// Executes a single iteration of the HAMT simulation for a single timestep.
@@ -63,7 +68,7 @@ impl Surface {
         settings: &HamtSettings,
         surface_prev: &Surface,
         surface_curr: &Surface,
-        dt: f64,
+        dt: Time<f64>,
         nx: usize,
         bc: &BoundaryCondition,
     ) -> Result<()> {
@@ -79,66 +84,59 @@ impl Surface {
             }
 
             let t_new = {
-                // cell_next: writable buffer (surface_next)
+                // use scalar Kelvin for calculation
                 let cell_next = &self.cells[[i, 0, 0]];
-                // cell_prev: last converged timestep (t-1)
                 let cell_prev = &surface_prev.cells[[i, 0, 0]];
-                // cell_curr: current iteration state (t, previous iter)
                 let cell_curr = &surface_curr.cells[[i, 0, 0]];
 
-                // temperature over resistance sum:
-                // Σ(T_neighbor / R_th) from previous iteration neighbors (Fortran: torsum)
-                // Unit: W/m²
-                let mut torsum = 0.0;
+                let mut torsum = Quantity(0.0);
+                let mut oorsum = Quantity(0.0);
+                let mut vpdiff = Quantity(0.0);
 
-                // One over resistance sum:
-                // Σ(1 / R_th) over neighbors (Fortran: oorsum)
-                // Unit: W/m²K
-                let mut oorsum = 0.0;
-
-                // vapor pressure difference weighted by vapor resistance
-                // vpdiff: Σ(ΔVP / R_v) latent coupling source term (Fortran: vpdiff)
-                // kg/(m²·s
-                let mut vpdiff = 0.0;
+                let curr_temp_k = cell_curr.cell_temp;
+                let curr_vp_pa = cell_curr.cell_vp;
 
                 for nbr_i in self.neighbor_indices(i, nx) {
-                    // neighbor_next: writable buffer props (w_thermal_c/mu) for R calculations
                     let neighbor_next = &self.cells[[nbr_i, 0, 0]];
-
-                    // neighbor_curr: state (T, RH, VP) from previous iteration
                     let neighbor_curr = &surface_curr.cells[[nbr_i, 0, 0]];
+
                     let (therm_resistance, vapor_resistance) =
                         self.calculate_resistance_pair(cell_next, neighbor_next, bc.pressure_air);
 
-                    if therm_resistance > 0.0 {
+                    if therm_resistance > Quantity(0.0) {
+                        let nbr_temp_k = neighbor_curr.cell_temp;
                         oorsum += 1.0 / therm_resistance;
-                        torsum += neighbor_curr.cell_temp / therm_resistance;
+                        torsum += nbr_temp_k / therm_resistance;
                     }
-                    if vapor_resistance > 0.0 {
-                        vpdiff += (neighbor_curr.cell_vp - cell_curr.cell_vp) / vapor_resistance;
+                    if vapor_resistance > Quantity(0.0) {
+                        let nbr_vp_pa = neighbor_curr.cell_vp;
+                        vpdiff += (nbr_vp_pa - curr_vp_pa) / vapor_resistance;
                     }
                 }
 
-                // tcap: thermal capacity term [J/K] = (ρ*c + θ_w * c_w) * volume (Fortran: tcap)
-                let tcap = (cell_next.density * cell_next.spech
-                    + cell_next.volumetric_water * physics::W_SPECH)
-                    * cell_next.volume;
+                let density = cell_next.density;
+                let spech = cell_next.spech;
+                let volumetric_water = cell_next.volumetric_water;
+                let volume = cell_next.volume;
 
-                // qvp: latent source term [W] = Σ(ΔVP/R_v) * H_vap if enabled (Fortran: qvp)
-                let mut qvp = 0.0;
+                let tcap = (density * spech + volumetric_water * physics::W_SPECH) * volume;
+
+                let mut qvp = Quantity(0.0);
                 if settings.latent_heat_enabled
                     && let CellType::Material(_) = cell_next.cell_type
                 {
                     qvp = vpdiff * physics::W_HV;
                 }
 
-                // denom: Σ(1/R_th) + tcap/dt (Fortran: denom)
+                let q_adds = cell_next.q_adds;
+
                 let denom = oorsum + (tcap / dt);
-                if denom > 0.0 {
-                    // numerator: torsum + qvp + internal gains + previous-step storage term
-                    (torsum + qvp + cell_next.q_adds + (tcap * cell_prev.cell_temp / dt)) / denom
+                if denom > Quantity(0.0) {
+                    let prev_temp_k = cell_prev.cell_temp;
+                    let numer = torsum + qvp + q_adds + (tcap * prev_temp_k / dt);
+                    numer / denom
                 } else {
-                    cell_curr.cell_temp
+                    curr_temp_k
                 }
             };
 
@@ -153,7 +151,7 @@ impl Surface {
         _settings: &HamtSettings,
         surface_prev: &Surface,
         surface_curr: &Surface,
-        dt: f64,
+        dt: Time<f64>,
         nx: usize,
         bc: &BoundaryCondition,
     ) -> Result<()> {
@@ -199,7 +197,9 @@ impl Surface {
                 let mut vporsum = 0.0;
 
                 // vpsat: saturation vapor pressure at updated temperature (Fortran: vpsat)
-                let vpsat = physics::psy_psat_fn_temp(cell_props.cell_temp);
+                let vpsat = physics::psy_psat_fn_temp(
+                    cell_props.cell_temp.value_in(units::kelvin) - 273.15,
+                );
 
                 for nbr_i in self.neighbor_indices(i, nx) {
                     let nbr_props = &self.cells[[nbr_i, 0, 0]];
@@ -214,27 +214,44 @@ impl Surface {
                     // dist: center-to-center distance (Fortran: dist)
                     let dist = (cell_props.size.x().abs() + nbr_props.size.x().abs()) * 0.5;
 
-                    let (_, vaporr) =
-                        self.calculate_resistance_pair(cell_props, nbr_props, bc.pressure_air);
+                    let (_, vaporr) = self.calculate_resistance_pair(
+                        cell_props,
+                        nbr_props,
+                        bc.pressure_air.value_in(units::pascals),
+                    );
 
                     if vaporr > 0.0 {
                         vpoosum += 1.0 / vaporr;
 
-                        let nbr_vp =
-                            nbr_curr.cell_rh * physics::psy_psat_fn_temp(nbr_curr.cell_temp);
+                        let nbr_vp = nbr_curr.cell_rh
+                            * physics::psy_psat_fn_temp(
+                                nbr_curr.cell_temp.value_in(units::kelvin) - 273.15,
+                            );
 
                         vporsum += nbr_vp / vaporr;
                     }
 
                     // rhr1/rhr2: liquid transport resistances for each cell (Fortran: rhr1/rhr2)
-                    let rhr1 = if cell_props.dw > 0.0 && cell_props.dwd_phi > 0.0 {
-                        dist / (overlap * cell_props.dw * cell_props.dwd_phi)
+                    let dw1 = cell_props
+                        .dw
+                        .value_in(crate::hamt::uom::units::square_meter_per_second);
+                    let dwd_phi1 = cell_props
+                        .dwd_phi
+                        .value_in(crate::hamt::uom::units::kilograms_per_cubic_meter);
+                    let rhr1 = if dw1 > 0.0 && dwd_phi1 > 0.0 {
+                        dist / (overlap * dw1 * dwd_phi1)
                     } else {
                         0.0
                     };
 
-                    let rhr2 = if nbr_props.dw > 0.0 && nbr_props.dwd_phi > 0.0 {
-                        dist / (overlap * nbr_props.dw * nbr_props.dwd_phi)
+                    let dw2 = nbr_props
+                        .dw
+                        .value_in(crate::hamt::uom::units::square_meter_per_second);
+                    let dwd_phi2 = nbr_props
+                        .dwd_phi
+                        .value_in(crate::hamt::uom::units::kilograms_per_cubic_meter);
+                    let rhr2 = if dw2 > 0.0 && dwd_phi2 > 0.0 {
+                        dist / (overlap * dw2 * dwd_phi2)
                     } else {
                         0.0
                     };
@@ -249,11 +266,13 @@ impl Surface {
                 // Water Capacity
                 // wcap: storage term dθ/dφ * volume (Fortran: wcap)
                 // Unit: kg
-                let wcap = if cell_props.dwd_phi > 0.0 {
-                    cell_props.dwd_phi * cell_props.volume
-                } else {
-                    0.0
-                };
+                let dwd_phi = cell_props
+                    .dwd_phi
+                    .value_in(crate::hamt::uom::units::kilograms_per_cubic_meter);
+                let volume = cell_props
+                    .volume
+                    .value_in(crate::hamt::uom::units::cubic_meter);
+                let wcap = if dwd_phi > 0.0 { dwd_phi * volume } else { 0.0 };
 
                 // (moisture):
                 // denom: Σ(1/R_liq) + Σ(1/R_v)*vpsat + wcap/dt (Fortran: denom)
@@ -298,39 +317,68 @@ impl Surface {
         &self,
         cell1: &Cell,
         cell2: &Cell,
-        pressure_air: f64,
-    ) -> (f64, f64) {
-        let overlap = cell1.size.area_along(0).min(cell2.size.area_along(0));
+        pressure_air: Pressure<f64>,
+    ) -> (ThermalResistance<f64>, VaporResistance<f64>) {
+        let overlap: Length<f64> = Quantity(
+            cell1
+                .size
+                .area_along(0)
+                .value_in(crate::hamt::uom::units::square_meter)
+                .min(
+                    cell2
+                        .size
+                        .area_along(0)
+                        .value_in(crate::hamt::uom::units::square_meter),
+                ),
+        );
         let dist = (cell1.size.x().abs() + cell2.size.x().abs()) * 0.5;
 
-        let thermr1 = if cell1.htc > 0.0 {
-            1.0 / (overlap * cell1.htc)
-        } else if cell1.w_thermal_c > 0.0 {
-            dist / (overlap * cell1.w_thermal_c)
+        let htc1 = cell1
+            .htc
+            .value_in(crate::hamt::uom::units::watts_per_square_meter_kelvin);
+        let k1 = cell1
+            .w_thermal_c
+            .value_in(crate::hamt::uom::units::watts_per_meter_kelvin);
+        let thermr1 = if htc1 > 0.0 {
+            1.0 / (overlap * htc1)
+        } else if k1 > 0.0 {
+            dist / (overlap * k1)
         } else {
-            0.0
+            Quantity(0.0)
         };
-        let thermr2 = if cell2.htc > 0.0 {
-            1.0 / (overlap * cell2.htc)
-        } else if cell2.w_thermal_c > 0.0 {
-            dist / (overlap * cell2.w_thermal_c)
+        let htc2 = cell2
+            .htc
+            .value_in(crate::hamt::uom::units::watts_per_square_meter_kelvin);
+        let k2 = cell2
+            .w_thermal_c
+            .value_in(crate::hamt::uom::units::watts_per_meter_kelvin);
+        let thermr2 = if htc2 > 0.0 {
+            1.0 / (overlap * htc2)
+        } else if k2 > 0.0 {
+            dist / (overlap * k2)
         } else {
-            0.0
+            Quantity(0.0)
         };
 
-        let vaporr1 = if cell1.vtc > 0.0 {
-            1.0 / (overlap * cell1.vtc)
+        let vtc1 = cell1
+            .vtc
+            .value_in(crate::hamt::uom::units::kilograms_per_square_meter_second_pascal);
+        let vaporr1 = if vtc1 > 0.0 {
+            1.0 / (overlap * vtc1)
         } else if cell1.mu > 0.0 {
             (dist * cell1.mu) / (overlap * physics::wvdc(cell1.cell_temp, pressure_air))
         } else {
-            0.0
+            Quantity(0.0)
         };
-        let vaporr2 = if cell2.vtc > 0.0 {
-            1.0 / (overlap * cell2.vtc)
+        let vtc2 = cell2
+            .vtc
+            .value_in(crate::hamt::uom::units::kilograms_per_square_meter_second_pascal);
+        let vaporr2 = if vtc2 > 0.0 {
+            1.0 / (overlap * vtc2)
         } else if cell2.mu > 0.0 {
             (dist * cell2.mu) / (overlap * physics::wvdc(cell2.cell_temp, pressure_air))
         } else {
-            0.0
+            Quantity(0.0)
         };
 
         (thermr1 + thermr2, vaporr1 + vaporr2)

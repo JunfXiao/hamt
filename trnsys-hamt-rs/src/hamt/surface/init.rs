@@ -1,14 +1,22 @@
 use std::f64::consts::PI;
 
 use super::*;
+use crate::hamt::uom;
+use crate::hamt::uom::dimensions::Length;
 use crate::hamt::{
     cell::Boundary,
     material::Construction,
     physics::geometry::{Pt3D, Size3D},
 };
+use uom::units::meter;
 
 impl Surface {
-    pub fn new(name: String, area: f64, construction_name: String, cells: ArcArray3<Cell>) -> Self {
+    pub fn new(
+        name: String,
+        area: Area<f64>,
+        construction_name: String,
+        cells: ArcArray3<Cell>,
+    ) -> Self {
         let mut surface = Surface {
             name,
             construction_name,
@@ -28,20 +36,20 @@ impl Surface {
         settings: &HamtSettings,
         construction: Arc<Construction>,
         surface_name: String,
-        surface_area: f64,
+        surface_area: Area<f64>,
     ) -> Result<Surface> {
         // Initialize original point with the padding for exterior boundary cells
-        let boundary_cell_thickness: f64 = settings.base_cell_size.x();
-        let boundary_cell_size = Size3D::new(boundary_cell_thickness, 0.0, 0.0);
+        let boundary_cell_thickness = settings.base_cell_size.x();
+        let boundary_cell_size = Size3D::new(boundary_cell_thickness, 0.0 * meter, 0.0 * meter);
 
         // base pt is always the point with the smallest x/y/z
         // Offset for 2 exterior layers. First layer is for Conv/Rad/Sky/Ground Cells
         // Second layer is for Virtual Cell.
-        let mut base_pt = Size3D::new(-boundary_cell_thickness * 2.0, 0.0, 0.0);
+        let mut base_pt = Size3D::new(-boundary_cell_thickness * 2.0, 0.0 * meter, 0.0 * meter);
         // currently, we use a dummy y and z size for all.
         let dummy_length = surface_area.sqrt();
         let dummy_height = surface_area.sqrt();
-        let get_size = |thickness: f64| Pt3D(thickness, dummy_length, dummy_height);
+        let get_size = |thickness: Length<f64>| Pt3D(thickness, dummy_length, dummy_height);
         let get_origin = |base_pt: Pt3D, size: Size3D| base_pt + size / 2.0;
 
         // --- Exterior Boundary Cells (5) ---
@@ -85,7 +93,10 @@ impl Surface {
         // --- Material Cells ---
         for mat_arc in construction.layers.iter() {
             // Simplified division calculation
-            let mut divs = ((mat_arc.thickness / settings.div_length).ceil() as i32)
+            let mat_thickness_m = mat_arc.thickness;
+            let div_len_m = settings.div_length;
+
+            let mut divs = ((mat_thickness_m / div_len_m).value().ceil() as i32)
                 .max(settings.min_div)
                 .min(settings.max_div);
 
@@ -93,7 +104,7 @@ impl Surface {
             let sin_neg_pi_ovr_2 = (PI * -0.5).sin();
 
             while divs > 1 {
-                let test_len = mat_arc.thickness
+                let test_len = mat_thickness_m
                     * (((PI * (-1.0 / divs as f64) - PI / 2.0).sin() / 2.0)
                         - (sin_neg_pi_ovr_2 / 2.0));
                 if test_len > settings.adj_length {
@@ -106,7 +117,7 @@ impl Surface {
                 let did_f64 = did as f64;
                 let divs_f64 = divs as f64;
                 // Make cells smaller near the surface using sine distribution
-                let length = mat_arc.thickness
+                let length = mat_thickness_m
                     * (((PI * (-did_f64 / divs_f64) - PI / 2.0).sin() / 2.0)
                         - ((PI * (-(did_f64 - 1.0) / divs_f64) - PI / 2.0).sin() / 2.0));
 

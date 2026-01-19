@@ -2,11 +2,29 @@
 
 use std::{
     collections::HashMap,
+    fmt::{Debug, Display},
     hash::Hash,
+    mem::zeroed,
+    ops::{Div, Sub},
     sync::{Arc, RwLock},
 };
 
-use crate::trnsys::error::{InputError, TrnSysError};
+use crate::{
+    hamt::{
+        physics::KELVIN_CONV,
+        uom::{
+            DIM_LIQUID_TRANSPORT_COEFF, DIM_DIMENSIONLESS,
+            DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT, DensityQty, Dimension, DimensionlessQty,
+            Quantity, TemperatureQty,
+            dimensions::{
+                LiquidTransportCoeff, Dimensionless, Length, SpecificHeatCapacity, ThermalConductivity,
+                WaterContent,
+            },
+            units,
+        },
+    },
+    trnsys::error::{InputError, TrnSysError},
+};
 use anyhow::{Context, Ok, Result};
 use tracing::error;
 
@@ -16,36 +34,39 @@ use tracing::error;
 /// such as the sorption isotherm (water content vs. RH) or thermal conductivity
 /// vs. water content. The `interp` function in the `physics` module will operate
 /// on this struct.
-#[derive(Debug, Clone)]
-pub struct Curve {
-    pub x: Vec<f64>,
-    pub y: Vec<f64>,
+#[derive(Debug, Clone, Default)]
+pub struct Curve<const DX: Dimension, const DY: Dimension> {
+    pub x: Vec<Quantity<f64, DX>>,
+    pub y: Vec<Quantity<f64, DY>>,
 }
 
-impl Curve {
+impl<const DX: Dimension, const DY: Dimension> Curve<DX, DY> {
     /// Creates an empty curve.
-    pub fn new() -> Self {
+    pub fn new(x_series: Vec<Quantity<f64, DX>>, y_series: Vec<Quantity<f64, DY>>) -> Self {
         Self {
-            x: Vec::new(),
-            y: Vec::new(),
+            x: x_series,
+            y: y_series,
         }
     }
 
     /// Linearly interpolates a value from a curve.
     /// Also optionally returns the gradient at the interpolation point.
-    pub fn interpolate(&self, in_value: f64) -> (f64, f64) {
-        if self.x.is_empty() {
-            return (0.0, 0.0);
-        }
+    /// Returns the interpolated Y and the gradient (dY/dX) as f64.
+    pub fn interpolate(
+        &self,
+        in_x: Quantity<f64, DX>,
+    ) -> (Quantity<f64, DY>, Quantity<f64, { DY.sub(DX) }>) {
+        let zero_y = Quantity::<f64, DY>::zero();
+        let zero_grad = Quantity::<f64, { DY.sub(DX) }>::zero();
 
-        if in_value.is_nan() {
-            return (self.y[0], 0.0);
+        if self.x.is_empty() {
+            return (zero_y, zero_grad);
         }
 
         let mut upper_index: Option<usize> = None;
         for (i, &xv) in self.x.iter().enumerate() {
-            match xv.partial_cmp(&in_value) {
-                Some(std::cmp::Ordering::Equal) => return (self.y[i], 0.0),
+            match xv.partial_cmp(&in_x) {
+                Some(std::cmp::Ordering::Equal) => return (self.y[i], zero_grad),
                 Some(std::cmp::Ordering::Greater) => {
                     upper_index = Some(i);
                     break;
@@ -55,22 +76,68 @@ impl Curve {
         }
 
         match upper_index {
-            Some(0) => (self.y[0], 0.0),
+            Some(0) => (self.y[0], zero_grad),
             Some(i) => {
                 let x1 = self.x[i - 1];
                 let x2 = self.x[i];
                 let y1 = self.y[i - 1];
                 let y2 = self.y[i];
 
-                let grad = if (x2 - x1).abs() > 1e-9 {
+                let grad = if (x2 - x1).abs() > Quantity::<f64, DX>(1e-9) {
                     (y2 - y1) / (x2 - x1)
                 } else {
-                    0.0
+                    zero_grad
                 };
-                let val = y1 + grad * (in_value - x1);
-                (val, grad)
+                let val = y1.0 + grad.0 * (in_x.0 - x1.0);
+                (Quantity::<f64, DY>(val), grad)
             }
-            None => (*self.y.last().unwrap(), 0.0),
+            None => (*self.y.last().unwrap(), zero_grad),
+        }
+    }
+
+    /// Linearly interpolates a value from a curve.
+    /// Also optionally returns the gradient at the interpolation point.
+    /// Returns the interpolated X and the gradient (dX/dY) as f64.
+    pub fn reverse_interpolate(
+        &self,
+        in_y: Quantity<f64, DY>,
+    ) -> (Quantity<f64, DX>, Quantity<f64, { DX.sub(DY) }>) {
+        let zero_x = Quantity::<f64, DX>::zero();
+        let zero_grad = Quantity::<f64, { DX.sub(DY) }>::zero();
+
+        if self.y.is_empty() {
+            return (zero_x, zero_grad);
+        }
+
+        let mut upper_index: Option<usize> = None;
+        for (i, &yv) in self.y.iter().enumerate() {
+            match yv.partial_cmp(&in_y) {
+                Some(std::cmp::Ordering::Equal) => return (self.x[i], zero_grad),
+                Some(std::cmp::Ordering::Greater) => {
+                    upper_index = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        match upper_index {
+            Some(0) => (self.x[0], zero_grad),
+            Some(i) => {
+                let y1 = self.y[i - 1];
+                let y2 = self.y[i];
+                let x1 = self.x[i - 1];
+                let x2 = self.x[i];
+
+                let grad = if (y2 - y1).abs() > Quantity::<f64, DY>(1e-9) {
+                    (x2 - x1) / (y2 - y1)
+                } else {
+                    zero_grad
+                };
+                let val = x1.0 + grad.0 * (in_y.0 - y1.0);
+                (Quantity::<f64, DX>(val), grad)
+            }
+            None => (*self.x.last().unwrap(), zero_grad),
         }
     }
 }
@@ -84,63 +151,63 @@ pub struct Material {
     pub name: String,
 
     /// Thickness of the material [m].
-    pub thickness: f64,
+    pub thickness: Length<f64>,
 
     /// Conductivity of the material [W/(m·K)].
-    pub conductivity: f64,
+    pub conductivity: ThermalConductivity<f64>,
 
     /// Density of the material [kg/m³].
-    pub density: f64,
+    pub density: DensityQty<f64>,
 
     /// Specific heat of the material [J/(kg·K)].
-    pub spec_heat: f64,
+    pub spec_heat: SpecificHeatCapacity<f64>,
 
     // Radiation properties
-    pub thermal_absorptance: f64,
-    pub solar_absorptance: f64,
-    pub visible_absorptance: f64,
+    pub thermal_absorptance: Dimensionless<f64>,
+    pub solar_absorptance: Dimensionless<f64>,
+    pub visible_absorptance: Dimensionless<f64>,
 
     // HAMT-specific properties
     /// Porosity of the material [-].
-    pub porosity: f64,
+    pub porosity: Dimensionless<f64>,
 
     /// Initial water content ratio of the material [kg/kg].
-    pub initial_water_content: f64, // iwater in Fortran
+    pub initial_water_content: Dimensionless<f64>, // iwater in Fortran
 
     // HAMT data curves
     /// Sorption Isotherm curve (Water Content vs. RH).
     ///
     /// - X: Relative Humidity [-]
     /// - Y: Water Content [kg/m³]
-    pub sorption_isotherm: Curve,
+    pub sorption_isotherm: Curve<DIM_DIMENSIONLESS, DIM_WATER_CONTENT>,
 
     /// Water Transport Coefficient Suction curve (Liquid Transport Coefficient vs. Water Content).
     ///
     /// - X: Water Content [kg/m³]
     /// - Y: Liquid Transport Coefficient [m²/s]
-    pub suction: Curve,
+    pub suction: Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF>,
 
     /// Water Transport Coefficient Redistribution curve (Liquid Transport Coefficient vs. Water Content for drying).
     ///
     /// - X: Water Content [kg/m³]
     /// - Y: Liquid Transport Coefficient [m²/s]
-    pub redistribution: Curve,
+    pub redistribution: Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF>,
 
     /// Vapor Diffusion Resistance curve (mu vs. RH).
     ///
     /// - X: Relative Humidity [-]
     /// - Y: Vapor Diffusion Resistance [-]
-    pub vapor_diffusion_resistance: Curve,
+    pub vapor_diffusion_resistance: Curve<DIM_DIMENSIONLESS, DIM_DIMENSIONLESS>,
 
     /// Thermal Conductivity curve (Conductivity vs. Water Content).
     ///
     /// - X: Water Content [kg/m³]
     /// - Y: Thermal Conductivity [W/mK]
-    pub thermal_conductivity: Curve,
+    pub thermal_conductivity: Curve<DIM_WATER_CONTENT, DIM_THERMAL_CONDUCTIVITY>,
 
     // Discretization parameters
     /// Initial temperature for cells of this material [°C].
-    pub initial_temp: f64,
+    pub initial_temp: TemperatureQty<f64>,
 }
 
 impl PartialEq for Material {
@@ -161,21 +228,21 @@ impl Default for Material {
     fn default() -> Self {
         Self {
             name: "Unnamed Material".to_string(),
-            thickness: 0.0,
-            conductivity: 0.0,
-            density: 9999.0,
-            spec_heat: 9999.0,
-            thermal_absorptance: 0.5,
-            solar_absorptance: 0.2,
-            visible_absorptance: 0.01,
-            porosity: 0.0,
-            initial_water_content: 0.0,
-            sorption_isotherm: Curve::new(),
-            suction: Curve::new(),
-            redistribution: Curve::new(),
-            vapor_diffusion_resistance: Curve::new(),
-            thermal_conductivity: Curve::new(),
-            initial_temp: 20.0,
+            thickness: Length::<f64>::zero(),
+            conductivity: ThermalConductivity::<f64>::zero(),
+            density: DensityQty::<f64>::zero(),
+            spec_heat: SpecificHeatCapacity::<f64>::zero(),
+            thermal_absorptance: Quantity(0.5),
+            solar_absorptance: Quantity(0.5),
+            visible_absorptance: Quantity(0.5),
+            porosity: Quantity(0.5),
+            initial_water_content: Quantity(0.5),
+            sorption_isotherm: Curve::default(),
+            suction: Curve::default(),
+            redistribution: Curve::default(),
+            vapor_diffusion_resistance: Curve::default(),
+            thermal_conductivity: Curve::default(),
+            initial_temp: Quantity(20.0 + KELVIN_CONV),
         }
     }
 }
@@ -188,13 +255,14 @@ impl Material {
         }
     }
 
-    pub fn initiaal_water_density(&self) -> f64 {
-        self.initial_water_content * self.density
+    pub fn initial_water_density(&self) -> DensityQty<f64> {
+        let density = self.density;
+        self.initial_water_content * density
     }
 
-    pub fn initial_rh(&self) -> f64 {
+    pub fn initial_rh(&self) -> DimensionlessQty<f64> {
         self.sorption_isotherm
-            .interpolate(self.initiaal_water_density())
+            .reverse_interpolate(self.initial_water_density())
             .0
     }
 }

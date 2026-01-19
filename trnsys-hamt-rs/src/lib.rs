@@ -1,3 +1,6 @@
+#![feature(adt_const_params, generic_const_exprs)]
+#![allow(incomplete_features)]
+
 use crate::logging::init_tracing;
 use crate::trnsys::error::TrnSysErrorHandler;
 use crate::trnsys::logging::cleanup_tracing;
