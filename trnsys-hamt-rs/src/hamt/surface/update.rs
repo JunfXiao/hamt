@@ -51,7 +51,7 @@ impl Surface {
         bc: &BoundaryCondition,
         settings: &HamtSettings,
     ) -> Result<()> {
-        for (_, cell) in self.cells.par_iter_mut() {
+        for cell in self.cells.iter_mut() {
             cell.calc_dependent_state(bc, settings);
         }
         Ok(())
@@ -79,47 +79,64 @@ impl Surface {
             }
 
             let t_new = {
-                let cell_props = &self.cells[[i, 0, 0]];
-                let cell_prev_ts = &surface_prev.cells[[i, 0, 0]];
+                // cell_next: writable buffer (surface_next)
+                let cell_next = &self.cells[[i, 0, 0]];
+                // cell_prev: last converged timestep (t-1)
+                let cell_prev = &surface_prev.cells[[i, 0, 0]];
+                // cell_curr: current iteration state (t, previous iter)
                 let cell_curr = &surface_curr.cells[[i, 0, 0]];
 
+                // temperature over resistance sum:
+                // Σ(T_neighbor / R_th) from previous iteration neighbors (Fortran: torsum)
+                // Unit: W/m²
                 let mut torsum = 0.0;
+
+                // One over resistance sum:
+                // Σ(1 / R_th) over neighbors (Fortran: oorsum)
+                // Unit: W/m²K
                 let mut oorsum = 0.0;
+
+                // vapor pressure difference weighted by vapor resistance
+                // vpdiff: Σ(ΔVP / R_v) latent coupling source term (Fortran: vpdiff)
+                // kg/(m²·s
                 let mut vpdiff = 0.0;
 
                 for nbr_i in self.neighbor_indices(i, nx) {
-                    let nbr_props = &self.cells[[nbr_i, 0, 0]];
-                    let nbr_curr = &surface_curr.cells[[nbr_i, 0, 0]];
-                    let (thermr, vaporr) = self.calculate_resistance_pair(
-                        cell_props,
-                        nbr_props,
-                        i,
-                        nbr_i,
-                        bc.pressure_air,
-                    );
+                    // neighbor_next: writable buffer props (w_thermal_c/mu) for R calculations
+                    let neighbor_next = &self.cells[[nbr_i, 0, 0]];
 
-                    if thermr > 0.0 {
-                        oorsum += 1.0 / thermr;
-                        torsum += nbr_curr.cell_temp / thermr;
+                    // neighbor_curr: state (T, RH, VP) from previous iteration
+                    let neighbor_curr = &surface_curr.cells[[nbr_i, 0, 0]];
+                    let (therm_resistance, vapor_resistance) =
+                        self.calculate_resistance_pair(cell_next, neighbor_next, bc.pressure_air);
+
+                    if therm_resistance > 0.0 {
+                        oorsum += 1.0 / therm_resistance;
+                        torsum += neighbor_curr.cell_temp / therm_resistance;
                     }
-                    if vaporr > 0.0 {
-                        vpdiff += (nbr_curr.cell_vp - cell_curr.cell_vp) / vaporr;
+                    if vapor_resistance > 0.0 {
+                        vpdiff += (neighbor_curr.cell_vp - cell_curr.cell_vp) / vapor_resistance;
                     }
                 }
 
-                let tcap = (cell_props.density * cell_props.spech
-                    + cell_props.volumetric_water * physics::W_SPECH)
-                    * cell_props.volume;
+                // tcap: thermal capacity term [J/K] = (ρ*c + θ_w * c_w) * volume (Fortran: tcap)
+                let tcap = (cell_next.density * cell_next.spech
+                    + cell_next.volumetric_water * physics::W_SPECH)
+                    * cell_next.volume;
 
+                // qvp: latent source term [W] = Σ(ΔVP/R_v) * H_vap if enabled (Fortran: qvp)
                 let mut qvp = 0.0;
-                if settings.latent_heat_enabled && let CellType::Material(_) = cell_props.cell_type {
+                if settings.latent_heat_enabled
+                    && let CellType::Material(_) = cell_next.cell_type
+                {
                     qvp = vpdiff * physics::W_HV;
                 }
 
+                // denom: Σ(1/R_th) + tcap/dt (Fortran: denom)
                 let denom = oorsum + (tcap / dt);
                 if denom > 0.0 {
-                    (torsum + qvp + cell_props.q_adds + (tcap * cell_prev_ts.cell_temp / dt))
-                        / denom
+                    // numerator: torsum + qvp + internal gains + previous-step storage term
+                    (torsum + qvp + cell_next.q_adds + (tcap * cell_prev.cell_temp / dt)) / denom
                 } else {
                     cell_curr.cell_temp
                 }
@@ -154,35 +171,51 @@ impl Surface {
             }
 
             let rh_new = {
+                // cell_props: writable buffer (surface_next) properties (dw, dwd_phi, mu, etc.) and T
                 let cell_props = &self.cells[[i, 0, 0]];
+                // cell_prev_ts: last converged timestep (t-1) RH
                 let cell_prev_ts = &surface_prev.cells[[i, 0, 0]];
+                // cell_curr: current iteration RH/VP/T
                 let cell_curr = &surface_curr.cells[[i, 0, 0]];
 
+                // phi one over sum
+                // phioosum: Σ(1 / R_liq) liquid transport conductance (Fortran: phioosum)
+                // Unit: kg/(m²·s)
                 let mut phioosum = 0.0;
+
+                // phi over resistance sum
+                // phiorsum: Σ(φ_neighbor / R_liq) neighbor RH weighted by liquid conductance
+                // Unit: kg/(m²·s)
                 let mut phiorsum = 0.0;
+
+                // vapor pressure one over sum
+                // vioosum: Σ(1 / R_v) vapor transport conductance (Fortran: vioosum)
+                // Unit: kg/(m²·s·Pa)
                 let mut vpoosum = 0.0;
+
+                // vapor pressure over resistance sum
+                // vporsum: Σ(VP_neighbor / R_v) vapor pressure driving term
+                // Units: kg/(m²·s)
                 let mut vporsum = 0.0;
 
+                // vpsat: saturation vapor pressure at updated temperature (Fortran: vpsat)
                 let vpsat = physics::psy_psat_fn_temp(cell_props.cell_temp);
 
                 for nbr_i in self.neighbor_indices(i, nx) {
                     let nbr_props = &self.cells[[nbr_i, 0, 0]];
                     let nbr_curr = &surface_curr.cells[[nbr_i, 0, 0]];
 
+                    // overlap: shared face area (Fortran: overlap)
                     let overlap = cell_props
                         .size
                         .area_along(0)
                         .min(nbr_props.size.area_along(0));
 
+                    // dist: center-to-center distance (Fortran: dist)
                     let dist = (cell_props.size.x().abs() + nbr_props.size.x().abs()) * 0.5;
 
-                    let (_, vaporr) = self.calculate_resistance_pair(
-                        cell_props,
-                        nbr_props,
-                        i,
-                        nbr_i,
-                        bc.pressure_air,
-                    );
+                    let (_, vaporr) =
+                        self.calculate_resistance_pair(cell_props, nbr_props, bc.pressure_air);
 
                     if vaporr > 0.0 {
                         vpoosum += 1.0 / vaporr;
@@ -193,6 +226,7 @@ impl Surface {
                         vporsum += nbr_vp / vaporr;
                     }
 
+                    // rhr1/rhr2: liquid transport resistances for each cell (Fortran: rhr1/rhr2)
                     let rhr1 = if cell_props.dw > 0.0 && cell_props.dwd_phi > 0.0 {
                         dist / (overlap * cell_props.dw * cell_props.dwd_phi)
                     } else {
@@ -212,15 +246,23 @@ impl Surface {
                     }
                 }
 
+                // Water Capacity
+                // wcap: storage term dθ/dφ * volume (Fortran: wcap)
+                // Unit: kg
                 let wcap = if cell_props.dwd_phi > 0.0 {
                     cell_props.dwd_phi * cell_props.volume
                 } else {
                     0.0
                 };
 
+                // (moisture):
+                // denom: Σ(1/R_liq) + Σ(1/R_v)*vpsat + wcap/dt (Fortran: denom)
+                // phioosum + vpoosum·vpsat + wcap/d
+                // kg/(m²·s)
                 let denom = phioosum + vpoosum * vpsat + wcap / dt;
 
                 if denom > 0.0 {
+                    // numerator: liquid + vapor driving + storage from previous timestep
                     (phiorsum + vporsum + (wcap * cell_prev_ts.cell_rh) / dt) / denom
                 } else {
                     cell_curr.cell_rh
@@ -234,24 +276,28 @@ impl Surface {
     }
 
     /// Get neighbor indices for a 1D cell.
-    fn neighbor_indices(&self, i: usize, nx: usize) -> Vec<usize> {
-        let mut neighbors = Vec::with_capacity(2);
-        if i > 0 {
-            neighbors.push(i - 1);
-        }
-        if i + 1 < nx {
-            neighbors.push(i + 1);
-        }
-        neighbors
+    fn neighbor_indices(&self, i: usize, nx: usize) -> impl Iterator<Item = usize> {
+        // 1. 检查左边 (使用 bool::then_some 生成 Option)
+        let left = (i > 0).then_some(i - 1);
+
+        // 2. 检查右边
+        let right = (i + 1 < nx).then_some(i + 1);
+
+        // 3. 将两个 Option 链接起来
+        // Option 也是一种迭代器（由 0 或 1 个元素组成）
+        left.into_iter().chain(right)
     }
 
     /// Calculate thermal and vapor resistance between two cells.
+    ///
+    /// # Returns
+    /// A tuple containing the thermal and vapor resistances.
+    /// - Thermal resistance [m²K/W] // TODO Check Unit
+    /// - Vapor resistance [m²Pa/W] // TODO Check Unit
     fn calculate_resistance_pair(
         &self,
         cell1: &Cell,
         cell2: &Cell,
-        _i1: usize,
-        _i2: usize,
         pressure_air: f64,
     ) -> (f64, f64) {
         let overlap = cell1.size.area_along(0).min(cell2.size.area_along(0));

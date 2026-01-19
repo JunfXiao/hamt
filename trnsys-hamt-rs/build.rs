@@ -27,7 +27,7 @@ fn write_entrance_code(type_number: &str) {
     let function_code = format!(
         r#"
         #[allow(non_snake_case)]
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub extern "C" fn TYPE{}() {{
             entrance();
         }}

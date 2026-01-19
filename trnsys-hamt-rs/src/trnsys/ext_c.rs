@@ -5,7 +5,7 @@
 use std::os::raw::{c_char, c_double, c_int};
 
 //noinspection SpellCheckingInspection
-extern "C" {
+unsafe extern "C" {
     // --- Kernel subroutines ----------------------------------------------------------------------------------------------
     pub fn FOUNDBADINPUT(
         Input: *mut c_int,
