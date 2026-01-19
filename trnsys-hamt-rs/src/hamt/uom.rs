@@ -40,8 +40,9 @@ unit_system!(
     dimension LiquidTransportCoeff = Length^2 / Time; // m²/s
     dimension VaporDiffusionCoeff = Mass/ (Length * Time * Pressure); // m²/s
 
-    dimension ThermalResistance = 1 / HeatTransferCoeff; // W/(m²·K)
-    dimension VaporResistance = (Length^2 * Pressure) / Power; // m²·Pa/W
+    dimension ThermalResistance = Temperature / Power; // K/W
+    // Vapor resistance (Pa·s/kg), consistent with WVDC-based formulation
+    dimension VaporResistance = Pressure * Time / Mass;
 
     // Base units
     #[base(Length)]
@@ -78,12 +79,13 @@ unit_system!(
     unit watts_per_square_meter_kelvin: HeatTransferCoeff = watts / (square_meter * kelvin);
     unit watts_per_meter_kelvin: ThermalConductivity = watts / (meter * kelvin);
     unit kilograms_per_cubic_meter: Density = kilograms / cubic_meter;
+    unit kelvin_per_watt: ThermalResistance = kelvin / watts;
     unit kilograms_per_square_meter_second_pascal: VaporTransportCoeff =
         kilograms / (square_meter * seconds * pascals);
     unit square_meter_per_second: LiquidTransportCoeff = square_meter / seconds;
     unit kilogram_per_square_meter_second_pascal: VaporDiffusionCoeff = kilograms / (meter * seconds * pascals);
-    unit square_meter_per_pascal: VaporResistance = square_meter * pascals / watts;
-    unit squared_meter_pascal_per_watt: VaporResistance = square_meter * pascals / watts;
+    // Vapor resistance: Pa·s/kg
+    unit pascal_second_per_kilogram: VaporResistance = pascals * seconds / kilograms;
 
     // Domain constants (SI)
     constant WATER_DENSITY = 1000.0 * kilograms_per_cubic_meter;

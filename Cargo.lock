@@ -85,6 +85,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "diman"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc2e5d605b325d3ee5e1ae397bc443327314843f2b10e594d80622665034c56d"
+dependencies = [
+ "diman_lib",
+ "diman_unit_system",
+]
+
+[[package]]
+name = "diman_lib"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf9739004e5a32a01e0fec56dc0d06ed78cc135c3f854ee2373b844f3c74cc9b"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "diman_unit_system"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73de846cb1a9737f3ea6764094cddb3feac0f4103dc1bbb2d47ba337f94a371f"
+dependencies = [
+ "diman_lib",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -596,6 +627,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "csv",
+ "diman",
  "ndarray",
  "rayon",
  "serde",

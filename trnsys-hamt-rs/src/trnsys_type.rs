@@ -1,5 +1,10 @@
 use crate::hamt::hamt_manager::HamtManager;
 use crate::hamt::io::load_hamt_data;
+use crate::hamt::physics::KELVIN_CONV;
+use crate::hamt::uom::units::{
+    kelvin, kilograms_per_cubic_meter, kilograms_per_square_meter_second, square_meter,
+    watts_per_square_meter,
+};
 use crate::trnsys::error::{InputError, TrnSysError};
 use crate::trnsys::iteration_mode::IterationMode;
 use crate::trnsys::param::TrnSysValue;
@@ -95,7 +100,7 @@ impl TrnSysType {
             None,
             construction,
             format!("S256_{}", get_current_unit()),
-            surface_area,
+            surface_area * square_meter,
         )?;
         state.hamt_manager = Some(manager);
         Ok(())
@@ -121,17 +126,23 @@ impl TrnSysType {
             {
                 let report = manager.surface_next.report()?;
                 let outputs = vec![
-                    report.temp_surf_out,
-                    report.temp_surf_in,
-                    report.rh_surf_out,
-                    report.rh_surf_in,
-                    report.temp_surf_user_def,
-                    report.rh_surf_user_def,
-                    report.water_surf_user_def,
-                    report.q_surf_ext,
-                    report.q_surf_int,
-                    report.m_surf_ext,
-                    report.m_surf_int,
+                    report.temp_surf_out.value_in(kelvin) - KELVIN_CONV,
+                    report.temp_surf_in.value_in(kelvin) - KELVIN_CONV,
+                    report.rh_surf_out.value(),
+                    report.rh_surf_in.value(),
+                    report.temp_surf_user_def.value_in(kelvin) - KELVIN_CONV,
+                    report.rh_surf_user_def.value(),
+                    report
+                        .water_surf_user_def
+                        .value_in(kilograms_per_cubic_meter),
+                    report.q_surf_ext.value_in(watts_per_square_meter),
+                    report.q_surf_int.value_in(watts_per_square_meter),
+                    report
+                        .m_surf_ext
+                        .value_in(kilograms_per_square_meter_second),
+                    report
+                        .m_surf_int
+                        .value_in(kilograms_per_square_meter_second),
                 ];
                 return Ok(outputs
                     .into_iter()

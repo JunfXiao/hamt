@@ -1,5 +1,5 @@
 use crate::hamt::uom::{
-    PressureQty, TemperatureQty,
+    PressureQty, Quantity, TemperatureQty,
     dimensions::{Dimensionless, Temperature},
     units,
 };
@@ -38,8 +38,8 @@ impl BoundaryCondition {
         Self {
             temp_outside_air: celsius_to_kelvin(temp_outside_c),
             temp_inside_air: celsius_to_kelvin(temp_inside_c),
-            rh_outside_air: rh_outside,
-            rh_inside_air: rh_inside,
+            rh_outside_air: Quantity(rh_outside),
+            rh_inside_air: Quantity(rh_inside),
             pressure_air: pressure_pa * units::pascals,
             is_raining: false,
         }
