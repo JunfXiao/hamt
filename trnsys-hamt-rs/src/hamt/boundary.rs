@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 use crate::hamt::{
     physics::{ATMOSPHERE_PRESSURE, KELVIN_CONV},
     uom::{
@@ -13,7 +15,7 @@ use crate::hamt::{
 /// Typed boundary conditions for the simulation.
 /// Temperatures are stored as absolute (Kelvin). Relative humidity is
 /// dimensionless (0–1). Pressure is absolute (Pascal).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BoundaryCondition {
     /// Outside air temperature [K].
     pub temp_outside_air: Temperature<f64>,
@@ -92,21 +94,6 @@ impl BoundaryCondition {
             q_addition_userdef: q_additional_userdef * watts,
             is_raining: false,
         }
-    }
-
-    /// Returns outside temperature in °C for legacy IO.
-    pub fn temp_outside_c(&self) -> f64 {
-        kelvin_to_celsius(self.temp_outside_air)
-    }
-
-    /// Returns inside temperature in °C for legacy IO.
-    pub fn temp_inside_c(&self) -> f64 {
-        kelvin_to_celsius(self.temp_inside_air)
-    }
-
-    /// Returns pressure in Pa for legacy IO.
-    pub fn pressure_pa(&self) -> f64 {
-        self.pressure_air.value_in(units::pascals)
     }
 }
 

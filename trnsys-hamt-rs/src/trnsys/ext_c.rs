@@ -126,7 +126,7 @@ unsafe extern "C" {
     pub fn TRNSYSFUNCTIONS_mp_GETSIMULATIONTIME() -> c_double;
     pub fn TRNSYSFUNCTIONS_mp_GETSIMULATIONTIMESTEP() -> c_double;
     pub fn TRNSYSFUNCTIONS_mp_GETSTATICARRAYVALUE(i: *mut c_int) -> c_double;
-    pub fn TRNSYSFUNCTIONS_mp_GETTIMESTEPITERATION() -> c_int;
+    pub fn TRNSYSFUNCTIONS_mp_GETTIMESTEPITERATION() -> c_double;
     pub fn TRNSYSFUNCTIONS_mp_GETTRNSYSINPUTFILEDIR(dir: *mut c_char, len: usize) -> *mut c_char;
     pub fn TRNSYSFUNCTIONS_mp_GETTRNSYSROOTDIR(dir: *mut c_char, len: usize) -> *mut c_char;
     pub fn UPDATEREPORTINTEGRAL(index: *mut c_int, intVal: *mut c_double);

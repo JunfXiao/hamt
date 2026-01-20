@@ -4,7 +4,7 @@ use crate::hamt::uom::{
         Area, HeatTransferCoeff, Power, Pressure, ThermalConductivity, ThermalResistance, Time,
         VaporResistance, VaporTransportCoeff,
     },
-    units::{k_per_w, kelvin, pa_s_per_kg, pascals, watts},
+    units::{k_per_w, kelvin, kg_per_m2_s_pa, pa_s_per_kg, pascals, watts},
 };
 
 use super::*;
@@ -23,8 +23,6 @@ impl Surface {
         surface_prev: &Surface,
         surface_curr: &Surface,
     ) -> Result<()> {
-        let dt = settings.timestep;
-
         // --- Sync `surface_next` with current iteration state ---
         self.sync_state_from(surface_curr)?;
 
@@ -85,11 +83,14 @@ impl Surface {
                     let rh = cell.cell_rh;
                     let vtc = if bc.vapor_transport_coeff_ext > VaporTransportCoeff::<f64>::zero() {
                         bc.vapor_transport_coeff_ext
-                    } else if rh > Quantity(0.0) {
-                        let rho_v = physics::vd_from_t_rh(cell.cell_temp, rh);
-                        bc.mass_convection_coeff_ext * rho_v / (psat * rh)
                     } else {
-                        Quantity(10000.0)
+                        let rho_v = physics::vd_from_t_rh(cell.cell_temp, rh);
+                        let denom = psat * rh;
+                        if denom > Quantity(0.0) {
+                            bc.mass_convection_coeff_ext * rho_v / denom
+                        } else {
+                            Quantity(0.0)
+                        }
                     };
                     cell.vtc = vtc;
                     cell.cell_vp = rh * psat;
@@ -99,15 +100,24 @@ impl Surface {
                     cell.cell_rh = bc.rh_inside_air;
                     let psat = physics::psy_psat_fn_temp(cell.cell_temp);
                     let rh = cell.cell_rh;
-                    let vtc = if bc.vapor_transport_coeff_int > VaporTransportCoeff::<f64>::zero() {
-                        bc.vapor_transport_coeff_int
-                    } else if rh > Quantity(0.0) {
+                    let mut vtc =
+                        if bc.vapor_transport_coeff_int > VaporTransportCoeff::<f64>::zero() {
+                            bc.vapor_transport_coeff_int
+                        } else if rh > Quantity(0.0) {
+                            let rho_v = physics::vd_from_t_rh(cell.cell_temp, rh);
+                            bc.mass_convection_coeff_int * rho_v / (psat * rh)
+                        } else {
+                            10000.0 * kg_per_m2_s_pa
+                        };
+                    if bc.vapor_transport_coeff_int > VaporTransportCoeff::<f64>::zero()
+                        && rh > Quantity(0.0)
+                    {
                         let rho_v = physics::vd_from_t_rh(cell.cell_temp, rh);
-                        bc.mass_convection_coeff_int * rho_v / (psat * rh)
+                        // No HMass update
+                        cell.vtc = vtc;
                     } else {
-                        Quantity(10000.0)
-                    };
-                    cell.vtc = vtc;
+                        cell.vtc = vtc;
+                    }
                     cell.cell_vp = rh * psat;
                 }
             }
@@ -395,6 +405,17 @@ impl Surface {
                 .min(cell2.size.area_along(0).value_unchecked()),
         );
         let dist = (cell1.size.x().abs() + cell2.size.x().abs()) * 0.5;
+
+        if overlap <= Quantity(0.0) || dist <= Quantity(0.0) {
+            tracing::warn!(
+                "calc_resistance_pair: degenerate geometry overlap={:?}, dist={:?}, cell1={:?}, cell2={:?}",
+                overlap,
+                dist,
+                cell1.cell_type,
+                cell2.cell_type
+            );
+            return (Quantity(0.0), Quantity(0.0));
+        }
 
         let htc1 = cell1.htc;
         let k1 = cell1.w_thermal_c;

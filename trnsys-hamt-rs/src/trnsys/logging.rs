@@ -21,6 +21,10 @@ use tracing_subscriber::{
 };
 
 /// The threshold level for trnsys logging.
+#[cfg(debug_assertions)]
+const TRNSYS_LOG_LEVEL: Level = Level::DEBUG;
+/// The threshold level for trnsys logging.
+#[cfg(not(debug_assertions))]
 const TRNSYS_LOG_LEVEL: Level = Level::WARN;
 
 /// Custom function to handle trnsys logging.
@@ -244,7 +248,7 @@ pub fn cleanup_tracing() {
             // Move the log file to the current working directory
             let new_file_path = std::env::current_dir()
                 .expect("Failed to get current directory")
-                .join("type_error.log");
+                .join(format!("type_{}_error.log", TYPE_NUMBER));
             let new_file_path_str = new_file_path.clone().to_str().unwrap().to_owned();
             // remove if the file already exists
             if new_file_path.exists() {

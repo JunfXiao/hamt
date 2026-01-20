@@ -158,18 +158,15 @@ pub fn load_hamt_data<P: AsRef<Path>>(path: P) -> Result<MaterialLibrary> {
                 | HamtProperty::Material
                 | HamtProperty::SurfaceVaporCoefs => {}
             }
-        } else if *prop != HamtProperty::Construction {
-            warn!(
-                "Property '{}' found for unknown material '{}'",
-                prop.as_str(),
-                name
-            );
         }
     }
 
     // Register materials in the library
     for mat in materials.into_values() {
-        library.add_material(mat)?;
+        let mat_name = mat.name.clone();
+        library
+            .add_material(mat)
+            .with_context(|| format!("Adding material {}", mat_name))?;
     }
 
     // 5. Fourth pass: Surface Vapor Coefficients
@@ -224,7 +221,7 @@ pub fn load_hamt_data<P: AsRef<Path>>(path: P) -> Result<MaterialLibrary> {
             // otherwise use default
 
             let surface_vapor_coef = surface_vapor_coefs.get(name).cloned().unwrap_or_else(||{
-                info!("Construction '{}' has no surface vapor coefficient defined. Default value is used.", &name);
+                warn!("Construction '{}' has no surface vapor coefficient defined. Default value is used.", &name);
                 SurfaceVaporCoef::default()
             });
 
@@ -383,7 +380,5 @@ mod tests {
         std::fs::write(&temp_path, idf_content).unwrap();
         let library = load_hamt_data(&temp_path).unwrap();
         assert!(library.get_material("05_AGEPAN_THD_jr_0.035").is_ok());
-
-        info!("Library: {:#?}", library)
     }
 }

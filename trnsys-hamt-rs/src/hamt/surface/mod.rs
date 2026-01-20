@@ -1,5 +1,6 @@
 use anyhow::Ok;
 use ndarray::ArcArray3;
+use serde::Serialize;
 use tracing::debug;
 
 use crate::hamt::cell::{BoundaryLocation, Cell, CellType};
@@ -16,7 +17,7 @@ pub mod update;
 use std::{collections::HashMap, sync::Arc};
 
 /// Snapshot of on-demand surface reporting values.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct SurfaceReport {
     pub temp_surf_out: Temperature<f64>,
     pub temp_surf_in: Temperature<f64>,

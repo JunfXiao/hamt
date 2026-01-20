@@ -447,7 +447,7 @@ pub fn get_static_array_value(mut i: i32) -> f64 {
     unsafe { ext_c::TRNSYSFUNCTIONS_mp_GETSTATICARRAYVALUE(&mut i) }
 }
 
-pub fn get_timestep_iteration() -> i32 {
+pub fn get_timestep_iteration() -> f64 {
     unsafe { ext_c::TRNSYSFUNCTIONS_mp_GETTIMESTEPITERATION() }
 }
 

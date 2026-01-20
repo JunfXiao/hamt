@@ -11,14 +11,14 @@ use std::{
 
 use crate::{
     hamt::{
+        boundary::celsius_to_kelvin,
         physics::KELVIN_CONV,
         uom::{
-            DIM_LIQUID_TRANSPORT_COEFF, DIM_DIMENSIONLESS,
-            DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT, DensityQty, Dimension, DimensionlessQty,
-            Quantity, Temperature,
+            DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_THERMAL_CONDUCTIVITY,
+            DIM_WATER_CONTENT, DensityQty, Dimension, DimensionlessQty, Quantity, Temperature,
             dimensions::{
-                LiquidTransportCoeff, Dimensionless, Length, SpecificHeatCapacity, ThermalConductivity,
-                WaterContent,
+                Dimensionless, Length, LiquidTransportCoeff, SpecificHeatCapacity,
+                ThermalConductivity, WaterContent,
             },
             units,
         },
@@ -242,7 +242,7 @@ impl Default for Material {
             redistribution: Curve::default(),
             vapor_diffusion_resistance: Curve::default(),
             thermal_conductivity: Curve::default(),
-            initial_temp: Quantity(20.0 + KELVIN_CONV),
+            initial_temp: celsius_to_kelvin(20.0),
         }
     }
 }
@@ -437,5 +437,77 @@ impl MaterialLibrary {
                 name: name.to_string(),
             })
         })?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hamt::uom::units::{dimensionless, kg_per_m3};
+
+    #[test]
+    fn interpolate_linear_midpoint() {
+        let curve = Curve {
+            x: vec![0.0 * dimensionless, 1.0 * dimensionless],
+            y: vec![0.0 * kg_per_m3, 10.0 * kg_per_m3],
+        };
+        let (y, grad) = curve.interpolate(0.5 * dimensionless);
+        assert!((y.value_in(kg_per_m3) - 5.0).abs() < 1e-12);
+        assert!((grad.value_in(kg_per_m3) - 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn reverse_interpolate_midpoint() {
+        let curve = Curve {
+            x: vec![0.0 * dimensionless, 1.0 * dimensionless],
+            y: vec![0.0 * kg_per_m3, 10.0 * kg_per_m3],
+        };
+        let (x, grad) = curve.reverse_interpolate(5.0 * kg_per_m3);
+        assert!((x.value() - 0.5).abs() < 1e-12);
+        assert!((grad.value_in(kg_per_m3) - 0.1).abs() < 1e-12);
+    }
+
+    #[test]
+    fn interpolate_below_min_returns_first_point() {
+        let curve = Curve {
+            x: vec![0.2 * dimensionless, 1.0 * dimensionless],
+            y: vec![2.0 * kg_per_m3, 10.0 * kg_per_m3],
+        };
+        let (y, grad) = curve.interpolate(0.0 * dimensionless);
+        assert!((y.value_in(kg_per_m3) - 2.0).abs() < 1e-12);
+        assert!(grad.value_in(kg_per_m3).abs() < 1e-12);
+    }
+
+    #[test]
+    fn interpolate_above_max_returns_last_point() {
+        let curve = Curve {
+            x: vec![0.0 * dimensionless, 0.8 * dimensionless],
+            y: vec![1.0 * kg_per_m3, 5.0 * kg_per_m3],
+        };
+        let (y, grad) = curve.interpolate(1.0 * dimensionless);
+        assert!((y.value_in(kg_per_m3) - 5.0).abs() < 1e-12);
+        assert!(grad.value_in(kg_per_m3).abs() < 1e-12);
+    }
+
+    #[test]
+    fn reverse_interpolate_below_min_returns_first_point() {
+        let curve = Curve {
+            x: vec![0.0 * dimensionless, 1.0 * dimensionless],
+            y: vec![2.0 * kg_per_m3, 6.0 * kg_per_m3],
+        };
+        let (x, grad) = curve.reverse_interpolate(1.0 * kg_per_m3);
+        assert!((x.value() - 0.0).abs() < 1e-12);
+        assert!(grad.value_in(kg_per_m3).abs() < 1e-12);
+    }
+
+    #[test]
+    fn reverse_interpolate_above_max_returns_last_point() {
+        let curve = Curve {
+            x: vec![0.0 * dimensionless, 1.0 * dimensionless],
+            y: vec![2.0 * kg_per_m3, 6.0 * kg_per_m3],
+        };
+        let (x, grad) = curve.reverse_interpolate(10.0 * kg_per_m3);
+        assert!((x.value() - 1.0).abs() < 1e-12);
+        assert!(grad.value_in(kg_per_m3).abs() < 1e-12);
     }
 }

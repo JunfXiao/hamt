@@ -1,5 +1,8 @@
 //! Defines the core `Cell` struct, representing a finite volume element in the 1D HAMT model.
 
+use tracing::info;
+
+use crate::hamt::boundary::celsius_to_kelvin;
 use crate::hamt::uom::dimensions::{
     Density, Dimensionless, HeatTransferCoeff, LiquidTransportCoeff, Power, Pressure,
     SpecificHeatCapacity, Temperature, ThermalConductivity, VaporTransportCoeff, Volume,
@@ -154,7 +157,6 @@ impl Cell {
             ..Default::default()
         };
         c.read_from_material();
-
         c
     }
 
@@ -190,6 +192,7 @@ impl Cell {
             }
             _ => {
                 // Do nothing for non-material cells (boundary & virtual)
+                self.cell_temp = celsius_to_kelvin(20.0);
             }
         }
     }
@@ -230,9 +233,6 @@ impl Cell {
             } else {
                 mat.conductivity
             };
-
-            let volumetric_water = self.volumetric_water.value_in(units::kg_per_m3);
-            let density = self.density.value_in(units::kg_per_m3);
         }
     }
 

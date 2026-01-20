@@ -9,7 +9,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::ops::DerefMut;
 use std::sync::{Arc, LazyLock, RwLock};
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 use trnsys::*;
 
 pub mod hamt;
@@ -75,6 +75,7 @@ fn main(mut state: &mut TrnSysState) -> Result<()> {
         set_number_of_derivatives(state.num_derivatives);
         set_number_of_outputs(state.num_outputs);
         set_iteration_mode(state.iteration_mode.into());
+
         return Ok(());
     }
     state.read_input_values();
@@ -115,12 +116,13 @@ fn main(mut state: &mut TrnSysState) -> Result<()> {
         state.read_input_values();
         // read_storage(&mut state);
     }
-    // Perform All the Calculations Here
-    let simulation_outputs = type_instance.iterate(&mut state)?;
+
+    TRNSYS_TYPE_INSTANCE.iterate(state)?;
     // set output
-    simulation_outputs.iter().enumerate().for_each(|(i, val)| {
+    state.outputs.iter().enumerate().for_each(|(i, val)| {
         // attention: TRNSYS/Fortran is 1-indexed
         set_output_value(i as i32, val.value);
+        debug!("Output {}: {}", i + 1, val.value);
     });
 
     Ok(())

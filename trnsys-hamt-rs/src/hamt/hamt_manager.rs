@@ -4,11 +4,14 @@ use super::boundary::BoundaryCondition;
 use super::surface::Surface;
 use crate::hamt::material::{Construction, Material};
 use crate::hamt::physics::geometry::{Pt3D, Size3D};
-use crate::hamt::uom;
 use crate::hamt::uom::dimensions::{Temperature, Time};
+use crate::hamt::uom::units::{dimensionless, kg_per_m2_s_pa};
+use crate::hamt::{physics, uom};
+use crate::trnsys::get_simulation_time;
 use anyhow::Result;
 use std::mem;
 use std::sync::Arc;
+use tracing::{debug, info};
 use uom::dimensions::Area;
 use uom::dimensions::Length;
 use uom::units;
@@ -16,7 +19,7 @@ use uom::units;
 /// Manages the state and execution of the HAMT simulation for a surface.
 #[derive(Debug, Clone)]
 pub struct HamtManager {
-    /// Materials registry for this manager.
+    /// Materials registry for this self.
     pub materials: Vec<Arc<Material>>,
 
     /// Construction for the surface.
@@ -48,7 +51,10 @@ impl HamtManager {
     ) -> Result<Self> {
         let settings = settings.unwrap_or_default();
         let mut boundary = initial_boundary.unwrap_or_default();
-
+        debug!(
+            "Initializing HamtManager for surface {}. Boundary conditions: {:#?}",
+            surface_name, boundary
+        );
         // Propagate constant vapor transfer coefficients from construction definition
         if construction.surface_vapor_coef.is_external_const {
             boundary.vapor_transport_coeff_ext =
@@ -81,6 +87,30 @@ impl HamtManager {
     /// Solves for the current timestep by iterating until convergence.
     pub fn solve_timestep(&mut self) -> Result<bool> {
         for _ in 0..self.settings.max_iterations {
+            // Reapply surface vapor coefficients if not using constnat value
+            if !self.construction.surface_vapor_coef.is_external_const {
+                let rh = self.boundary_condition.rh_outside_air;
+                if rh > 0.0 * dimensionless {
+                    let rho_v = physics::vd_from_t_rh(self.boundary_condition.temp_outside_air, rh);
+                    let psat = physics::psy_psat_fn_temp(self.boundary_condition.temp_outside_air);
+                    self.boundary_condition.vapor_transport_coeff_ext =
+                        self.boundary_condition.mass_convection_coeff_ext * rho_v / (psat * rh);
+                } else {
+                    self.boundary_condition.vapor_transport_coeff_ext = 0.0 * kg_per_m2_s_pa;
+                }
+            }
+            if !self.construction.surface_vapor_coef.is_internal_const {
+                let rh = self.boundary_condition.rh_inside_air;
+                if rh > 0.0 * dimensionless {
+                    let rho_v = physics::vd_from_t_rh(self.boundary_condition.temp_inside_air, rh);
+                    let psat = physics::psy_psat_fn_temp(self.boundary_condition.temp_inside_air);
+                    self.boundary_condition.vapor_transport_coeff_int =
+                        self.boundary_condition.mass_convection_coeff_int * rho_v / (psat * rh);
+                } else {
+                    self.boundary_condition.vapor_transport_coeff_int = 0.0 * kg_per_m2_s_pa;
+                }
+            }
+
             self.surface_next.calculate_iteration(
                 &self.settings,
                 &self.boundary_condition,
@@ -145,7 +175,7 @@ impl Default for HamtSettings {
         Self {
             timestep: 3600.0 * units::seconds,
             max_iterations: 150,
-            temp_convergence_tolerance: 0.0001 * units::kelvin,
+            temp_convergence_tolerance: 0.01 * units::kelvin,
             rh_convergence_tolerance: 0.0001,
             base_cell_size: Pt3D(0.1 * units::meter, 0.0 * units::meter, 0.0 * units::meter),
             latent_heat_enabled: true,

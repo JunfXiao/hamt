@@ -46,15 +46,15 @@ impl Surface {
     ) -> Result<Surface> {
         // Initialize original point with the padding for exterior boundary cells
         let boundary_cell_thickness = settings.base_cell_size.x();
-        let boundary_cell_size = Size3D::new(boundary_cell_thickness, 0.0 * meter, 0.0 * meter);
+        // Use non-zero y/z to avoid zero-overlap in resistance calculation
+        let dummy_length = surface_area.sqrt();
+        let dummy_height = surface_area.sqrt();
+        let boundary_cell_size = Size3D::new(boundary_cell_thickness, dummy_length, dummy_height);
 
         // base pt is always the point with the smallest x/y/z
         // Offset for 2 exterior layers. First layer is for Conv/Rad/Sky/Ground Cells
         // Second layer is for Virtual Cell.
         let mut base_pt = Size3D::new(-boundary_cell_thickness * 2.0, 0.0 * meter, 0.0 * meter);
-        // currently, we use a dummy y and z size for all.
-        let dummy_length = surface_area.sqrt();
-        let dummy_height = surface_area.sqrt();
         let get_size = |thickness: Length<f64>| Pt3D(thickness, dummy_length, dummy_height);
         let get_origin = |base_pt: Pt3D, size: Size3D| base_pt + size / 2.0;
 
@@ -158,6 +158,11 @@ impl Surface {
             boundary_cell_size,
         );
         cells.push(int_con_cell);
+
+        // calc dependent properties
+        cells
+            .iter_mut()
+            .for_each(|c| c.calc_dependent_state(init_boundary_condition, settings));
 
         // currently, only 1D
         let cells_3d = ArcArray3::from_shape_vec((cells.len(), 1, 1), cells)?;

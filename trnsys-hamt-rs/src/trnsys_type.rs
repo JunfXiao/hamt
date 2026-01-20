@@ -1,7 +1,8 @@
 use crate::hamt::boundary::{BoundaryCondition, celsius_to_kelvin, kelvin_to_celsius};
 use crate::hamt::hamt_manager::HamtManager;
 use crate::hamt::io::load_hamt_data;
-use crate::hamt::physics::KELVIN_CONV;
+use crate::hamt::physics::{self, KELVIN_CONV};
+use crate::hamt::uom::Quantity;
 use crate::hamt::uom::units::{
     dimensionless, kelvin, kg_per_m2_s, kg_per_m2_s_pa, kg_per_m3, kj_per_hr, kj_per_hr_m2_k,
     m_per_s, square_meter, w_per_m2, w_per_m2_k, watts,
@@ -13,7 +14,7 @@ use crate::trnsys::*;
 use anyhow::{Context, Ok, Result};
 use csv::Writer;
 use std::path::Path;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::fmt::format;
 
 pub(crate) struct TrnSysType {}
@@ -103,7 +104,7 @@ impl TrnSysType {
 
         // Write title columns
         if let Some(writer) = &mut state.csv_writer {
-            writer.write_record(&[
+            writer.write_record([
                 "Time",
                 "T_out",
                 "T_in",
@@ -126,7 +127,9 @@ impl TrnSysType {
             format!("S256_{}", get_current_unit()),
             surface_area * square_meter,
         )?;
+        debug!("Initialized");
         state.hamt_manager = Some(manager);
+        debug!("Report after initialization:\n{:#?}", self.report(state));
         Ok(())
     }
 
@@ -158,7 +161,7 @@ impl TrnSysType {
     /// - MassFlux_out
     /// - MassFlux_in
     pub fn report(&self, state: &mut TrnSysState) -> Result<Vec<TrnSysValue>> {
-        let report_row = if let Some(manager) = &mut state.hamt_manager {
+        let mut report_row = if let Some(manager) = &mut state.hamt_manager {
             // Map outputs
             let report = manager.surface_next.report()?;
             let outputs = vec![
@@ -179,32 +182,57 @@ impl TrnSysType {
             vec![
                 20.0, // Outside Surface Temperature
                 20.0, // Inside Surface Temperature
-                0.5,  // Outside Relative Humidity
-                0.5,  // Inside Relative Humidity
-                0.0,  // Outside Water Vapor Density
-                0.0,  // Inside Water Vapor Density
-                0.0,  // Outside Heat Flux
-                0.0,  // Inside Heat Flux
-                0.0,  // Outside Mass Flux
-                0.0,  // Inside Mass Flux
+                0.1,  // Outside Relative Humidity
+                0.1,  // Inside Relative Humidity
+                20.0, 0.0, // Outside Water Vapor Density
+                0.0, // Inside Water Vapor Density
+                0.0, // Outside Heat Flux
+                0.0, // Inside Heat Flux
+                0.0, // Outside Mass Flux
+                0.0, // Inside Mass Flux
             ]
         };
 
+        // #[cfg(debug_assertions)]
+        // {
+        //     report_row = vec![
+        //         20.0, // Outside Surface Temperature
+        //         20.0, // Inside Surface Temperature
+        //         0.1,  // Outside Relative Humidity
+        //         0.1,  // Inside Relative Humidity
+        //         20.0, 0.0, // Outside Water Vapor Density
+        //         0.0, // Inside Water Vapor Density
+        //         0.0, // Outside Heat Flux
+        //         0.0, // Inside Heat Flux
+        //         0.0, // Outside Mass Flux
+        //         0.0, // Inside Mass Flux
+        //     ];
+        // }
+
         if let Some(writer) = &mut state.csv_writer {
-            writer.write_record(
-                [vec![get_simulation_time()], report_row.clone()]
-                    .concat()
-                    .iter()
-                    .map(|v| v.to_string()),
-            )?;
+            let time = get_simulation_time();
+            let report_rows: Vec<_> = [vec![time], report_row.clone()]
+                .into_iter()
+                .flatten()
+                .map(|v| v.to_string())
+                .collect();
+            debug!("Report Row Length: {}", report_rows.len());
+            writer.write_record(report_rows).with_context(|| {
+                format!(
+                    "Error writing report row at time {}\n{:#?}",
+                    time, report_row
+                )
+            })?;
             writer.flush()?;
         }
 
-        // default value
-        Ok(report_row
+        state.outputs = report_row
             .into_iter()
             .map(|v| TrnSysValue { value: v })
-            .collect())
+            .collect();
+
+        // default value
+        Ok(state.outputs.clone())
     }
 
     /// Called at each TRNSYS call within a timestep.
@@ -223,20 +251,65 @@ impl TrnSysType {
         let q_additional_userdef = state.inputs[10].value;
 
         if let Some(manager) = &mut state.hamt_manager {
-            manager.boundary_condition = BoundaryCondition {
-                temp_outside_air: celsius_to_kelvin(t_out),
-                temp_inside_air: celsius_to_kelvin(t_in),
-                rh_outside_air: rh_out * dimensionless,
-                rh_inside_air: rh_in * dimensionless,
-                heat_transfer_coeff_ext: hconv_out * kj_per_hr_m2_k,
-                heat_transfer_coeff_int: hconv_in * kj_per_hr_m2_k,
-                additional_energy_ext: q_out * kj_per_hr,
-                additional_energy_int: q_in * kj_per_hr,
-                mass_convection_coeff_ext: hmass_conv_out * m_per_s,
-                mass_convection_coeff_int: hmass_conv_in * m_per_s,
-                q_addition_userdef: q_additional_userdef * kj_per_hr,
-                ..Default::default()
-            };
+            manager.boundary_condition.temp_inside_air = celsius_to_kelvin(t_in);
+            manager.boundary_condition.temp_outside_air = celsius_to_kelvin(t_out);
+            manager.boundary_condition.rh_outside_air = rh_out / 100.0 * dimensionless;
+            manager.boundary_condition.rh_inside_air = rh_in / 100.0 * dimensionless;
+            manager.boundary_condition.heat_transfer_coeff_ext = hconv_out * kj_per_hr_m2_k;
+            manager.boundary_condition.heat_transfer_coeff_int = hconv_in * kj_per_hr_m2_k;
+            manager.boundary_condition.additional_energy_ext = q_out * kj_per_hr;
+            manager.boundary_condition.additional_energy_int = q_in * kj_per_hr;
+            manager.boundary_condition.mass_convection_coeff_ext = hmass_conv_out * m_per_s;
+            manager.boundary_condition.mass_convection_coeff_int = hmass_conv_in * m_per_s;
+            manager.boundary_condition.q_addition_userdef = q_additional_userdef * kj_per_hr;
+
+            if !manager.construction.surface_vapor_coef.is_external_const {
+                let rh = manager.boundary_condition.rh_outside_air;
+                if rh > 0.0 * dimensionless {
+                    let rho_v =
+                        physics::vd_from_t_rh(manager.boundary_condition.temp_outside_air, rh);
+                    let psat =
+                        physics::psy_psat_fn_temp(manager.boundary_condition.temp_outside_air);
+                    let denom = psat * rh;
+                    if denom > Quantity(0.0) {
+                        manager.boundary_condition.vapor_transport_coeff_ext =
+                            manager.boundary_condition.mass_convection_coeff_ext * rho_v / denom;
+                    } else {
+                        manager.boundary_condition.vapor_transport_coeff_ext = 0.0 * kg_per_m2_s_pa;
+                        debug!("vtc_ext zeroed: denom<=0, rh={:?}, psat={:?}", rh, psat);
+                    }
+                } else {
+                    manager.boundary_condition.vapor_transport_coeff_ext = 0.0 * kg_per_m2_s_pa;
+                    debug!("vtc_ext zeroed: rh_out<=0");
+                }
+            }
+            if !manager.construction.surface_vapor_coef.is_internal_const {
+                let rh = manager.boundary_condition.rh_inside_air;
+                if rh > 0.0 * dimensionless {
+                    let rho_v =
+                        physics::vd_from_t_rh(manager.boundary_condition.temp_inside_air, rh);
+                    let psat =
+                        physics::psy_psat_fn_temp(manager.boundary_condition.temp_inside_air);
+                    let denom = psat * rh;
+                    if denom > Quantity(0.0) {
+                        manager.boundary_condition.vapor_transport_coeff_int =
+                            manager.boundary_condition.mass_convection_coeff_int * rho_v / denom;
+                    } else {
+                        manager.boundary_condition.vapor_transport_coeff_int = 0.0 * kg_per_m2_s_pa;
+                        debug!("vtc_int zeroed: denom<=0, rh={:?}, psat={:?}", rh, psat);
+                    }
+                } else {
+                    manager.boundary_condition.vapor_transport_coeff_int = 0.0 * kg_per_m2_s_pa;
+                    debug!("vtc_int zeroed: rh_in<=0");
+                }
+            }
+
+            debug!(
+                "Time = {}, bc: \n{:#?}",
+                get_simulation_time(),
+                manager.boundary_condition
+            );
+
             manager.solve_timestep()?;
             // Map outputs
             return self.report(state);
