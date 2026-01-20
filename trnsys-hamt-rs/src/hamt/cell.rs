@@ -90,7 +90,16 @@ pub struct Cell {
     /// Updated by [Cell::calc_dependent_state]
     pub mu: Dimensionless<f64>,
 
-    /// Moisture-dependent thermal conductivity [W/m·K]. Updated each iteration.
+    /// Moisture-dependent heat transfer coefficient [W/m²·K]. Updated each iteration.
+    pub htc: HeatTransferCoeff<f64>,
+
+    /// Additional Power from external sources [W]
+    pub additional_power: Power<f64>,
+
+    /// Vapor Transfer Coefficient [m/s].
+    ///
+    /// Updated by [Cell::calc_dependent_state]
+    pub vtc: VaporTransportCoeff<f64>,
 
     ///
 
@@ -108,20 +117,6 @@ pub struct Cell {
     ///
     /// Updated by [Cell::calc_dependent_state]
     pub dw: LiquidTransportCoeff<f64>,
-
-    //
-
-    // ========== Boundary Condition Properties ==========
-
-    //
-    /// Heat transfer coefficient for boundary cells [W/m²·K].
-    pub htc: HeatTransferCoeff<f64>,
-
-    /// Vapor transfer coefficient for boundary cells [kg/m²·s·Pa].
-    pub vtc: VaporTransportCoeff<f64>,
-
-    /// Additional heat source term [W].
-    pub q_adds: Power<f64>,
 
     //
     // ========== State Variables (evolve over time) ==========
@@ -236,10 +231,8 @@ impl Cell {
                 mat.conductivity
             };
 
-            let volumetric_water = self
-                .volumetric_water
-                .value_in(units::kilograms_per_cubic_meter);
-            let density = self.density.value_in(units::kilograms_per_cubic_meter);
+            let volumetric_water = self.volumetric_water.value_in(units::kg_per_m3);
+            let density = self.density.value_in(units::kg_per_m3);
         }
     }
 

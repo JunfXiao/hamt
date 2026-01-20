@@ -1,7 +1,13 @@
-use crate::hamt::uom::{
-    PressureQty, Quantity, TemperatureQty,
-    dimensions::{Dimensionless, Temperature},
-    units,
+use crate::hamt::{
+    physics::{ATMOSPHERE_PRESSURE, KELVIN_CONV},
+    uom::{
+        PressureQty, Quantity,
+        dimensions::{
+            Dimensionless, EnergyFlux, HeatTransferCoeff, MassConvectionCoeff, Power, Temperature,
+            VaporTransportCoeff,
+        },
+        units::{self, kg_per_m2_s_pa, w_per_m_k, w_per_m2_k, watts},
+    },
 };
 
 /// Typed boundary conditions for the simulation.
@@ -20,6 +26,27 @@ pub struct BoundaryCondition {
     /// Pressure of the air [Pa].
     pub pressure_air: PressureQty<f64>,
 
+    /// External heat transfer coefficient [W/m²K].
+    pub heat_transfer_coeff_ext: HeatTransferCoeff<f64>,
+
+    /// Internal heat transfer coefficient [W/m²K].
+    pub heat_transfer_coeff_int: HeatTransferCoeff<f64>,
+
+    /// External mass convection coefficient [kg/m²s].
+    pub mass_convection_coeff_ext: MassConvectionCoeff<f64>,
+
+    /// Internal mass convection coefficient [kg/m²s].
+    pub mass_convection_coeff_int: MassConvectionCoeff<f64>,
+
+    /// External additional energy [W].
+    pub additional_energy_ext: Power<f64>,
+
+    /// Internal additional energy [W].
+    pub additional_energy_int: Power<f64>,
+
+    /// Additional heat source in user-defined cell depth [W].
+    pub q_addition_userdef: Power<f64>,
+
     // Placeholder for future boundary conditions
     pub is_raining: bool,
 }
@@ -28,12 +55,19 @@ impl BoundaryCondition {
     /// Create a new typed boundary condition from raw inputs.
     ///
     /// `temp_*_c` are in °C, `rh_*` are fractions (0–1), `pressure_pa` in Pa.
-    pub fn from_raw(
+    pub fn new(
         temp_outside_c: f64,
         temp_inside_c: f64,
         rh_outside: f64,
         rh_inside: f64,
         pressure_pa: f64,
+        heat_transfer_coeff_ext: f64,
+        heat_transfer_coeff_int: f64,
+        mass_conv_coeff_ext: f64,
+        mass_conv_coeff_int: f64,
+        q_additional_out: f64,
+        q_additional_in: f64,
+        q_additional_userdef: f64,
     ) -> Self {
         Self {
             temp_outside_air: celsius_to_kelvin(temp_outside_c),
@@ -41,6 +75,13 @@ impl BoundaryCondition {
             rh_outside_air: Quantity(rh_outside),
             rh_inside_air: Quantity(rh_inside),
             pressure_air: pressure_pa * units::pascals,
+            heat_transfer_coeff_ext: heat_transfer_coeff_ext * w_per_m2_k,
+            heat_transfer_coeff_int: heat_transfer_coeff_int * w_per_m2_k,
+            mass_convection_coeff_ext: mass_conv_coeff_ext * kg_per_m2_s_pa,
+            mass_convection_coeff_int: mass_conv_coeff_int * kg_per_m2_s_pa,
+            additional_energy_ext: q_additional_out * watts,
+            additional_energy_int: q_additional_in * watts,
+            q_addition_userdef: q_additional_userdef * watts,
             is_raining: false,
         }
     }
@@ -63,16 +104,30 @@ impl BoundaryCondition {
 
 impl Default for BoundaryCondition {
     fn default() -> Self {
-        Self::from_raw(20.0, 20.0, 0.5, 0.5, 101_325.0)
+        Self {
+            temp_outside_air: celsius_to_kelvin(20.0),
+            temp_inside_air: celsius_to_kelvin(20.0),
+            rh_outside_air: Quantity(0.5),
+            rh_inside_air: Quantity(0.5),
+            pressure_air: ATMOSPHERE_PRESSURE,
+            heat_transfer_coeff_ext: 1.5 * w_per_m2_k,
+            heat_transfer_coeff_int: 1.5 * w_per_m2_k,
+            mass_convection_coeff_ext: 0.0 * kg_per_m2_s_pa,
+            mass_convection_coeff_int: 0.0 * kg_per_m2_s_pa,
+            additional_energy_ext: 0.0 * watts,
+            additional_energy_int: 0.0 * watts,
+            q_addition_userdef: 0.0 * watts,
+            is_raining: false,
+        }
     }
 }
 
 /// Convert °C to K.
-fn celsius_to_kelvin(temp_c: f64) -> TemperatureQty<f64> {
-    units::kelvin * (temp_c + 273.15)
+pub fn celsius_to_kelvin(temp_c: f64) -> Temperature<f64> {
+    units::kelvin * (temp_c + KELVIN_CONV)
 }
 
 /// Convert K to °C.
-fn kelvin_to_celsius(temp_k: TemperatureQty<f64>) -> f64 {
-    temp_k.value_in(units::kelvin) - 273.15
+pub fn kelvin_to_celsius(temp_k: Temperature<f64>) -> f64 {
+    temp_k.value_in(units::kelvin) - KELVIN_CONV
 }

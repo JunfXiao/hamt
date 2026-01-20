@@ -15,7 +15,7 @@ use crate::{
         uom::{
             DIM_LIQUID_TRANSPORT_COEFF, DIM_DIMENSIONLESS,
             DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT, DensityQty, Dimension, DimensionlessQty,
-            Quantity, TemperatureQty,
+            Quantity, Temperature,
             dimensions::{
                 LiquidTransportCoeff, Dimensionless, Length, SpecificHeatCapacity, ThermalConductivity,
                 WaterContent,
@@ -207,7 +207,7 @@ pub struct Material {
 
     // Discretization parameters
     /// Initial temperature for cells of this material [°C].
-    pub initial_temp: TemperatureQty<f64>,
+    pub initial_temp: Temperature<f64>,
 }
 
 impl PartialEq for Material {

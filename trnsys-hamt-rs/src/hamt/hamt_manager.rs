@@ -54,6 +54,7 @@ impl HamtManager {
             construction.clone(),
             surface_name,
             surface_area,
+            &initial_boundary,
         )?;
 
         Ok(Self {
@@ -125,6 +126,8 @@ pub struct HamtSettings {
     pub max_div: i32,
     /// Allowed length for adjacent check [m]
     pub adj_length: Length<f64>,
+    /// user defined depth [m]
+    pub user_defined_depth: Option<Length<f64>>,
 }
 
 impl Default for HamtSettings {
@@ -141,6 +144,7 @@ impl Default for HamtSettings {
             min_div: 3,
             max_div: 20,
             adj_length: 0.00005 * units::meter,
+            user_defined_depth: None,
         }
     }
 }

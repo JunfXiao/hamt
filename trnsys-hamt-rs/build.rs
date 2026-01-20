@@ -31,8 +31,9 @@ fn write_entrance_code(type_number: &str) {
         pub extern "C" fn TYPE{}() {{
             entrance();
         }}
+        const TYPE_NUMBER: u32 = {};
         "#,
-        type_number
+        type_number, type_number
     );
 
     // Write code to the file

@@ -5,7 +5,8 @@ use tracing::debug;
 use crate::hamt::cell::{BoundaryLocation, Cell, CellType};
 use crate::hamt::uom::DensityQty;
 use crate::hamt::uom::dimensions::{
-    Area, Dimensionless, EnergyFlux, Length, Mass, MassFlux, Temperature, VaporTransportCoeff,
+    Area, Dimensionless, EnergyFlux, HeatTransferCoeff, Length, Mass, MassFlux, Temperature,
+    VaporTransportCoeff,
 };
 use crate::hamt::{boundary::BoundaryCondition, hamt_manager::HamtSettings, physics};
 use anyhow::Result;
@@ -48,11 +49,20 @@ pub struct Surface {
 
     // ========= Boundary Conditions / Flags =========
     /// Exterior vapor transfer coefficient [kg/(m²·s·Pa)].
-    ext_vtc: Option<VaporTransportCoeff<f64>>,
+    ext_vtc: VaporTransportCoeff<f64>,
+
+    /// Exterior heat transfer coefficient [W/(m²·K)].
+    ext_htc: HeatTransferCoeff<f64>,
+
     /// Interior vapor transfer coefficient [kg/(m²·s·Pa)].
-    int_vtc: Option<VaporTransportCoeff<f64>>,
+    int_vtc: VaporTransportCoeff<f64>,
+
+    /// Interior heat transfer coefficient [W/(m²·K)].
+    int_htc: HeatTransferCoeff<f64>,
 
     // ========= Optional user-defined probe =========
     /// Depth (m) at which user-defined reporting is performed.
     pub user_defined_depth: Option<Length<f64>>,
+
+    pub user_defined_cell_idx: Option<[usize; 3]>,
 }

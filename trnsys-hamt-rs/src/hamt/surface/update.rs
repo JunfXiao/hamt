@@ -4,6 +4,7 @@ use crate::hamt::uom::{
         Area, HeatTransferCoeff, Pressure, ThermalConductivity, ThermalResistance, Time,
         VaporResistance,
     },
+    units::{k_per_w, kelvin, pa_s_per_kg, pascals, watts},
 };
 
 use super::*;
@@ -23,8 +24,6 @@ impl Surface {
         surface_curr: &Surface,
     ) -> Result<()> {
         let dt = settings.timestep;
-        let dims = self.cells.raw_dim();
-        let nx = dims[0];
 
         // --- Sync `surface_next` with current iteration state ---
         self.sync_state_from(surface_curr)?;
@@ -33,10 +32,10 @@ impl Surface {
         self.update_cell_properties(bc, settings)?;
 
         // --- Pre-calculate next-step temperatures for all cells ---
-        self.calculate_temp_next(settings, surface_prev, surface_curr, dt, nx, bc)?;
+        self.calculate_temp_next(settings, bc, surface_prev, surface_curr)?;
 
         // --- Pre-calculate next-step relative humidity for all cells ---
-        self.calculate_rh_next(settings, surface_prev, surface_curr, dt, nx, bc)?;
+        self.calculate_rh_next(settings, bc, surface_prev, surface_curr)?;
 
         // --- Update moisture-dependent properties for all cells ---
         self.update_cell_properties(bc, settings)?;
@@ -69,13 +68,12 @@ impl Surface {
     fn calculate_temp_next(
         &mut self,
         settings: &HamtSettings,
+        bc: &BoundaryCondition,
         surface_prev: &Surface,
         surface_curr: &Surface,
-        dt: Time<f64>,
-        nx: usize,
-        bc: &BoundaryCondition,
     ) -> Result<()> {
-        let dt_s = dt.value_in(units::seconds);
+        let dt_s = settings.timestep.value_in(units::seconds);
+        let nx = self.cells.raw_dim()[0];
         for i in 0..nx {
             if self.cells[[i, 0, 0]].is_boundary() {
                 let bc_temp = if self.cells[[i, 0, 0]].is_exterior_boundary() {
@@ -93,12 +91,12 @@ impl Surface {
                 let cell_prev = &surface_prev.cells[[i, 0, 0]];
                 let cell_curr = &surface_curr.cells[[i, 0, 0]];
 
-                let mut torsum = 0.0;
-                let mut oorsum = 0.0;
-                let mut vpdiff = 0.0;
+                let mut torsum = 0.0 * kelvin / k_per_w;
+                let mut oorsum = 0.0 * 1.0 / k_per_w;
+                let mut vpdiff = 0.0 * pascals / pa_s_per_kg;
 
-                let curr_temp_k = cell_curr.cell_temp.value_in(units::kelvin);
-                let curr_vp_pa = cell_curr.cell_vp.value_in(units::pascals);
+                let curr_temp_k = cell_curr.cell_temp;
+                let curr_vp_pa = cell_curr.cell_vp;
 
                 for nbr_i in self.neighbor_indices(i, nx) {
                     let neighbor_next = &self.cells[[nbr_i, 0, 0]];
@@ -107,49 +105,47 @@ impl Surface {
                     let (therm_resistance, vapor_resistance) =
                         self.calculate_resistance_pair(cell_next, neighbor_next, bc.pressure_air);
 
-                    let therm_res_kpw =
-                        therm_resistance.value_in(crate::hamt::uom::units::kelvin_per_watt);
-                    if therm_res_kpw > 0.0 {
-                        let nbr_temp_k = neighbor_curr.cell_temp.value_in(units::kelvin);
-                        let conductance_w_per_k = 1.0 / therm_res_kpw;
-                        oorsum += conductance_w_per_k;
-                        torsum += nbr_temp_k * conductance_w_per_k;
+                    if therm_resistance > 0.0 * k_per_w {
+                        let nbr_temp_k = neighbor_curr.cell_temp;
+                        oorsum += 1.0 / therm_resistance;
+                        torsum += nbr_temp_k / therm_resistance;
                     }
-                    let vapor_res_ps_per_kg = vapor_resistance
-                        .value_in(crate::hamt::uom::units::pascal_second_per_kilogram);
-                    if vapor_res_ps_per_kg > 0.0 {
-                        let nbr_vp_pa = neighbor_curr.cell_vp.value_in(units::pascals);
-                        vpdiff += (nbr_vp_pa - curr_vp_pa) / vapor_res_ps_per_kg;
+                    if vapor_resistance > 0.0 * pa_s_per_kg {
+                        let nbr_vp_pa = neighbor_curr.cell_vp;
+                        vpdiff += (nbr_vp_pa - curr_vp_pa) / vapor_resistance;
                     }
                 }
 
-                let density = cell_next
-                    .density
-                    .value_in(crate::hamt::uom::units::kilograms_per_cubic_meter);
-                let spech = cell_next
-                    .spech
-                    .value_in(crate::hamt::uom::units::joules_per_kilogram_kelvin);
-                let volumetric_water = cell_next
-                    .volumetric_water
-                    .value_in(crate::hamt::uom::units::kilograms_per_cubic_meter);
-                let volume = cell_next
-                    .volume
-                    .value_in(crate::hamt::uom::units::cubic_meter);
+                let density = cell_next.density;
+                let spech = cell_next.spech;
+                let volumetric_water = cell_next.volumetric_water;
+                let volume = cell_next.volume;
 
-                let tcap_j_per_k = (density * spech
-                    + volumetric_water
-                        * physics::W_SPECH.value_in(crate::hamt::uom::units::joules_per_kilogram))
-                    * volume;
+                let tcap_j_per_k = (density * spech + volumetric_water * physics::W_SPECH) * volume;
 
                 let mut qvp = 0.0;
                 if settings.latent_heat_enabled
                     && let CellType::Material(_) = cell_next.cell_type
                 {
-                    qvp = vpdiff
-                        * physics::W_HV.value_in(crate::hamt::uom::units::joules_per_kilogram);
+                    qvp = vpdiff * physics::W_HV.value_in(crate::hamt::uom::units::j_per_kg);
                 }
 
-                let q_adds = cell_next.q_adds.value_in(crate::hamt::uom::units::watts);
+                let q_adds = match cell_next.cell_type {
+                    CellType::Virtual(BoundaryLocation::Exterior) => bc.additional_energy_ext,
+                    CellType::Virtual(BoundaryLocation::Interior) => bc.additional_energy_int,
+                    CellType::Material(_) => {
+                        if self
+                            .user_defined_cell_idx
+                            .map(|idx| idx[0] == i)
+                            .unwrap_or(false)
+                        {
+                            bc.q_addition_userdef
+                        } else {
+                            0.0 * watts
+                        }
+                    }
+                    _ => 0.0 * watts,
+                };
 
                 let denom = oorsum + (tcap_j_per_k / dt_s);
                 if denom > 0.0 {
@@ -169,14 +165,13 @@ impl Surface {
     /// Moisture step: compute next RH for all cells.
     fn calculate_rh_next(
         &mut self,
-        _settings: &HamtSettings,
+        settings: &HamtSettings,
+        bc: &BoundaryCondition,
         surface_prev: &Surface,
         surface_curr: &Surface,
-        dt: Time<f64>,
-        nx: usize,
-        bc: &BoundaryCondition,
     ) -> Result<()> {
-        let dt_s = dt.value_in(units::seconds);
+        let nx = self.cells.raw_dim()[0];
+        let dt_s = settings.timestep.value_in(units::seconds);
         for i in 0..nx {
             if self.cells[[i, 0, 0]].is_boundary() {
                 let bc_rh = if self.cells[[i, 0, 0]].is_exterior_boundary() {
@@ -241,8 +236,7 @@ impl Surface {
                     let (_, vaporr) =
                         self.calculate_resistance_pair(cell_props, nbr_props, bc.pressure_air);
 
-                    let vaporr_ps_per_kg =
-                        vaporr.value_in(crate::hamt::uom::units::pascal_second_per_kilogram);
+                    let vaporr_ps_per_kg = vaporr.value_in(crate::hamt::uom::units::pa_s_per_kg);
 
                     if vaporr_ps_per_kg > 0.0 {
                         vpoosum += 1.0 / vaporr_ps_per_kg;
@@ -258,24 +252,20 @@ impl Surface {
                     let overlap_m2 = overlap.value_in(crate::hamt::uom::units::square_meter);
                     let dist_m = dist.value_in(crate::hamt::uom::units::meter);
 
-                    let dw1 = cell_props
-                        .dw
-                        .value_in(crate::hamt::uom::units::square_meter_per_second);
+                    let dw1 = cell_props.dw.value_in(crate::hamt::uom::units::m2_per_s);
                     let dwd_phi1 = cell_props
                         .dwd_phi
-                        .value_in(crate::hamt::uom::units::kilograms_per_cubic_meter);
+                        .value_in(crate::hamt::uom::units::kg_per_m3);
                     let rhr1 = if dw1 > 0.0 && dwd_phi1 > 0.0 {
                         dist_m / (overlap_m2 * dw1 * dwd_phi1)
                     } else {
                         0.0
                     };
 
-                    let dw2 = nbr_props
-                        .dw
-                        .value_in(crate::hamt::uom::units::square_meter_per_second);
+                    let dw2 = nbr_props.dw.value_in(crate::hamt::uom::units::m2_per_s);
                     let dwd_phi2 = nbr_props
                         .dwd_phi
-                        .value_in(crate::hamt::uom::units::kilograms_per_cubic_meter);
+                        .value_in(crate::hamt::uom::units::kg_per_m3);
                     let rhr2 = if dw2 > 0.0 && dwd_phi2 > 0.0 {
                         dist_m / (overlap_m2 * dw2 * dwd_phi2)
                     } else {
@@ -294,7 +284,7 @@ impl Surface {
                 // Unit: kg
                 let dwd_phi = cell_props
                     .dwd_phi
-                    .value_in(crate::hamt::uom::units::kilograms_per_cubic_meter);
+                    .value_in(crate::hamt::uom::units::kg_per_m3);
                 let volume = cell_props
                     .volume
                     .value_in(crate::hamt::uom::units::cubic_meter);

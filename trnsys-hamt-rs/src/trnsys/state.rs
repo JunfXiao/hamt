@@ -1,4 +1,7 @@
+use std::fs::File;
 use std::path::{Path, PathBuf};
+
+use csv::Writer;
 
 use crate::hamt::hamt_manager::HamtManager;
 use crate::storage::StoreProvider;
@@ -29,6 +32,7 @@ pub(crate) struct TrnSysState<D = (), S = ()> {
     pub(crate) static_store: Option<Box<dyn StoreProvider<S>>>,
 
     pub hamt_manager: Option<HamtManager>,
+    pub csv_writer: Option<Writer<File>>,
 }
 
 impl TrnSysState {
@@ -58,6 +62,7 @@ impl TrnSysState {
             static_store: None,
             dynamic_store: None,
             hamt_manager: None,
+            csv_writer: None,
         }
     }
 

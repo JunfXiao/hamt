@@ -12,7 +12,7 @@ unit_system!(
     dimension_type Dimension;
 
     // Base dimensions
-    dimension Dimensionless = 1;
+    dimension Dimensionless = 1.0f64;
     dimension Length;
     dimension Time;
     dimension Mass;
@@ -35,12 +35,13 @@ unit_system!(
     dimension ThermalConductivity = Power / (Length * Temperature); // W/(m·K)
     dimension LiquidTransferCoeff = Length^2 / Time;
     dimension VaporTransportCoeff = Mass / (Area * Time * Pressure); // kg/(m²·s·Pa)
+    dimension MassConvectionCoeff = Mass / (Area * Time * Pressure); // kg/(m²·s·Pa)
     dimension Density = Mass / Volume; // kg/m³
     dimension WaterContent = Dimensionless; // kg/kg
     dimension LiquidTransportCoeff = Length^2 / Time; // m²/s
-    dimension VaporDiffusionCoeff = Mass/ (Length * Time * Pressure); // m²/s
+    dimension VaporPermeability = Mass/ (Length * Time * Pressure); // m²/s
 
-    dimension ThermalResistance = Temperature / Power; // K/W
+    dimension ThermalResistance = 1.0f64 / Length / ThermalConductivity; // K/W
     // Vapor resistance (Pa·s/kg), consistent with WVDC-based formulation
     dimension VaporResistance = Pressure * Time / Mass;
 
@@ -63,35 +64,39 @@ unit_system!(
     unit kelvin;
 
     // Derived units
+    unit dimensionless: Dimensionless = 1.0;
     unit square_meter: Area = meter^2;
     unit cubic_meter: Volume = meter^3;
     unit meters_per_second: Velocity = meter / seconds;
     unit meters_per_second_squared: Acceleration = meter / seconds^2;
-    unit hours: Time = 3600 * seconds;
+    unit hours: Time = 3600.0f64 * seconds;
     unit pascals: Pressure = kilograms / (meter * seconds^2);
     unit joules: Energy = pascals * cubic_meter;
+    unit kj: Energy = 1000.0f64 * joules;
     unit watts: Power = joules / seconds;
-    unit joules_per_kelvin: HeatCapacity = joules / kelvin;
-    unit joules_per_kilogram: SpecificEnergy = joules / kilograms;
-    unit joules_per_kilogram_kelvin: SpecificHeatCapacity = joules_per_kelvin / kilograms;
-    unit watts_per_square_meter: EnergyFlux = watts / square_meter;
-    unit kilograms_per_square_meter_second: MassFlux = kilograms / (square_meter * seconds);
-    unit watts_per_square_meter_kelvin: HeatTransferCoeff = watts / (square_meter * kelvin);
-    unit watts_per_meter_kelvin: ThermalConductivity = watts / (meter * kelvin);
-    unit kilograms_per_cubic_meter: Density = kilograms / cubic_meter;
-    unit kelvin_per_watt: ThermalResistance = kelvin / watts;
-    unit kilograms_per_square_meter_second_pascal: VaporTransportCoeff =
+    unit kj_per_hr: Power = kj / hours;
+    unit j_per_k: HeatCapacity = joules / kelvin;
+    unit j_per_kg: SpecificEnergy = joules / kilograms;
+    unit j_per_kg_k: SpecificHeatCapacity = j_per_k / kilograms;
+    unit w_per_m2: EnergyFlux = watts / square_meter;
+    unit kg_per_m2_s: MassFlux = kilograms / (square_meter * seconds);
+    unit w_per_m2_k: HeatTransferCoeff = watts / (square_meter * kelvin);
+    unit kj_per_hr_m2_k: HeatTransferCoeff = kj_per_hr / (square_meter * kelvin);
+    unit w_per_m_k: ThermalConductivity = watts / (meter * kelvin);
+    unit kg_per_m3: Density = kilograms / cubic_meter;
+    unit k_per_w: ThermalResistance =  kelvin / watts;
+    unit kg_per_m2_s_pa: VaporTransportCoeff =
         kilograms / (square_meter * seconds * pascals);
-    unit square_meter_per_second: LiquidTransportCoeff = square_meter / seconds;
-    unit kilogram_per_square_meter_second_pascal: VaporDiffusionCoeff = kilograms / (meter * seconds * pascals);
+    unit m2_per_s: LiquidTransportCoeff = square_meter / seconds;
+    unit kg_per_m_s_pa: VaporPermeability = kilograms / (meter * seconds * pascals);
     // Vapor resistance: Pa·s/kg
-    unit pascal_second_per_kilogram: VaporResistance = pascals * seconds / kilograms;
+    unit pa_s_per_kg: VaporResistance = pascals * seconds / kilograms;
 
     // Domain constants (SI)
-    constant WATER_DENSITY = 1000.0 * kilograms_per_cubic_meter;
-    constant WATER_SPECIFIC_HEAT = 4180.0 * joules_per_kilogram_kelvin;
-    constant WATER_LATENT_HEAT = 2_489_000.0 * joules_per_kilogram;
-    constant VAPOR_GAS_CONSTANT = 461.52 * joules_per_kilogram_kelvin;
+    constant WATER_DENSITY = 1000.0f64 * kg_per_m3;
+    constant WATER_SPECIFIC_HEAT = 4180.0f64 * j_per_kg_k;
+    constant WATER_LATENT_HEAT = 2_489_000.0f64 * j_per_kg;
+    constant VAPOR_GAS_CONSTANT = 461.52f64 * j_per_kg_k;
 );
 
 // Convenience type aliases for external modules
@@ -101,7 +106,7 @@ pub type HamtDimension = Dimension;
 // Helpful quantity aliases using the dimension consts
 pub type DimensionlessQty<S> = Quantity<S, { DIM_DIMENSIONLESS }>;
 pub type TimeQty<S> = Quantity<S, { DIM_TIME }>;
-pub type TemperatureQty<S> = Quantity<S, { DIM_TEMPERATURE }>;
+pub type Temperature<S> = Quantity<S, { DIM_TEMPERATURE }>;
 pub type PressureQty<S> = Quantity<S, { DIM_PRESSURE }>;
 pub type AreaQty<S> = Quantity<S, { DIM_AREA }>;
 pub type VolumeQty<S> = Quantity<S, { DIM_VOLUME }>;

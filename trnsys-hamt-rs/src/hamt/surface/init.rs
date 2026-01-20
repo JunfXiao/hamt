@@ -1,8 +1,8 @@
 use std::f64::consts::PI;
 
 use super::*;
-use crate::hamt::uom;
 use crate::hamt::uom::dimensions::Length;
+use crate::hamt::uom::{self, Quantity};
 use crate::hamt::{
     cell::Boundary,
     material::Construction,
@@ -16,6 +16,8 @@ impl Surface {
         area: Area<f64>,
         construction_name: String,
         cells: ArcArray3<Cell>,
+        init_boundary_condition: &BoundaryCondition,
+        settings: &HamtSettings,
     ) -> Self {
         let mut surface = Surface {
             name,
@@ -23,9 +25,12 @@ impl Surface {
             area,
             cells,
             cells_idx_map: HashMap::new(),
-            ext_vtc: None,
-            int_vtc: None,
-            user_defined_depth: None,
+            ext_vtc: init_boundary_condition.vapor_transport_coeff_ext,
+            int_vtc: init_boundary_condition.vapor_transport_coeff_int,
+            ext_htc: init_boundary_condition.heat_transfer_coeff_ext,
+            int_htc: init_boundary_condition.heat_transfer_coeff_int,
+            user_defined_depth: settings.user_defined_depth,
+            user_defined_cell_idx: None,
         };
         surface.init_cells_idx_map();
         surface
@@ -37,6 +42,7 @@ impl Surface {
         construction: Arc<Construction>,
         surface_name: String,
         surface_area: Area<f64>,
+        init_boundary_condition: &BoundaryCondition,
     ) -> Result<Surface> {
         // Initialize original point with the padding for exterior boundary cells
         let boundary_cell_thickness = settings.base_cell_size.x();
@@ -156,12 +162,16 @@ impl Surface {
         // currently, only 1D
         let cells_3d = ArcArray3::from_shape_vec((cells.len(), 1, 1), cells)?;
 
-        let surface = Surface::new(
+        let mut surface = Surface::new(
             surface_name,
             surface_area,
             construction.name.clone(),
             cells_3d,
+            init_boundary_condition,
+            settings,
         );
+
+        surface.init_cells_idx_map();
 
         Ok(surface)
     }
@@ -175,5 +185,19 @@ impl Surface {
                 .or_insert(Vec::with_capacity(self.cells.len())) // For performance
                 .push([x, y, z]);
         }
+
+        // default to mid-depth if not provided
+        if self.user_defined_depth.is_none() {
+            self.user_defined_depth = Some({
+                // default to mid-depth if not provided
+                let dims = self.cells.raw_dim();
+                if dims[0] > 0 {
+                    Quantity((dims[0]) as f64 / 2.0)
+                } else {
+                    Quantity(0.0)
+                }
+            })
+        }
+        self.user_defined_cell_idx = self.calc_user_defined_cell_idx();
     }
 }

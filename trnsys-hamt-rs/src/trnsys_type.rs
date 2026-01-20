@@ -1,17 +1,20 @@
+use crate::hamt::boundary::{BoundaryCondition, celsius_to_kelvin, kelvin_to_celsius};
 use crate::hamt::hamt_manager::HamtManager;
 use crate::hamt::io::load_hamt_data;
 use crate::hamt::physics::KELVIN_CONV;
 use crate::hamt::uom::units::{
-    kelvin, kilograms_per_cubic_meter, kilograms_per_square_meter_second, square_meter,
-    watts_per_square_meter,
+    dimensionless, kelvin, kg_per_m2_s, kg_per_m2_s_pa, kg_per_m3, kj_per_hr, kj_per_hr_m2_k,
+    square_meter, w_per_m2, w_per_m2_k, watts,
 };
 use crate::trnsys::error::{InputError, TrnSysError};
 use crate::trnsys::iteration_mode::IterationMode;
 use crate::trnsys::param::TrnSysValue;
 use crate::trnsys::*;
-use anyhow::{Context, Result};
+use anyhow::{Context, Ok, Result};
+use csv::Writer;
 use std::path::Path;
-use tracing::warn;
+use tracing::{info, warn};
+use tracing_subscriber::fmt::format;
 
 pub(crate) struct TrnSysType {}
 
@@ -95,6 +98,27 @@ impl TrnSysType {
                     message: "Output File ID must be an integer".to_string(),
                 })?;
 
+        let output_path = format!("Type395_0{}_rh.out", _output_file_id);
+        state.csv_writer = Some(Writer::from_path(output_path)?);
+
+        // Write title columns
+        if let Some(writer) = &mut state.csv_writer {
+            writer.write_record(&[
+                "Time",
+                "T_out",
+                "T_in",
+                "RH_out",
+                "RH_in",
+                "T_userdef",
+                "RH_userdef",
+                "Water_userdef",
+                "HeatFlux_out",
+                "HeatFlux_in",
+                "Water_out",
+                "Water_in",
+            ])?;
+        }
+
         let manager = HamtManager::new(
             None,
             None,
@@ -107,7 +131,9 @@ impl TrnSysType {
     }
 
     /// Start of simulation (first timestep): initialize HAMT mesh/state.
-    pub fn simulation_starts(&self, _state: &mut TrnSysState) -> Result<(), TrnSysError> {
+    pub fn simulation_starts(&self, state: &mut TrnSysState) -> Result<()> {
+        info!("Simulation Begins");
+        self.report(state)?;
         Ok(())
     }
 
@@ -117,38 +143,103 @@ impl TrnSysType {
         Ok(())
     }
 
+    /// Report simulation data.
+    ///
+    /// Values:
+    /// - T_out
+    /// - T_in
+    /// - RH_out
+    /// - RH_in
+    /// - T_userdef
+    /// - RH_userdef
+    /// - MassFlux_userdef
+    /// - HeatFlux_out
+    /// - HeatFlux_in
+    /// - MassFlux_out
+    /// - MassFlux_in
+    pub fn report(&self, state: &mut TrnSysState) -> Result<Vec<TrnSysValue>> {
+        let report_row = if let Some(manager) = &mut state.hamt_manager {
+            // Map outputs
+            let report = manager.surface_next.report()?;
+            let outputs = vec![
+                kelvin_to_celsius(report.temp_surf_out),
+                kelvin_to_celsius(report.temp_surf_in),
+                report.rh_surf_out.value(),
+                report.rh_surf_in.value(),
+                kelvin_to_celsius(report.temp_surf_user_def),
+                report.rh_surf_user_def.value(),
+                report.water_surf_user_def.value_in(kg_per_m3),
+                report.q_surf_ext.value_in(w_per_m2),
+                report.q_surf_int.value_in(w_per_m2),
+                report.m_surf_ext.value_in(kg_per_m2_s),
+                report.m_surf_int.value_in(kg_per_m2_s),
+            ];
+            outputs
+        } else {
+            vec![
+                20.0, // Outside Surface Temperature
+                20.0, // Inside Surface Temperature
+                0.5,  // Outside Relative Humidity
+                0.5,  // Inside Relative Humidity
+                0.0,  // Outside Water Vapor Density
+                0.0,  // Inside Water Vapor Density
+                0.0,  // Outside Heat Flux
+                0.0,  // Inside Heat Flux
+                0.0,  // Outside Mass Flux
+                0.0,  // Inside Mass Flux
+            ]
+        };
+
+        if let Some(writer) = &mut state.csv_writer {
+            writer.write_record(
+                [vec![get_simulation_time()], report_row.clone()]
+                    .concat()
+                    .iter()
+                    .map(|v| v.to_string()),
+            )?;
+            writer.flush()?;
+        }
+
+        // default value
+        Ok(report_row
+            .into_iter()
+            .map(|v| TrnSysValue { value: v })
+            .collect())
+    }
+
     /// Called at each TRNSYS call within a timestep.
     pub fn iterate(&self, state: &mut TrnSysState) -> Result<Vec<TrnSysValue>> {
-        if let Some(manager) = &mut state.hamt_manager {
-            manager.solve_timestep()?;
+        // Read Input
+        let t_out = state.inputs[0].value;
+        let t_in = state.inputs[1].value;
+        let rh_out = state.inputs[2].value;
+        let rh_in = state.inputs[3].value;
+        let hconv_out = state.inputs[4].value;
+        let hconv_in = state.inputs[5].value;
+        let q_out = state.inputs[6].value;
+        let q_in = state.inputs[7].value;
+        let hmass_conv_out = state.inputs[8].value;
+        let hmass_conv_in = state.inputs[9].value;
+        let q_additional_userdef = state.inputs[10].value;
 
+        if let Some(manager) = &mut state.hamt_manager {
+            manager.boundary_condition = BoundaryCondition {
+                temp_outside_air: celsius_to_kelvin(t_out),
+                temp_inside_air: celsius_to_kelvin(t_in),
+                rh_outside_air: rh_out * dimensionless,
+                rh_inside_air: rh_in * dimensionless,
+                heat_transfer_coeff_ext: hconv_out * kj_per_hr_m2_k,
+                heat_transfer_coeff_int: hconv_in * kj_per_hr_m2_k,
+                additional_energy_ext: q_out * kj_per_hr,
+                additional_energy_int: q_in * kj_per_hr,
+                mass_convection_coeff_ext: hmass_conv_out * kg_per_m2_s_pa,
+                mass_convection_coeff_int: hmass_conv_in * kg_per_m2_s_pa,
+                q_addition_userdef: q_additional_userdef * kj_per_hr,
+                ..Default::default()
+            };
+            manager.solve_timestep()?;
             // Map outputs
-            {
-                let report = manager.surface_next.report()?;
-                let outputs = vec![
-                    report.temp_surf_out.value_in(kelvin) - KELVIN_CONV,
-                    report.temp_surf_in.value_in(kelvin) - KELVIN_CONV,
-                    report.rh_surf_out.value(),
-                    report.rh_surf_in.value(),
-                    report.temp_surf_user_def.value_in(kelvin) - KELVIN_CONV,
-                    report.rh_surf_user_def.value(),
-                    report
-                        .water_surf_user_def
-                        .value_in(kilograms_per_cubic_meter),
-                    report.q_surf_ext.value_in(watts_per_square_meter),
-                    report.q_surf_int.value_in(watts_per_square_meter),
-                    report
-                        .m_surf_ext
-                        .value_in(kilograms_per_square_meter_second),
-                    report
-                        .m_surf_int
-                        .value_in(kilograms_per_square_meter_second),
-                ];
-                return Ok(outputs
-                    .into_iter()
-                    .map(|v| TrnSysValue { value: v })
-                    .collect());
-            }
+            return self.report(state);
         }
 
         warn!("Iterate called before HAMT manager was initialized.");
@@ -167,10 +258,6 @@ impl TrnSysType {
 
     /// Default outputs used during start time before real iteration.
     pub fn get_default_output_values(&self, state: &mut TrnSysState) -> Result<Vec<TrnSysValue>> {
-        let defaults = vec![0.0; state.num_outputs as usize];
-        Ok(defaults
-            .into_iter()
-            .map(|v| TrnSysValue { value: v })
-            .collect())
+        self.report(state)
     }
 }

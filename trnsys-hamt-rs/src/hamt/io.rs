@@ -115,11 +115,11 @@ pub fn load_hamt_data<P: AsRef<Path>>(path: P) -> Result<MaterialLibrary> {
                 name: name.clone(),
                 thickness: crate::hamt::uom::units::meter
                     * parse_number::<f64>(&params[1], "Thickness")?,
-                conductivity: crate::hamt::uom::units::watts_per_meter_kelvin
+                conductivity: crate::hamt::uom::units::w_per_m_k
                     * parse_number::<f64>(&params[2], "Heat Conductivity")?,
-                density: crate::hamt::uom::units::kilograms_per_cubic_meter
+                density: crate::hamt::uom::units::kg_per_m3
                     * parse_number::<f64>(&params[3], "Density")?,
-                spec_heat: crate::hamt::uom::units::joules_per_kilogram_kelvin
+                spec_heat: crate::hamt::uom::units::j_per_kg_k
                     * parse_number::<f64>(&params[4], "Specific Heat")?,
                 thermal_absorptance: Quantity(parse_number(&params[5], "Thermal Absorptance")?),
                 solar_absorptance: Quantity(parse_number(&params[6], "Solar Absorptance")?),

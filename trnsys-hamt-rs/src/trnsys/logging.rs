@@ -1,4 +1,5 @@
-use crate::trnsys::{get_current_unit, log_message, messages, simulation_has_error, Severity};
+use crate::TYPE_NUMBER;
+use crate::trnsys::{Severity, get_current_unit, log_message, messages, simulation_has_error};
 use std::backtrace;
 use std::fmt::{Debug, Formatter, Pointer};
 use std::fs::OpenOptions;
@@ -6,17 +7,17 @@ use std::io::{Cursor, Write};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::field::{Field, Visit};
-use tracing::{error, Event, Level, Subscriber};
+use tracing::{Event, Level, Subscriber, error};
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
-use tracing_subscriber::fmt::{format, time, FormatEvent, FormatFields};
+use tracing_subscriber::fmt::{FormatEvent, FormatFields, format, time};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{
+    Layer,
     fmt::{self, time::OffsetTime, writer::BoxMakeWriter},
     layer::SubscriberExt,
     registry::Registry,
-    Layer,
 };
 
 /// The threshold level for trnsys logging.
@@ -140,7 +141,8 @@ pub fn get_default_log_file() -> String {
     let timestamp = SystemTime::now();
 
     let file_name = format!(
-        "trnsys_{}.log",
+        "trnsys_{}_{}.log",
+        TYPE_NUMBER,
         timestamp.duration_since(UNIX_EPOCH).unwrap().as_secs()
     );
 

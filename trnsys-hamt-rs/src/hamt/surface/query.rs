@@ -120,32 +120,29 @@ impl Surface {
         }
     }
 
+    pub fn calc_user_defined_cell_idx(&self) -> Option<[usize; 3]> {
+        if let Some(target_depth) = self.user_defined_depth {
+            let mut best: Option<([usize; 3], Length<f64>)> = None;
+            for ((x, y, z), cell) in self.cells.indexed_iter() {
+                let depth = cell.origin.x();
+                let dist = (depth - target_depth).abs();
+                match best {
+                    Some((_, best_dist)) if dist >= best_dist => {}
+                    _ => best = Some(([x, y, z], dist)),
+                }
+            }
+            best.map(|(idx, _)| idx)
+        } else {
+            None
+        }
+    }
+
     /// This function returns the values of the user-defined depth.
     /// If no user-defined depth is provided, it returns the mid-depth of the surface.
     /// # Returns
     /// A tuple containing the (cell_temp, cell_rh, water) of the depth.
     pub fn user_defined_values(&self) -> (Temperature<f64>, Dimensionless<f64>, Density<f64>) {
-        let target_depth = self.user_defined_depth.unwrap_or_else(|| {
-            // default to mid-depth if not provided
-            let dims = self.cells.raw_dim();
-            if dims[0] > 0 {
-                Quantity((dims[0]) as f64 / 2.0)
-            } else {
-                Quantity(0.0)
-            }
-        });
-
-        let mut best: Option<([usize; 3], Length<f64>)> = None;
-        for ((x, y, z), cell) in self.cells.indexed_iter() {
-            let depth = cell.origin.x();
-            let dist = (depth - target_depth).abs();
-            match best {
-                Some((_, best_dist)) if dist >= best_dist => {}
-                _ => best = Some(([x, y, z], dist)),
-            }
-        }
-
-        if let Some(([x, y, z], _)) = best {
+        if let Some([x, y, z]) = self.user_defined_cell_idx {
             let cell = &self.cells[[x, y, z]];
             (cell.cell_temp, cell.cell_rh, cell.volumetric_water)
         } else {
@@ -252,19 +249,17 @@ impl Surface {
                     .get(n_idx)
                     .with_context(|| format!("Cannot get neighbor cell index {:?}", n_idx))?;
 
-                let vtc: Option<VaporTransportCoeff<f64>> = match &location {
-                    BoundaryLocation::Exterior => self.ext_vtc.or(Some(b.vtc)),
-                    BoundaryLocation::Interior => self.int_vtc.or(Some(b.vtc)),
+                let vtc: VaporTransportCoeff<f64> = match &location {
+                    BoundaryLocation::Exterior => self.ext_vtc,
+                    BoundaryLocation::Interior => self.int_vtc,
                 };
 
-                if let Some(vtc) = vtc {
-                    let delta_vp: Pressure<f64> = b.cell_vp - n.cell_vp;
+                let delta_vp: Pressure<f64> = b.cell_vp - n.cell_vp;
 
-                    let cell_area: f64 = b.size.area_along(0).value_in(square_meter);
+                let cell_area: f64 = b.size.area_along(0).value_in(square_meter);
 
-                    accum_flux += vtc * delta_vp * cell_area;
-                    total_area += cell_area;
-                }
+                accum_flux += vtc * delta_vp * cell_area;
+                total_area += cell_area;
             }
         }
 
