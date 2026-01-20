@@ -41,7 +41,7 @@ unit_system!(
     dimension LiquidTransportCoeff = Length^2 / Time; // m²/s
     dimension VaporPermeability = Mass/ (Length * Time * Pressure); // m²/s
 
-    dimension ThermalResistance = 1.0f64 / Length / ThermalConductivity; // K/W
+    dimension ThermalResistance = Dimensionless / Length / ThermalConductivity; // K/W
     // Vapor resistance (Pa·s/kg), consistent with WVDC-based formulation
     dimension VaporResistance = Pressure * Time / Mass;
 

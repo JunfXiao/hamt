@@ -1,7 +1,7 @@
 use crate::hamt::uom::{
     Quantity,
     dimensions::{
-        Area, HeatTransferCoeff, Pressure, ThermalConductivity, ThermalResistance, Time,
+        Area, HeatTransferCoeff, Power, Pressure, ThermalConductivity, ThermalResistance, Time,
         VaporResistance,
     },
     units::{k_per_w, kelvin, pa_s_per_kg, pascals, watts},
@@ -72,7 +72,7 @@ impl Surface {
         surface_prev: &Surface,
         surface_curr: &Surface,
     ) -> Result<()> {
-        let dt_s = settings.timestep.value_in(units::seconds);
+        let dt_s = settings.timestep;
         let nx = self.cells.raw_dim()[0];
         for i in 0..nx {
             if self.cells[[i, 0, 0]].is_boundary() {
@@ -91,9 +91,9 @@ impl Surface {
                 let cell_prev = &surface_prev.cells[[i, 0, 0]];
                 let cell_curr = &surface_curr.cells[[i, 0, 0]];
 
-                let mut torsum = 0.0 * kelvin / k_per_w;
-                let mut oorsum = 0.0 * 1.0 / k_per_w;
-                let mut vpdiff = 0.0 * pascals / pa_s_per_kg;
+                let mut torsum = Quantity(0.0);
+                let mut oorsum = Quantity(0.0);
+                let mut vpdiff = Quantity(0.0);
 
                 let curr_temp_k = cell_curr.cell_temp;
                 let curr_vp_pa = cell_curr.cell_vp;
@@ -123,11 +123,11 @@ impl Surface {
 
                 let tcap_j_per_k = (density * spech + volumetric_water * physics::W_SPECH) * volume;
 
-                let mut qvp = 0.0;
+                let mut qvp = Quantity(0.0);
                 if settings.latent_heat_enabled
                     && let CellType::Material(_) = cell_next.cell_type
                 {
-                    qvp = vpdiff * physics::W_HV.value_in(crate::hamt::uom::units::j_per_kg);
+                    qvp = vpdiff * physics::W_HV;
                 }
 
                 let q_adds = match cell_next.cell_type {
@@ -148,10 +148,11 @@ impl Surface {
                 };
 
                 let denom = oorsum + (tcap_j_per_k / dt_s);
-                if denom > 0.0 {
-                    let prev_temp_k = cell_prev.cell_temp.value_in(units::kelvin);
-                    let numer = torsum + qvp + q_adds + (tcap_j_per_k * prev_temp_k / dt_s);
-                    units::kelvin * (numer / denom)
+                if denom > Quantity(0.0) {
+                    let prev_temp_k = cell_prev.cell_temp;
+                    let other: Power<f64> = (tcap_j_per_k * prev_temp_k / dt_s);
+                    let numer = torsum + qvp + q_adds + other;
+                    (numer / denom)
                 } else {
                     cell_curr.cell_temp
                 }

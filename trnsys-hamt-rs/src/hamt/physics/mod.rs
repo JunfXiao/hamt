@@ -1,13 +1,11 @@
 //! Contains pure physics and psychrometric functions for the HAMT model.
 
-use diman::si::units::pascal;
-
 use crate::hamt::material::Curve;
 use crate::hamt::uom::dimensions::{
     Density, Dimensionless, Pressure, SpecificEnergy, SpecificHeatCapacity, Temperature,
     VaporPermeability,
 };
-use crate::hamt::uom::units::{self, kelvin};
+use crate::hamt::uom::units::{self, kelvin, pascals};
 use crate::hamt::uom::{DensityQty, Quantity};
 pub mod geometry;
 
@@ -23,7 +21,7 @@ pub const W_HV: SpecificEnergy<f64> = Quantity(2_489_000.0);
 /// Density of water [kg/m³].
 pub const W_DENSITY: Density<f64> = Quantity(1000.0);
 
-pub const ATMOSPHERE_PRESSURE: Pressure<f64> = 101_325.0 * pascal;
+pub const ATMOSPHERE_PRESSURE: Pressure<f64> = Quantity(101_325.0);
 
 /// Calculates saturation vapor pressure as a function of temperature.
 /// Implements the Hyland & Wexler formulation as seen in EnergyPlus.
@@ -82,7 +80,7 @@ pub fn rh_to_vp(rh: Dimensionless<f64>, temp: Temperature<f64>) -> Pressure<f64>
 /// * `temp_celsius` - Temperature [°C].
 /// * `amb_pressure` - Ambient barometric pressure [Pa].
 pub fn wvdc(temp: Temperature<f64>, amb_pressure: Pressure<f64>) -> VaporPermeability<f64> {
-    Quantity((2e-7 * temp.value_in(kelvin).powf(0.81)) / amb_pressure.value_in(pascal))
+    Quantity((2e-7 * temp.value_in(kelvin).powf(0.81)) / amb_pressure.value_in(pascals))
 }
 
 /// Calculates Relative Humidity from dry-bulb temperature and vapor density.
