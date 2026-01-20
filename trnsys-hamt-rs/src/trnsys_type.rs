@@ -1,11 +1,11 @@
 use crate::hamt::boundary::{BoundaryCondition, celsius_to_kelvin, kelvin_to_celsius};
-use crate::hamt::hamt_manager::HamtManager;
+use crate::hamt::hamt_manager::{HamtManager, HamtSettings};
 use crate::hamt::io::load_hamt_data;
-use crate::hamt::physics::{self, KELVIN_CONV};
+use crate::hamt::physics::{self, ECLIPSE, KELVIN_CONV};
 use crate::hamt::uom::Quantity;
 use crate::hamt::uom::units::{
-    dimensionless, kelvin, kg_per_m2_s, kg_per_m2_s_pa, kg_per_m3, kj_per_hr, kj_per_hr_m2_k,
-    m_per_s, square_meter, w_per_m2, w_per_m2_k, watts,
+    dimensionless, hours, kelvin, kg_per_m2_s, kg_per_m2_s_pa, kg_per_m3, kj_per_hr,
+    kj_per_hr_m2_k, m_per_s, square_meter, w_per_m2, w_per_m2_k, watts,
 };
 use crate::trnsys::error::{InputError, TrnSysError};
 use crate::trnsys::iteration_mode::IterationMode;
@@ -120,8 +120,13 @@ impl TrnSysType {
             ])?;
         }
 
+        let settings = HamtSettings {
+            timestep: get_simulation_time_step() * hours,
+            ..Default::default()
+        };
+
         let manager = HamtManager::new(
-            None,
+            Some(settings),
             None,
             construction,
             format!("S256_{}", get_current_unit()),
@@ -160,7 +165,7 @@ impl TrnSysType {
     /// - HeatFlux_in
     /// - MassFlux_out
     /// - MassFlux_in
-    pub fn report(&self, state: &mut TrnSysState) -> Result<Vec<TrnSysValue>> {
+    pub fn report(&self, state: &mut TrnSysState, write: bool) -> Result<Vec<TrnSysValue>> {
         let mut report_row = if let Some(manager) = &mut state.hamt_manager {
             // Map outputs
             let report = manager.surface_next.report()?;
@@ -209,7 +214,7 @@ impl TrnSysType {
         //     ];
         // }
 
-        if let Some(writer) = &mut state.csv_writer {
+        if write && let Some(writer) = &mut state.csv_writer {
             let time = get_simulation_time();
             let report_rows: Vec<_> = [vec![time], report_row.clone()]
                 .into_iter()
@@ -271,7 +276,7 @@ impl TrnSysType {
                     let psat =
                         physics::psy_psat_fn_temp(manager.boundary_condition.temp_outside_air);
                     let denom = psat * rh;
-                    if denom > Quantity(0.0) {
+                    if denom > Quantity(ECLIPSE) {
                         manager.boundary_condition.vapor_transport_coeff_ext =
                             manager.boundary_condition.mass_convection_coeff_ext * rho_v / denom;
                     } else {
@@ -291,7 +296,7 @@ impl TrnSysType {
                     let psat =
                         physics::psy_psat_fn_temp(manager.boundary_condition.temp_inside_air);
                     let denom = psat * rh;
-                    if denom > Quantity(0.0) {
+                    if denom > Quantity(ECLIPSE) {
                         manager.boundary_condition.vapor_transport_coeff_int =
                             manager.boundary_condition.mass_convection_coeff_int * rho_v / denom;
                     } else {
@@ -312,7 +317,7 @@ impl TrnSysType {
 
             manager.solve_timestep()?;
             // Map outputs
-            return self.report(state);
+            return self.report(state, false);
         }
 
         warn!("Iterate called before HAMT manager was initialized.");
@@ -321,6 +326,7 @@ impl TrnSysType {
 
     /// End of timestep.
     pub fn end_of_timestep(&self, state: &mut TrnSysState) -> Result<()> {
+        self.report(state, true)?;
         state
             .hamt_manager
             .as_mut()
@@ -331,6 +337,6 @@ impl TrnSysType {
 
     /// Default outputs used during start time before real iteration.
     pub fn get_default_output_values(&self, state: &mut TrnSysState) -> Result<Vec<TrnSysValue>> {
-        self.report(state)
+        self.report(state, false)
     }
 }

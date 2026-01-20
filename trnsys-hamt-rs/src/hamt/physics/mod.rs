@@ -23,6 +23,8 @@ pub const W_DENSITY: Density<f64> = Quantity(1000.0);
 
 pub const ATMOSPHERE_PRESSURE: Pressure<f64> = Quantity(101_325.0);
 
+pub const ECLIPSE: f64 = 1e-6;
+
 /// Calculates saturation vapor pressure as a function of temperature.
 /// Implements the Hyland & Wexler formulation as seen in EnergyPlus.
 ///
@@ -91,7 +93,7 @@ pub fn wvdc(temp: Temperature<f64>, amb_pressure: Pressure<f64>) -> VaporPermeab
 /// # Returns
 /// * `rh` - Relative humidity [0-1].
 pub fn rh_from_t_vd(t_db: Temperature<f64>, rho_vapor: Density<f64>) -> Dimensionless<f64> {
-    if rho_vapor <= Quantity(0.0) {
+    if rho_vapor <= Quantity(ECLIPSE) {
         return Quantity(0.0);
     }
     let p_sat = psy_psat_fn_temp(t_db);

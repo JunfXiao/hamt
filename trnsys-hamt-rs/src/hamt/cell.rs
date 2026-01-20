@@ -3,6 +3,7 @@
 use tracing::info;
 
 use crate::hamt::boundary::celsius_to_kelvin;
+use crate::hamt::physics::ECLIPSE;
 use crate::hamt::uom::dimensions::{
     Density, Dimensionless, HeatTransferCoeff, LiquidTransportCoeff, Power, Pressure,
     SpecificHeatCapacity, Temperature, ThermalConductivity, VaporTransportCoeff, Volume,
@@ -228,7 +229,7 @@ impl Cell {
 
             let (k, _) = mat.thermal_conductivity.interpolate(water);
 
-            self.w_thermal_c = if k > Quantity(0.0) {
+            self.w_thermal_c = if k > Quantity(ECLIPSE) {
                 k
             } else {
                 mat.conductivity

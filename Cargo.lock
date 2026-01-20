@@ -92,6 +92,7 @@ checksum = "dc2e5d605b325d3ee5e1ae397bc443327314843f2b10e594d80622665034c56d"
 dependencies = [
  "diman_lib",
  "diman_unit_system",
+ "serde",
 ]
 
 [[package]]

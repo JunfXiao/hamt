@@ -174,8 +174,8 @@ impl Default for HamtSettings {
     fn default() -> Self {
         Self {
             timestep: 3600.0 * units::seconds,
-            max_iterations: 150,
-            temp_convergence_tolerance: 0.01 * units::kelvin,
+            max_iterations: 1500,
+            temp_convergence_tolerance: 0.001 * units::kelvin,
             rh_convergence_tolerance: 0.0001,
             base_cell_size: Pt3D(0.1 * units::meter, 0.0 * units::meter, 0.0 * units::meter),
             latent_heat_enabled: true,

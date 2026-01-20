@@ -1,5 +1,5 @@
 use crate::hamt::{
-    physics::KELVIN_CONV,
+    physics::{ECLIPSE, KELVIN_CONV},
     uom::{
         Dimension, Quantity, WaterContentQty,
         dimensions::{Density, Pressure, WaterContent},
@@ -113,7 +113,7 @@ impl Surface {
                 sum_area += area;
             }
         }
-        if sum_area > Quantity(0.0) {
+        if sum_area > Quantity(ECLIPSE) {
             Ok(sum / sum_area)
         } else {
             Ok(Quantity(0.0))
@@ -200,9 +200,9 @@ impl Surface {
                 let htc = b.htc;
                 let k = b.w_thermal_c;
 
-                let flux_w_m2k = if htc > Quantity(0.0) {
+                let flux_w_m2k = if htc > Quantity(ECLIPSE) {
                     htc
-                } else if k > Quantity(0.0) && b.size.x() > Quantity(0.0) {
+                } else if k > Quantity(ECLIPSE) && b.size.x() > Quantity(ECLIPSE) {
                     (k / b.size.x())
                 } else {
                     Quantity(0.0)
@@ -213,7 +213,7 @@ impl Surface {
             }
         }
 
-        if total_area > Quantity(0.0) {
+        if total_area > Quantity(ECLIPSE) {
             Ok(total_flux / total_area)
         } else {
             Ok(Quantity(0.0))
