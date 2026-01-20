@@ -47,14 +47,24 @@ impl HamtManager {
         surface_area: Area<f64>,
     ) -> Result<Self> {
         let settings = settings.unwrap_or_default();
-        let initial_boundary = initial_boundary.unwrap_or_default();
+        let mut boundary = initial_boundary.unwrap_or_default();
+
+        // Propagate constant vapor transfer coefficients from construction definition
+        if construction.surface_vapor_coef.is_external_const {
+            boundary.vapor_transport_coeff_ext =
+                construction.surface_vapor_coef.external_value * units::kg_per_m2_s_pa;
+        }
+        if construction.surface_vapor_coef.is_internal_const {
+            boundary.vapor_transport_coeff_int =
+                construction.surface_vapor_coef.internal_value * units::kg_per_m2_s_pa;
+        }
 
         let surface = Surface::from_construction(
             &settings,
             construction.clone(),
             surface_name,
             surface_area,
-            &initial_boundary,
+            &boundary,
         )?;
 
         Ok(Self {
@@ -63,7 +73,7 @@ impl HamtManager {
             surface_curr: surface.clone(),
             surface_prev: surface.clone(),
             surface_next: surface,
-            boundary_condition: initial_boundary,
+            boundary_condition: boundary,
             materials: construction.layers.clone(),
         })
     }

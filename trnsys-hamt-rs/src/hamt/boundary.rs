@@ -6,7 +6,7 @@ use crate::hamt::{
             Dimensionless, EnergyFlux, HeatTransferCoeff, MassConvectionCoeff, Power, Temperature,
             VaporTransportCoeff,
         },
-        units::{self, kg_per_m2_s_pa, w_per_m_k, w_per_m2_k, watts},
+        units::{self, kg_per_m2_s_pa, m_per_s, w_per_m_k, w_per_m2_k, watts},
     },
 };
 
@@ -32,11 +32,17 @@ pub struct BoundaryCondition {
     /// Internal heat transfer coefficient [W/m²K].
     pub heat_transfer_coeff_int: HeatTransferCoeff<f64>,
 
-    /// External mass convection coefficient [kg/m²s].
+    /// External mass convection coefficient [m/s].
     pub mass_convection_coeff_ext: MassConvectionCoeff<f64>,
 
     /// Internal mass convection coefficient [kg/m²s].
     pub mass_convection_coeff_int: MassConvectionCoeff<f64>,
+
+    /// External vapor transport coefficient [kg/(m²·s·Pa)].
+    pub vapor_transport_coeff_ext: VaporTransportCoeff<f64>,
+
+    /// Internal vapor transport coefficient [kg/(m²·s·Pa)].
+    pub vapor_transport_coeff_int: VaporTransportCoeff<f64>,
 
     /// External additional energy [W].
     pub additional_energy_ext: Power<f64>,
@@ -77,8 +83,10 @@ impl BoundaryCondition {
             pressure_air: pressure_pa * units::pascals,
             heat_transfer_coeff_ext: heat_transfer_coeff_ext * w_per_m2_k,
             heat_transfer_coeff_int: heat_transfer_coeff_int * w_per_m2_k,
-            mass_convection_coeff_ext: mass_conv_coeff_ext * kg_per_m2_s_pa,
-            mass_convection_coeff_int: mass_conv_coeff_int * kg_per_m2_s_pa,
+            mass_convection_coeff_ext: mass_conv_coeff_ext * m_per_s,
+            mass_convection_coeff_int: mass_conv_coeff_int * m_per_s,
+            vapor_transport_coeff_ext: Quantity(0.0),
+            vapor_transport_coeff_int: Quantity(0.0),
             additional_energy_ext: q_additional_out * watts,
             additional_energy_int: q_additional_in * watts,
             q_addition_userdef: q_additional_userdef * watts,
@@ -112,8 +120,10 @@ impl Default for BoundaryCondition {
             pressure_air: ATMOSPHERE_PRESSURE,
             heat_transfer_coeff_ext: 1.5 * w_per_m2_k,
             heat_transfer_coeff_int: 1.5 * w_per_m2_k,
-            mass_convection_coeff_ext: 0.0 * kg_per_m2_s_pa,
-            mass_convection_coeff_int: 0.0 * kg_per_m2_s_pa,
+            mass_convection_coeff_ext: 0.0 * m_per_s,
+            mass_convection_coeff_int: 0.0 * m_per_s,
+            vapor_transport_coeff_ext: Quantity(0.0),
+            vapor_transport_coeff_int: Quantity(0.0),
             additional_energy_ext: 0.0 * watts,
             additional_energy_int: 0.0 * watts,
             q_addition_userdef: 0.0 * watts,

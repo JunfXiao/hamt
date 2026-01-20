@@ -4,7 +4,7 @@ use crate::hamt::io::load_hamt_data;
 use crate::hamt::physics::KELVIN_CONV;
 use crate::hamt::uom::units::{
     dimensionless, kelvin, kg_per_m2_s, kg_per_m2_s_pa, kg_per_m3, kj_per_hr, kj_per_hr_m2_k,
-    square_meter, w_per_m2, w_per_m2_k, watts,
+    m_per_s, square_meter, w_per_m2, w_per_m2_k, watts,
 };
 use crate::trnsys::error::{InputError, TrnSysError};
 use crate::trnsys::iteration_mode::IterationMode;
@@ -232,8 +232,8 @@ impl TrnSysType {
                 heat_transfer_coeff_int: hconv_in * kj_per_hr_m2_k,
                 additional_energy_ext: q_out * kj_per_hr,
                 additional_energy_int: q_in * kj_per_hr,
-                mass_convection_coeff_ext: hmass_conv_out * kg_per_m2_s_pa,
-                mass_convection_coeff_int: hmass_conv_in * kg_per_m2_s_pa,
+                mass_convection_coeff_ext: hmass_conv_out * m_per_s,
+                mass_convection_coeff_int: hmass_conv_in * m_per_s,
                 q_addition_userdef: q_additional_userdef * kj_per_hr,
                 ..Default::default()
             };

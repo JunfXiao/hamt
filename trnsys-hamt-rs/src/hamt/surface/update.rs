@@ -2,7 +2,7 @@ use crate::hamt::uom::{
     Quantity,
     dimensions::{
         Area, HeatTransferCoeff, Power, Pressure, ThermalConductivity, ThermalResistance, Time,
-        VaporResistance,
+        VaporResistance, VaporTransportCoeff,
     },
     units::{k_per_w, kelvin, pa_s_per_kg, pascals, watts},
 };
@@ -27,6 +27,9 @@ impl Surface {
 
         // --- Sync `surface_next` with current iteration state ---
         self.sync_state_from(surface_curr)?;
+
+        // --- Apply latest boundary coefficients/conditions ---
+        self.apply_boundary_coefficients(bc, settings)?;
 
         // --- Update moisture-dependent properties for all cells ---
         self.update_cell_properties(bc, settings)?;
@@ -60,6 +63,54 @@ impl Surface {
     ) -> Result<()> {
         for cell in self.cells.iter_mut() {
             cell.calc_dependent_state(bc, settings);
+        }
+        Ok(())
+    }
+
+    /// Push boundary htc/vtc/temp/rh/vp into boundary cells before property updates.
+    fn apply_boundary_coefficients(
+        &mut self,
+        bc: &BoundaryCondition,
+        _settings: &HamtSettings,
+    ) -> Result<()> {
+        let nx = self.cells.raw_dim()[0];
+        for i in 0..nx {
+            let cell = &mut self.cells[[i, 0, 0]];
+            if cell.is_boundary() {
+                if cell.is_exterior_boundary() {
+                    cell.htc = bc.heat_transfer_coeff_ext;
+                    cell.cell_temp = bc.temp_outside_air;
+                    cell.cell_rh = bc.rh_outside_air;
+                    let psat = physics::psy_psat_fn_temp(cell.cell_temp);
+                    let rh = cell.cell_rh;
+                    let vtc = if bc.vapor_transport_coeff_ext > VaporTransportCoeff::<f64>::zero() {
+                        bc.vapor_transport_coeff_ext
+                    } else if rh > Quantity(0.0) {
+                        let rho_v = physics::vd_from_t_rh(cell.cell_temp, rh);
+                        bc.mass_convection_coeff_ext * rho_v / (psat * rh)
+                    } else {
+                        Quantity(10000.0)
+                    };
+                    cell.vtc = vtc;
+                    cell.cell_vp = rh * psat;
+                } else {
+                    cell.htc = bc.heat_transfer_coeff_int;
+                    cell.cell_temp = bc.temp_inside_air;
+                    cell.cell_rh = bc.rh_inside_air;
+                    let psat = physics::psy_psat_fn_temp(cell.cell_temp);
+                    let rh = cell.cell_rh;
+                    let vtc = if bc.vapor_transport_coeff_int > VaporTransportCoeff::<f64>::zero() {
+                        bc.vapor_transport_coeff_int
+                    } else if rh > Quantity(0.0) {
+                        let rho_v = physics::vd_from_t_rh(cell.cell_temp, rh);
+                        bc.mass_convection_coeff_int * rho_v / (psat * rh)
+                    } else {
+                        Quantity(10000.0)
+                    };
+                    cell.vtc = vtc;
+                    cell.cell_vp = rh * psat;
+                }
+            }
         }
         Ok(())
     }

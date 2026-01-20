@@ -35,7 +35,7 @@ unit_system!(
     dimension ThermalConductivity = Power / (Length * Temperature); // W/(m·K)
     dimension LiquidTransferCoeff = Length^2 / Time;
     dimension VaporTransportCoeff = Mass / (Area * Time * Pressure); // kg/(m²·s·Pa)
-    dimension MassConvectionCoeff = Mass / (Area * Time * Pressure); // kg/(m²·s·Pa)
+    dimension MassConvectionCoeff = Length /  Time; // m/s
     dimension Density = Mass / Volume; // kg/m³
     dimension WaterContent = Dimensionless; // kg/kg
     dimension LiquidTransportCoeff = Length^2 / Time; // m²/s
@@ -67,8 +67,8 @@ unit_system!(
     unit dimensionless: Dimensionless = 1.0;
     unit square_meter: Area = meter^2;
     unit cubic_meter: Volume = meter^3;
-    unit meters_per_second: Velocity = meter / seconds;
-    unit meters_per_second_squared: Acceleration = meter / seconds^2;
+    unit m_per_s: Velocity = meter / seconds;
+    unit m_per_s_squared: Acceleration = meter / seconds^2;
     unit hours: Time = 3600.0f64 * seconds;
     unit pascals: Pressure = kilograms / (meter * seconds^2);
     unit joules: Energy = pascals * cubic_meter;
@@ -208,3 +208,59 @@ pub const DIM_VAPOR_TRANSPORT_COEFF: Dimension = Dimension {
     mass: 1,
     temperature: 0,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hamt::uom::dimensions::{HeatTransferCoeff, Power, VaporTransportCoeff};
+    use crate::hamt::uom::units::{
+        dimensionless, kg_per_m2_s_pa, kg_per_m3, kj_per_hr, kj_per_hr_m2_k, m_per_s, pascals,
+        w_per_m2_k, watts,
+    };
+
+    // Verify that converting from mass convection (m/s) and RH/Psat yields
+    // the expected vapor transport coefficient units/value.
+    #[test]
+    fn vtc_from_mass_convection_has_correct_units() {
+        let hmass = 1.0 * m_per_s; // m/s
+        let rho_v = 1.2 * kg_per_m3; // kg/m3
+        let psat = 2000.0 * pascals; // Pa
+        let rh = 0.5 * dimensionless; // [-]
+
+        let vtc: VaporTransportCoeff<f64> = hmass * rho_v / (psat * rh); // should be kg/(m2·s·Pa)
+        let expected = 1.0 * 1.2 / (2000.0 * 0.5); // numeric value
+
+        assert!(
+            (vtc.value_in(kg_per_m2_s_pa) - expected).abs() < 1e-12,
+            "vtc value mismatch: got {}, expected {}",
+            vtc.value_in(kg_per_m2_s_pa),
+            expected
+        );
+    }
+
+    // Verify that 1 kJ/(hr·m²·K) converts to the correct W/(m²·K).
+    #[test]
+    fn heat_transfer_coeff_from_kj_per_hr() {
+        let h_kj: HeatTransferCoeff<f64> = 1.0 * kj_per_hr_m2_k;
+        let expected = 1000.0 / 3600.0; // W/m2K
+        assert!(
+            (h_kj.value_in(w_per_m2_k) - expected).abs() < 1e-12,
+            "htc value mismatch: got {}, expected {}",
+            h_kj.value_in(w_per_m2_k),
+            expected
+        );
+    }
+
+    // Verify that 1 kJ/hr converts to the correct W.
+    #[test]
+    fn power_from_kj_per_hr() {
+        let p_kj_hr: Power<f64> = 1.0 * kj_per_hr;
+        let expected = 1000.0 / 3600.0; // W
+        assert!(
+            (p_kj_hr.value_in(watts) - expected).abs() < 1e-12,
+            "power value mismatch: got {}, expected {}",
+            p_kj_hr.value_in(watts),
+            expected
+        );
+    }
+}
