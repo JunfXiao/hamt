@@ -134,14 +134,17 @@ impl TrnSysType {
         )?;
         debug!("Initialized");
         state.hamt_manager = Some(manager);
-        debug!("Report after initialization:\n{:#?}", self.report(state));
+        debug!(
+            "Report after initialization:\n{:#?}",
+            self.report(state, false)
+        );
         Ok(())
     }
 
     /// Start of simulation (first timestep): initialize HAMT mesh/state.
     pub fn simulation_starts(&self, state: &mut TrnSysState) -> Result<()> {
         info!("Simulation Begins");
-        self.report(state)?;
+        self.report(state, true)?;
         Ok(())
     }
 
