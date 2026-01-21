@@ -2,7 +2,7 @@ use crate::trnsys::error::TrnSysError;
 use crate::trnsys::get_lu_filename;
 use std::panic::catch_unwind;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default, Copy)]
 pub struct TrnSysValue {
     pub value: f64,
 }

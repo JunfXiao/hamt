@@ -6,12 +6,14 @@ use crate::trnsys::error::TrnSysErrorHandler;
 use crate::trnsys::logging::cleanup_tracing;
 use crate::trnsys_type::TrnSysType;
 use anyhow::Result;
+use fpu_guard::fpu_guard::FpuGuard;
 use std::collections::HashMap;
 use std::ops::DerefMut;
 use std::sync::{Arc, LazyLock, RwLock};
 use tracing::{debug, error, info};
 use trnsys::*;
 
+mod fpu_guard;
 pub mod hamt;
 mod storage;
 mod trnsys;
@@ -38,6 +40,7 @@ fn get_current_state() -> Arc<RwLock<TrnSysState>> {
 }
 
 fn entrance() {
+    let _guard = FpuGuard::new();
     let state_lock = get_current_state();
     let mut state = state_lock.write().unwrap();
     // create type instance
@@ -98,14 +101,7 @@ fn main(mut state: &mut TrnSysState) -> Result<()> {
         // validate parameters
         type_instance.validate_parameters(&mut state)?;
         // initialize outputs
-        type_instance
-            .get_default_output_values(&mut state)?
-            .iter()
-            .enumerate()
-            .for_each(|(i, val)| {
-                // attention: TRNSYS/Fortran is 1-indexed
-                set_output_value(i as i32, val.value);
-            });
+        type_instance.set_default_output_values(&mut state)?;
 
         type_instance.simulation_starts(&mut state)?;
         return Ok(());

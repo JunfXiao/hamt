@@ -26,30 +26,9 @@ fn write_entrance_code(type_number: &str) {
     // Dynamic generate the type entrance
     let function_code = format!(
         r#"
-
-        #[cfg(target_os = "windows")]
-        fn mask_fpu_exceptions() {{
-            use std::os::raw::c_uint;
-
-            // 调用 Windows 的 _control87 来屏蔽异常
-            // _MCW_EM (0x0008001F) 是屏蔽所有浮点异常的掩码
-            unsafe extern "C" {{
-                fn _control87(new: c_uint, mask: c_uint) -> c_uint;
-            }}
-
-            unsafe {{
-                // 0x0008001F 屏蔽所有异常 (Invalid, Denormal, Zero, Overflow, Underflow, Inexact)
-                // 0x00010000 | 0x00020000 | ...
-                // 简单暴力：屏蔽所有
-                _control87(0x0008001F, 0x0008001F);
-            }}
-        }}
-
         #[allow(non_snake_case)]
         #[unsafe(no_mangle)]
         pub extern "C" fn TYPE{}() {{
-            #[cfg(target_os = "windows")]
-            mask_fpu_exceptions();
             entrance();
         }}
         const TYPE_NUMBER: u32 = {};

@@ -1,4 +1,4 @@
-use crate::trnsys::{found_bad_input, found_bad_parameter, Severity, TrnSysState};
+use crate::trnsys::{Severity, TrnSysState, found_bad_input, found_bad_parameter};
 use std::error::Error;
 use std::io;
 use thiserror::Error;
@@ -33,7 +33,7 @@ impl TrnSysErrorHandler for TrnSysError {
                 e.handle_in_trnsys(state);
             }
             TrnSysError::IoError(e) => {
-                error!("IO error in TRNSYS type: {:?}", e);
+                error!("IO error in TRNSYS type: {:#}", e);
             }
             TrnSysError::GeneralError(msg) => {
                 error!("General TRNSYS error: {}", msg);
@@ -58,9 +58,8 @@ impl TrnSysErrorHandler for anyhow::Error {
     fn handle_in_trnsys(&self, state: &TrnSysState) {
         if let Some(trnsys_err) = self.downcast_ref::<TrnSysError>() {
             trnsys_err.handle_in_trnsys(state);
-        } else {
-            error!("Unhandled Application Error: {:?}", self);
         }
+        error!("Application Error: {:#}", self);
     }
 }
 

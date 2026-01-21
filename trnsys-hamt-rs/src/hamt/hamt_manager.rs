@@ -5,7 +5,7 @@ use super::surface::Surface;
 use crate::hamt::material::{Construction, Material};
 use crate::hamt::physics::geometry::{Pt3D, Size3D};
 use crate::hamt::uom::dimensions::{Temperature, Time};
-use crate::hamt::uom::units::{dimensionless, kg_per_m2_s_pa};
+use crate::hamt::uom::units::{dimensionless, hours, kg_per_m2_s_pa};
 use crate::hamt::{physics, uom};
 use crate::trnsys::get_simulation_time;
 use anyhow::Result;
@@ -37,6 +37,8 @@ pub struct HamtManager {
 
     /// Simulation-wide settings
     pub settings: HamtSettings,
+
+    pub last_report_time: Time<f64>,
 }
 
 impl HamtManager {
@@ -81,36 +83,37 @@ impl HamtManager {
             surface_next: surface,
             boundary_condition: boundary,
             materials: construction.layers.clone(),
+            last_report_time: 0.0 * hours,
         })
     }
 
     /// Solves for the current timestep by iterating until convergence.
     pub fn solve_timestep(&mut self) -> Result<bool> {
-        for _ in 0..self.settings.max_iterations {
-            // Reapply surface vapor coefficients if not using constnat value
-            if !self.construction.surface_vapor_coef.is_external_const {
-                let rh = self.boundary_condition.rh_outside_air;
-                if rh > 0.0 * dimensionless {
-                    let rho_v = physics::vd_from_t_rh(self.boundary_condition.temp_outside_air, rh);
-                    let psat = physics::psy_psat_fn_temp(self.boundary_condition.temp_outside_air);
-                    self.boundary_condition.vapor_transport_coeff_ext =
-                        self.boundary_condition.mass_convection_coeff_ext * rho_v / (psat * rh);
-                } else {
-                    self.boundary_condition.vapor_transport_coeff_ext = 0.0 * kg_per_m2_s_pa;
-                }
+        // Reapply surface vapor coefficients if not using constnat value
+        if !self.construction.surface_vapor_coef.is_external_const {
+            let rh = self.boundary_condition.rh_outside_air;
+            if rh > 0.0 * dimensionless {
+                let rho_v = physics::vd_from_t_rh(self.boundary_condition.temp_outside_air, rh);
+                let psat = physics::psy_psat_fn_temp(self.boundary_condition.temp_outside_air);
+                self.boundary_condition.vapor_transport_coeff_ext =
+                    self.boundary_condition.mass_convection_coeff_ext * rho_v / (psat * rh);
+            } else {
+                self.boundary_condition.vapor_transport_coeff_ext = 0.0 * kg_per_m2_s_pa;
             }
-            if !self.construction.surface_vapor_coef.is_internal_const {
-                let rh = self.boundary_condition.rh_inside_air;
-                if rh > 0.0 * dimensionless {
-                    let rho_v = physics::vd_from_t_rh(self.boundary_condition.temp_inside_air, rh);
-                    let psat = physics::psy_psat_fn_temp(self.boundary_condition.temp_inside_air);
-                    self.boundary_condition.vapor_transport_coeff_int =
-                        self.boundary_condition.mass_convection_coeff_int * rho_v / (psat * rh);
-                } else {
-                    self.boundary_condition.vapor_transport_coeff_int = 0.0 * kg_per_m2_s_pa;
-                }
+        }
+        if !self.construction.surface_vapor_coef.is_internal_const {
+            let rh = self.boundary_condition.rh_inside_air;
+            if rh > 0.0 * dimensionless {
+                let rho_v = physics::vd_from_t_rh(self.boundary_condition.temp_inside_air, rh);
+                let psat = physics::psy_psat_fn_temp(self.boundary_condition.temp_inside_air);
+                self.boundary_condition.vapor_transport_coeff_int =
+                    self.boundary_condition.mass_convection_coeff_int * rho_v / (psat * rh);
+            } else {
+                self.boundary_condition.vapor_transport_coeff_int = 0.0 * kg_per_m2_s_pa;
             }
+        }
 
+        for _ in 0..self.settings.max_iterations {
             self.surface_next.calculate_iteration(
                 &self.settings,
                 &self.boundary_condition,
@@ -118,15 +121,14 @@ impl HamtManager {
                 &self.surface_curr,
             )?;
 
+            mem::swap(&mut self.surface_curr, &mut self.surface_next);
+
             if self
                 .surface_curr
                 .check_convergence(&self.surface_next, &self.settings)
             {
-                mem::swap(&mut self.surface_curr, &mut self.surface_next);
                 return Ok(true); // Converged
             }
-
-            mem::swap(&mut self.surface_curr, &mut self.surface_next);
         }
 
         Ok(false) // Not converged
@@ -168,6 +170,7 @@ pub struct HamtSettings {
     pub adj_length: Length<f64>,
     /// user defined depth [m]
     pub user_defined_depth: Option<Length<f64>>,
+
 }
 
 impl Default for HamtSettings {
