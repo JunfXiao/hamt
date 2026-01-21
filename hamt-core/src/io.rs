@@ -1,11 +1,12 @@
 //! Handles reading and parsing of the HAMT material and construction data file.
 
-use tracing::{info, warn};
+use tracing::warn;
 
-use crate::hamt::material::{Curve, Material, MaterialLibrary, SurfaceVaporCoef};
-use crate::hamt::uom::{Dimension, Quantity};
-use crate::trnsys::error::{InputError, TrnSysError};
+use crate::error::{self, Error, InvalidInputReason};
+use crate::material::{Curve, Material, MaterialLibrary, SurfaceVaporCoef};
+use crate::uom::{Dimension, Quantity};
 use anyhow::{Context, Result};
+use std::any;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
@@ -113,13 +114,13 @@ pub fn load_hamt_data<P: AsRef<Path>>(path: P) -> Result<MaterialLibrary> {
             // Params: [Roughness, Thickness, Conductivity, Density, SpecHeat, ThAbs, SolAbs, VisAbs]
             let mat = Material {
                 name: name.clone(),
-                thickness: crate::hamt::uom::units::meter
+                thickness: crate::uom::units::meter
                     * parse_number::<f64>(&params[1], "Thickness")?,
-                conductivity: crate::hamt::uom::units::w_per_m_k
+                conductivity: crate::uom::units::w_per_m_k
                     * parse_number::<f64>(&params[2], "Heat Conductivity")?,
-                density: crate::hamt::uom::units::kg_per_m3
+                density: crate::uom::units::kg_per_m3
                     * parse_number::<f64>(&params[3], "Density")?,
-                spec_heat: crate::hamt::uom::units::j_per_kg_k
+                spec_heat: crate::uom::units::j_per_kg_k
                     * parse_number::<f64>(&params[4], "Specific Heat")?,
                 thermal_absorptance: Quantity(parse_number(&params[5], "Thermal Absorptance")?),
                 solar_absorptance: Quantity(parse_number(&params[6], "Solar Absorptance")?),
@@ -184,10 +185,11 @@ pub fn load_hamt_data<P: AsRef<Path>>(path: P) -> Result<MaterialLibrary> {
                 internal_value: int_val,
             };
             if let Some(_) = surface_vapor_coefs.insert(name.clone(), coef) {
-                return Err(TrnSysError::from(InputError::DuplicateItem {
-                    item: "SurfaceVaporCoef".to_string(),
-                    name: name.clone(),
-                }))
+                return Err(error::Error::InvalidInput(
+                    "SurfaceVaporCoef".to_string(),
+                    name.clone(),
+                    InvalidInputReason::Duplicate,
+                ))
                 .with_context(|| {
                     format!(
                         "adding SurfaceVaporCoef of the construction'{}' to the material library",
@@ -232,13 +234,14 @@ pub fn load_hamt_data<P: AsRef<Path>>(path: P) -> Result<MaterialLibrary> {
     Ok(library)
 }
 
-/// Utility function to parse a number from a string, wrapping errors in TrnSysError.
-fn parse_number<T: FromStr>(input: &str, field_name: &str) -> Result<T, TrnSysError> {
+/// Utility function to parse a number from a string, wrapping errors in Error.
+fn parse_number<T: FromStr>(input: &str, field_name: &str) -> Result<T, Error> {
     input.trim().parse::<T>().map_err(|_| {
-        InputError::BadParameter {
-            index: -1,
-            message: format!("Failed to parse number '{}' for {}", input, field_name),
-        }
+        Error::InvalidInput(
+            field_name.to_string(),
+            input.to_string(),
+            InvalidInputReason::ParseError(any::type_name::<T>().to_string()),
+        )
         .into()
     })
 }
@@ -247,7 +250,7 @@ fn parse_number<T: FromStr>(input: &str, field_name: &str) -> Result<T, TrnSysEr
 fn parse_curve<const DX: Dimension, const DY: Dimension>(
     params: &[String],
     name: &str,
-) -> Result<Curve<DX, DY>, TrnSysError> {
+) -> Result<Curve<DX, DY>, Error> {
     if params.is_empty() {
         return Ok(Curve::<DX, DY>::new(Vec::new(), Vec::new()));
     }
@@ -258,16 +261,16 @@ fn parse_curve<const DX: Dimension, const DY: Dimension>(
 
     // Check strict length: 1 (count) + 2 * count (pairs)
     if params.len() != 1 + 2 * count {
-        return Err(InputError::WrongDefinition {
-            item: "Curve".to_string(),
-            name: name.to_string(),
-            reason: format!(
+        return Err(Error::InvalidInput(
+            "Curve".to_string(),
+            name.to_string(),
+            InvalidInputReason::Other(format!(
                 "Expected {} points ({} values), got {} values",
                 count,
                 1 + 2 * count,
                 params.len()
-            ),
-        }
+            )),
+        )
         .into());
     }
 
@@ -332,11 +335,15 @@ fn parse_idf_content(content: &str) -> Result<HashMap<(HamtProperty, String), Ve
         match property.length_spec() {
             LengthSpec::Fixed(n) => {
                 if params.len() != n {
-                    return Err(TrnSysError::from(InputError::WrongDefinition {
-                        item: prop_str.to_string(),
-                        name: name.clone(),
-                        reason: format!("Expected {} parameters, found {}", n, params.len()),
-                    }))
+                    return Err(Error::from(Error::InvalidInput(
+                        prop_str.to_string(),
+                        name.clone(),
+                        InvalidInputReason::Other(format!(
+                            "Expected {} parameters, found {}",
+                            n,
+                            params.len()
+                        )),
+                    )))
                     .with_context(|| format!("parsing property '{}' for '{}'", prop_str, name));
                 }
             }
@@ -348,10 +355,11 @@ fn parse_idf_content(content: &str) -> Result<HashMap<(HamtProperty, String), Ve
         // Check for Duplicates
         let key = (property, name.clone());
         if result.contains_key(&key) {
-            return Err(TrnSysError::from(InputError::DuplicateItem {
-                item: prop_str.to_string(),
-                name: name.clone(),
-            }))
+            return Err(Error::InvalidInput(
+                prop_str.to_string(),
+                name.clone(),
+                InvalidInputReason::Duplicate,
+            ))
             .with_context(|| {
                 format!(
                     "checking duplicates for property '{}' and name '{}'",
@@ -374,7 +382,7 @@ mod tests {
     #[traced_test]
     #[test]
     fn test_parse_idf_content() {
-        let idf_content = include_str!("../../fixtures/idf_example.idf");
+        let idf_content = include_str!("../fixtures/idf_example.idf");
         // create a temporary file
         let temp_path = std::env::temp_dir().join("test_idf.idf");
         std::fs::write(&temp_path, idf_content).unwrap();

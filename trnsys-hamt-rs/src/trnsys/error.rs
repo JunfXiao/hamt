@@ -1,18 +1,18 @@
 use crate::trnsys::{Severity, TrnSysState, found_bad_input, found_bad_parameter};
-use std::error::Error;
+use std::error::Error as StdError;
 use std::io;
-use thiserror::Error;
+use thiserror::Error as ThisError;
 use tracing::error;
 
-pub trait TrnSysErrorHandler {
+pub trait ErrorHandler {
     fn handle_in_trnsys(&self, state: &TrnSysState);
 }
 
-#[derive(Error, Debug)]
-pub enum TrnSysError {
+#[derive(ThisError, Debug)]
+pub enum Error {
     #[error("Error in TrnSys Type: {0}")]
     GeneralError(String),
-    #[error("Error in TrnSys: {0}")]
+    #[error("Error in TrnSys: {0:#}")]
     InputError(#[from] InputError),
     #[error("IO Error: {0}")]
     IoError(#[from] io::Error),
@@ -22,41 +22,41 @@ pub enum TrnSysError {
     ConversionError { param: String, message: String },
     #[error("HAMT error: {0}")]
     HamtError(String),
-    #[error("Unhandled error: {0}")]
-    Other(#[source] Box<dyn Error + Send + Sync>),
+    #[error("Unhandled error: {0:#}")]
+    Other(#[source] Box<dyn StdError + Send + Sync>),
 }
 
-impl TrnSysErrorHandler for TrnSysError {
+impl ErrorHandler for Error {
     fn handle_in_trnsys(&self, state: &TrnSysState) {
         match self {
-            TrnSysError::InputError(e) => {
+            Error::InputError(e) => {
                 e.handle_in_trnsys(state);
             }
-            TrnSysError::IoError(e) => {
+            Error::IoError(e) => {
                 error!("IO error in TRNSYS type: {:#}", e);
             }
-            TrnSysError::GeneralError(msg) => {
+            Error::GeneralError(msg) => {
                 error!("General TRNSYS error: {}", msg);
             }
-            TrnSysError::LockError(var_name) => {
+            Error::LockError(var_name) => {
                 error!("Lock error on variable: {}", var_name);
             }
-            TrnSysError::ConversionError { param, message } => {
+            Error::ConversionError { param, message } => {
                 error!("Conversion error on {}: {}", param, message);
             }
-            TrnSysError::HamtError(msg) => {
+            Error::HamtError(msg) => {
                 error!("HAMT error: {}", msg);
             }
-            TrnSysError::Other(e) => {
+            Error::Other(e) => {
                 error!("Unhandled TRNSYS error: {:?}", e);
             }
         }
     }
 }
 
-impl TrnSysErrorHandler for anyhow::Error {
+impl ErrorHandler for anyhow::Error {
     fn handle_in_trnsys(&self, state: &TrnSysState) {
-        if let Some(trnsys_err) = self.downcast_ref::<TrnSysError>() {
+        if let Some(trnsys_err) = self.downcast_ref::<Error>() {
             trnsys_err.handle_in_trnsys(state);
         }
         error!("Application Error: {:#}", self);
@@ -64,7 +64,7 @@ impl TrnSysErrorHandler for anyhow::Error {
 }
 
 /// Input Error for TRNSYS
-#[derive(Error, Debug)]
+#[derive(ThisError, Debug)]
 pub enum InputError {
     #[error("Bad Input at {index}: {message}")]
     BadInput { index: i32, message: String },
@@ -82,7 +82,7 @@ pub enum InputError {
     },
 }
 
-impl TrnSysErrorHandler for InputError {
+impl ErrorHandler for InputError {
     fn handle_in_trnsys(&self, state: &TrnSysState) {
         match self {
             InputError::BadInput { index, message } => {
@@ -99,14 +99,14 @@ impl TrnSysErrorHandler for InputError {
     }
 }
 
-impl From<String> for TrnSysError {
+impl From<String> for Error {
     fn from(value: String) -> Self {
-        TrnSysError::GeneralError(value)
+        Error::GeneralError(value)
     }
 }
 
-impl From<Box<dyn Error + Send + Sync>> for TrnSysError {
-    fn from(err: Box<dyn Error + Send + Sync>) -> Self {
-        TrnSysError::Other(err)
+impl From<Box<dyn StdError + Send + Sync>> for Error {
+    fn from(err: Box<dyn StdError + Send + Sync>) -> Self {
+        Error::Other(err)
     }
 }

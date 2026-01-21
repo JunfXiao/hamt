@@ -3,15 +3,17 @@ use std::path::{Path, PathBuf};
 
 use csv::Writer;
 
-use crate::hamt::hamt_manager::HamtManager;
-use crate::hamt::uom::dimensions::Time;
-use crate::hamt::uom::units::hours;
+use hamt_core::hamt_manager::HamtManager;
+use hamt_core::uom::dimensions::Time;
+use hamt_core::uom::units::hours;
 use crate::storage::StoreProvider;
 use crate::trnsys::iteration_mode::IterationMode;
 use crate::trnsys::param::TrnSysValue;
 use crate::trnsys::{
     get_current_unit, get_input_value, get_label, get_output_value, get_parameter_value,
 };
+
+const OUTPUT_SIZE: usize = 11;
 
 pub(crate) struct TrnSysState {
     pub(crate) trnsys_standard_version: i32,
@@ -24,7 +26,7 @@ pub(crate) struct TrnSysState {
     pub(crate) num_derivatives: i32,
     pub(crate) num_outputs: i32,
     pub(crate) default_output_values: Vec<TrnSysValue>,
-    pub(crate) outputs: [TrnSysValue; 12],
+    pub(crate) outputs: [TrnSysValue; OUTPUT_SIZE],
     pub(crate) iteration_mode: IterationMode,
 
     pub hamt_manager: Option<HamtManager>,
@@ -54,7 +56,7 @@ impl TrnSysState {
             num_derivatives: 0,
 
             num_outputs: 0,
-            outputs: [TrnSysValue::default(); 12],
+            outputs: [TrnSysValue::default(); OUTPUT_SIZE],
             default_output_values: vec![],
 
             hamt_manager: None,
@@ -85,7 +87,7 @@ impl TrnSysState {
             })
             .collect();
 
-        for i in 0..12 {
+        for i in 0..OUTPUT_SIZE {
             self.outputs[i] = TrnSysValue {
                 value: get_output_value(i as i32),
             }

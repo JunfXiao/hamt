@@ -1,4 +1,4 @@
 
 [workspace]
-members = ["trnsys-hamt-rs"]
+members = ["hamt-core","trnsys-hamt-rs"]
 resolver = "2"

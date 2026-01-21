@@ -1,14 +1,14 @@
 use serde::Serialize;
 
-use crate::hamt::{
+use crate::{
     physics::{ATMOSPHERE_PRESSURE, KELVIN_CONV},
     uom::{
         PressureQty, Quantity,
         dimensions::{
-            Dimensionless, EnergyFlux, HeatTransferCoeff, MassConvectionCoeff, Power, Temperature,
+            Dimensionless, HeatTransferCoeff, MassConvectionCoeff, Power, Temperature,
             VaporTransportCoeff,
         },
-        units::{self, kg_per_m2_s_pa, m_per_s, w_per_m_k, w_per_m2_k, watts},
+        units::{self, m_per_s, w_per_m2_k, watts},
     },
 };
 

@@ -2,28 +2,25 @@
 
 use std::{
     collections::HashMap,
-    fmt::{Debug, Display},
+    fmt::Debug,
     hash::Hash,
-    mem::zeroed,
-    ops::{Div, Sub},
+    ops::Sub,
     sync::{Arc, RwLock},
 };
 
 use crate::{
-    hamt::{
+    error::{Error, InvalidInputReason},
+    
         boundary::celsius_to_kelvin,
-        physics::KELVIN_CONV,
         uom::{
             DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_THERMAL_CONDUCTIVITY,
             DIM_WATER_CONTENT, DensityQty, Dimension, DimensionlessQty, Quantity, Temperature,
             dimensions::{
-                Dimensionless, Length, LiquidTransportCoeff, SpecificHeatCapacity,
-                ThermalConductivity, WaterContent,
+                Dimensionless, Length, SpecificHeatCapacity,
+                ThermalConductivity,
             },
-            units,
         },
-    },
-    trnsys::error::{InputError, TrnSysError},
+    
 };
 use anyhow::{Context, Ok, Result};
 use tracing::error;
@@ -325,7 +322,7 @@ impl MaterialLibrary {
     ) -> Result<std::sync::RwLockWriteGuard<'_, HashMap<String, Arc<Material>>>> {
         self.materials
             .write()
-            .map_err(|_| TrnSysError::LockError("Material Library".to_string()))
+            .map_err(|_| Error::LockError("Material Library".to_string()))
             .with_context(|| "Failed to acquire write lock on Material Library")
     }
 
@@ -334,7 +331,7 @@ impl MaterialLibrary {
     ) -> Result<std::sync::RwLockReadGuard<'_, HashMap<String, Arc<Material>>>> {
         self.materials
             .read()
-            .map_err(|_| TrnSysError::LockError("Material Library".to_string()))
+            .map_err(|_| Error::LockError("Material Library".to_string()))
             .with_context(|| "Failed to acquire write lock on Material Library")
     }
 
@@ -343,7 +340,7 @@ impl MaterialLibrary {
     ) -> Result<std::sync::RwLockWriteGuard<'_, HashMap<String, Arc<Construction>>>> {
         self.constructions
             .write()
-            .map_err(|_| TrnSysError::LockError("Construction Library".to_string()))
+            .map_err(|_| Error::LockError("Construction Library".to_string()))
             .with_context(|| "Failed to acquire write lock on Material Library")
     }
 
@@ -352,7 +349,7 @@ impl MaterialLibrary {
     ) -> Result<std::sync::RwLockReadGuard<'_, HashMap<String, Arc<Construction>>>> {
         self.constructions
             .read()
-            .map_err(|_| TrnSysError::LockError("Construction Library".to_string()))
+            .map_err(|_| Error::LockError("Construction Library".to_string()))
             .with_context(|| "Failed to acquire write lock on Material Library")
     }
 
@@ -360,10 +357,11 @@ impl MaterialLibrary {
         let mut materials = self.get_material_write_lock()?;
         if materials.contains_key(&material.name) {
             error!("Material with name '{}' already exists.", material.name);
-            Err(InputError::DuplicateItem {
-                item: "Material".to_string(),
-                name: material.name,
-            }
+            Err(Error::InvalidInput(
+                "Material".to_string(),
+                material.name,
+                InvalidInputReason::Duplicate,
+            )
             .into())
         } else {
             let arc_material = Arc::new(material);
@@ -379,10 +377,11 @@ impl MaterialLibrary {
                 "Construction with name '{}' already exists.",
                 construction.name
             );
-            Err(InputError::DuplicateItem {
-                item: "Construction".to_string(),
-                name: construction.name,
-            }
+            Err(Error::InvalidInput(
+                "Construction".to_string(),
+                construction.name,
+                InvalidInputReason::Duplicate,
+            )
             .into())
         } else {
             let arc_construction = Arc::new(construction);
@@ -403,10 +402,11 @@ impl MaterialLibrary {
             if let Some(mat) = materials_lock.get(&mat_name) {
                 layers.push(mat.clone());
             } else {
-                return Err(InputError::MissingItem {
-                    item: "Material".to_string(),
-                    name: mat_name,
-                }
+                return Err(Error::InvalidInput(
+                    "Material".to_string(),
+                    mat_name,
+                    InvalidInputReason::Missing,
+                )
                 .into());
             }
         }
@@ -422,20 +422,22 @@ impl MaterialLibrary {
     pub fn get_material(&self, name: &str) -> Result<Arc<Material>> {
         let materials = self.get_material_read_lock()?;
         Ok(materials.get(name).cloned().ok_or_else(|| {
-            TrnSysError::from(InputError::MissingItem {
-                item: "Material".to_string(),
-                name: name.to_string(),
-            })
+            Error::from(Error::InvalidInput(
+                "Material".to_string(),
+                name.to_string(),
+                InvalidInputReason::Missing,
+            ))
         })?)
     }
 
     pub fn get_construction(&self, name: &str) -> Result<Arc<Construction>> {
         let constructions = self.get_construction_read_lock()?;
         Ok(constructions.get(name).cloned().ok_or_else(|| {
-            TrnSysError::from(InputError::MissingItem {
-                item: "Construction".to_string(),
-                name: name.to_string(),
-            })
+            Error::from(Error::InvalidInput(
+                "Construction".to_string(),
+                name.to_string(),
+                InvalidInputReason::Missing,
+            ))
         })?)
     }
 }
@@ -443,7 +445,7 @@ impl MaterialLibrary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hamt::uom::units::{dimensionless, kg_per_m3};
+    use crate::uom::units::{dimensionless, kg_per_m3};
 
     #[test]
     fn interpolate_linear_midpoint() {

@@ -1,4 +1,3 @@
-use std::sync::Once;
 
 #[cfg(target_os = "windows")]
 pub(crate) mod fpu_guard {

@@ -1,17 +1,16 @@
 //! The main orchestrator for the HAMT simulation.
 
-use super::boundary::BoundaryCondition;
-use super::surface::Surface;
-use crate::hamt::material::{Construction, Material};
-use crate::hamt::physics::geometry::{Pt3D, Size3D};
-use crate::hamt::uom::dimensions::{Temperature, Time};
-use crate::hamt::uom::units::{dimensionless, hours, kg_per_m2_s_pa};
-use crate::hamt::{physics, uom};
-use crate::trnsys::get_simulation_time;
-use anyhow::Result;
+use crate::boundary::BoundaryCondition;
+use crate::surface::Surface;
+use crate::material::{Construction, Material};
+use crate::physics::geometry::{Pt3D, Size3D};
+use crate::uom::dimensions::{Temperature, Time};
+use crate::uom::units::{dimensionless, hours, kg_per_m2_s_pa};
+use crate::{physics, uom};
+use anyhow::{Context, Result};
 use std::mem;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::debug;
 use uom::dimensions::Area;
 use uom::dimensions::Length;
 use uom::units;
@@ -137,7 +136,12 @@ impl HamtManager {
     /// Executes after the timestep has been calculated.
     pub fn tick_timestep(&mut self) -> Result<()> {
         // The converged state is in `surface_curr`. This becomes the previous state for the next timestep.
-        self.surface_prev = self.surface_curr.clone();
+        mem::swap(&mut self.surface_prev, &mut self.surface_curr);
+
+        // After swapping, the previous becomes the current state.
+        self.surface_curr
+            .sync_state_from(&self.surface_prev)
+            .with_context(|| "Syncing current and previous states")?;
         // `surface_next` is scratch space, so its contents don't matter between steps.
         Ok(())
     }
@@ -170,7 +174,6 @@ pub struct HamtSettings {
     pub adj_length: Length<f64>,
     /// user defined depth [m]
     pub user_defined_depth: Option<Length<f64>>,
-
 }
 
 impl Default for HamtSettings {

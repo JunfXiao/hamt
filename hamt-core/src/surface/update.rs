@@ -1,14 +1,17 @@
-use crate::hamt::{physics::ECLIPSE, uom::{
-    Quantity,
-    dimensions::{
-        Area, HeatTransferCoeff, Power, Pressure, ThermalConductivity, ThermalResistance, Time,
-        VaporResistance, VaporTransportCoeff,
+use crate::{
+    physics::ECLIPSE,
+    uom::{
+        Quantity,
+        dimensions::{
+            Area, HeatTransferCoeff, Power, Pressure, ThermalConductivity, ThermalResistance,
+            VaporResistance, VaporTransportCoeff,
+        },
+        units::{k_per_w, kg_per_m2_s_pa, pa_s_per_kg, watts},
     },
-    units::{k_per_w, kelvin, kg_per_m2_s_pa, pa_s_per_kg, pascals, watts},
-}};
+};
 
 use super::*;
-use crate::hamt::uom::units;
+use crate::uom::units;
 use anyhow::Result;
 
 impl Surface {
@@ -45,7 +48,12 @@ impl Surface {
     }
 
     /// Copy the current iteration state into `surface_next` before property updates.
-    fn sync_state_from(&mut self, surface_curr: &Surface) -> Result<()> {
+    pub fn sync_state_from(&mut self, surface_curr: &Surface) -> Result<()> {
+        self.ext_vtc = surface_curr.ext_vtc;
+        self.int_vtc = surface_curr.int_vtc;
+        self.ext_htc = surface_curr.ext_htc;
+        self.int_htc = surface_curr.int_htc;
+
         for (cell, ref_cell) in self.cells.iter_mut().zip(surface_curr.cells.iter()) {
             *cell = ref_cell.clone();
             cell.sync_state_from(ref_cell);
@@ -205,9 +213,9 @@ impl Surface {
                 let denom = oorsum + (tcap_j_per_k / dt_s);
                 if denom > Quantity(ECLIPSE) {
                     let prev_temp_k = cell_prev.cell_temp;
-                    let other: Power<f64> = (tcap_j_per_k * prev_temp_k / dt_s);
+                    let other: Power<f64> = tcap_j_per_k * prev_temp_k / dt_s ;
                     let numer = torsum + qvp + q_adds + other;
-                    (numer / denom)
+                    numer / denom 
                 } else {
                     cell_curr.cell_temp
                 }
@@ -292,7 +300,7 @@ impl Surface {
                     let (_, vaporr) =
                         self.calculate_resistance_pair(cell_props, nbr_props, bc.pressure_air);
 
-                    let vaporr_ps_per_kg = vaporr.value_in(crate::hamt::uom::units::pa_s_per_kg);
+                    let vaporr_ps_per_kg = vaporr.value_in(crate::uom::units::pa_s_per_kg);
 
                     if vaporr_ps_per_kg > 0.0 {
                         vpoosum += 1.0 / vaporr_ps_per_kg;
@@ -305,23 +313,23 @@ impl Surface {
                     }
 
                     // rhr1/rhr2: liquid transport resistances for each cell (Fortran: rhr1/rhr2)
-                    let overlap_m2 = overlap.value_in(crate::hamt::uom::units::square_meter);
-                    let dist_m = dist.value_in(crate::hamt::uom::units::meter);
+                    let overlap_m2 = overlap.value_in(crate::uom::units::square_meter);
+                    let dist_m = dist.value_in(crate::uom::units::meter);
 
-                    let dw1 = cell_props.dw.value_in(crate::hamt::uom::units::m2_per_s);
+                    let dw1 = cell_props.dw.value_in(crate::uom::units::m2_per_s);
                     let dwd_phi1 = cell_props
                         .dwd_phi
-                        .value_in(crate::hamt::uom::units::kg_per_m3);
+                        .value_in(crate::uom::units::kg_per_m3);
                     let rhr1 = if dw1 > 0.0 && dwd_phi1 > 0.0 {
                         dist_m / (overlap_m2 * dw1 * dwd_phi1)
                     } else {
                         0.0
                     };
 
-                    let dw2 = nbr_props.dw.value_in(crate::hamt::uom::units::m2_per_s);
+                    let dw2 = nbr_props.dw.value_in(crate::uom::units::m2_per_s);
                     let dwd_phi2 = nbr_props
                         .dwd_phi
-                        .value_in(crate::hamt::uom::units::kg_per_m3);
+                        .value_in(crate::uom::units::kg_per_m3);
                     let rhr2 = if dw2 > 0.0 && dwd_phi2 > 0.0 {
                         dist_m / (overlap_m2 * dw2 * dwd_phi2)
                     } else {
@@ -340,10 +348,10 @@ impl Surface {
                 // Unit: kg
                 let dwd_phi = cell_props
                     .dwd_phi
-                    .value_in(crate::hamt::uom::units::kg_per_m3);
+                    .value_in(crate::uom::units::kg_per_m3);
                 let volume = cell_props
                     .volume
-                    .value_in(crate::hamt::uom::units::cubic_meter);
+                    .value_in(crate::uom::units::cubic_meter);
                 let wcap = if dwd_phi > 0.0 { dwd_phi * volume } else { 0.0 };
 
                 // (moisture):

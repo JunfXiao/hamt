@@ -2,7 +2,7 @@ use std::ops;
 
 use tracing::error;
 
-use crate::hamt::uom::{
+use crate::uom::{
     AreaQty, VolumeQty,
     dimensions::{Area, Length},
 };

@@ -1,16 +1,15 @@
 //! Defines the core `Cell` struct, representing a finite volume element in the 1D HAMT model.
 
-use tracing::info;
 
-use crate::hamt::boundary::celsius_to_kelvin;
-use crate::hamt::physics::ECLIPSE;
-use crate::hamt::uom::dimensions::{
+use crate::boundary::celsius_to_kelvin;
+use crate::physics::ECLIPSE;
+use crate::uom::dimensions::{
     Density, Dimensionless, HeatTransferCoeff, LiquidTransportCoeff, Power, Pressure,
     SpecificHeatCapacity, Temperature, ThermalConductivity, VaporTransportCoeff, Volume,
     WaterContent,
 };
-use crate::hamt::uom::{Quantity, units};
-use crate::hamt::{
+use crate::uom::Quantity;
+use crate::{
     boundary::BoundaryCondition,
     hamt_manager::HamtSettings,
     physics,
@@ -238,6 +237,14 @@ impl Cell {
     }
 
     pub fn sync_state_from(&mut self, ref_cell: &Cell) {
+        self.mu = ref_cell.mu;
+        self.htc = ref_cell.htc;
+        self.additional_power = ref_cell.additional_power;
+        self.vtc = ref_cell.vtc;
+        self.w_thermal_c = ref_cell.w_thermal_c;
+        self.dwd_phi = ref_cell.dwd_phi;
+        self.dw = ref_cell.dw;
+
         self.cell_temp = ref_cell.cell_temp;
         self.cell_rh = ref_cell.cell_rh;
         self.cell_vp = ref_cell.cell_vp;
@@ -247,7 +254,7 @@ impl Cell {
 
     pub fn water_content(&self) -> WaterContent<f64> {
         if self.density.value_unchecked() > 0.0 {
-            (self.volumetric_water / self.density)
+            self.volumetric_water / self.density
         } else {
             Quantity(0.0)
         }

@@ -1,4 +1,4 @@
-use crate::trnsys::error::TrnSysError;
+use crate::trnsys::error::Error;
 use crate::trnsys::get_lu_filename;
 use std::panic::catch_unwind;
 
@@ -34,15 +34,15 @@ impl From<&TrnSysValue> for f64 {
 }
 
 impl TryFrom<&TrnSysValue> for i32 {
-    type Error = TrnSysError;
+    type Error = Error;
     fn try_from(value: &TrnSysValue) -> Result<Self, Self::Error> {
         if value.value.is_nan() {
-            Err(TrnSysError::ConversionError {
+            Err(Error::ConversionError {
                 param: "TrnSysValue".to_string(),
                 message: "Cannot convert NaN to i32".to_string(),
             })
         } else if value.value.fract() != 0.0 {
-            Err(TrnSysError::ConversionError {
+            Err(Error::ConversionError {
                 param: "TrnSysValue".to_string(),
                 message: "Cannot convert float to i32".to_string(),
             })

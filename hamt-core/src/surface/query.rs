@@ -1,8 +1,8 @@
-use crate::hamt::{
-    physics::{ECLIPSE, KELVIN_CONV},
+use crate::{
+    physics::ECLIPSE,
     uom::{
-        Dimension, Quantity, WaterContentQty,
-        dimensions::{Density, Pressure, WaterContent},
+        Dimension, Quantity,
+        dimensions::{Density, Pressure},
         units::square_meter,
     },
 };
@@ -194,7 +194,7 @@ impl Surface {
                         n_idx, idx
                     )
                 })?;
-                let delta_t = (b.cell_temp - n.cell_temp);
+                let delta_t = b.cell_temp - n.cell_temp ;
 
                 // Prefer boundary HTC, fallback to conduction
                 let htc = b.htc;
@@ -203,7 +203,7 @@ impl Surface {
                 let flux_w_m2k = if htc > Quantity(ECLIPSE) {
                     htc
                 } else if k > Quantity(ECLIPSE) && b.size.x() > Quantity(ECLIPSE) {
-                    (k / b.size.x())
+                    k / b.size.x() 
                 } else {
                     Quantity(0.0)
                 };

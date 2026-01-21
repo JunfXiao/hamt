@@ -2,19 +2,19 @@
 #![allow(incomplete_features)]
 
 use crate::logging::init_tracing;
-use crate::trnsys::error::TrnSysErrorHandler;
+use crate::trnsys::error::ErrorHandler;
 use crate::trnsys::logging::cleanup_tracing;
 use crate::trnsys_type::TrnSysType;
 use anyhow::Result;
 use fpu_guard::fpu_guard::FpuGuard;
+use hamt_core;
 use std::collections::HashMap;
 use std::ops::DerefMut;
 use std::sync::{Arc, LazyLock, RwLock};
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 use trnsys::*;
 
 mod fpu_guard;
-pub mod hamt;
 mod storage;
 mod trnsys;
 mod trnsys_type;

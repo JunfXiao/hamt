@@ -1,12 +1,11 @@
 //! Contains pure physics and psychrometric functions for the HAMT model.
 
-use crate::hamt::material::Curve;
-use crate::hamt::uom::dimensions::{
+use crate::uom::dimensions::{
     Density, Dimensionless, Pressure, SpecificEnergy, SpecificHeatCapacity, Temperature,
     VaporPermeability,
 };
-use crate::hamt::uom::units::{self, kelvin, pascals};
-use crate::hamt::uom::{DensityQty, Quantity};
+use crate::uom::units::{self, kelvin, pascals};
+use crate::uom::Quantity;
 pub mod geometry;
 
 /// Universal gas constant for water vapor [J/kg·K].

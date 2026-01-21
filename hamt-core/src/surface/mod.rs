@@ -3,13 +3,13 @@ use ndarray::ArcArray3;
 use serde::Serialize;
 use tracing::debug;
 
-use crate::hamt::cell::{BoundaryLocation, Cell, CellType};
-use crate::hamt::uom::DensityQty;
-use crate::hamt::uom::dimensions::{
+use crate::cell::{BoundaryLocation, Cell, CellType};
+use crate::uom::DensityQty;
+use crate::uom::dimensions::{
     Area, Dimensionless, EnergyFlux, HeatTransferCoeff, Length, Mass, MassFlux, Temperature,
     VaporTransportCoeff,
 };
-use crate::hamt::{boundary::BoundaryCondition, hamt_manager::HamtSettings, physics};
+use crate::{boundary::BoundaryCondition, hamt_manager::HamtSettings, physics};
 use anyhow::Result;
 pub mod init;
 pub mod query;

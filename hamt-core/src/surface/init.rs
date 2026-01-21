@@ -1,9 +1,9 @@
 use std::f64::consts::PI;
 
 use super::*;
-use crate::hamt::uom::dimensions::Length;
-use crate::hamt::uom::{self, Quantity};
-use crate::hamt::{
+use crate::uom::dimensions::Length;
+use crate::uom::{self, Quantity};
+use crate::{
     cell::Boundary,
     material::Construction,
     physics::geometry::{Pt3D, Size3D},

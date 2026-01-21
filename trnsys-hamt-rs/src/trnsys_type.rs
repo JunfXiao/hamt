@@ -1,22 +1,21 @@
-use crate::hamt::boundary::{BoundaryCondition, celsius_to_kelvin, kelvin_to_celsius};
-use crate::hamt::hamt_manager::{HamtManager, HamtSettings};
-use crate::hamt::io::load_hamt_data;
-use crate::hamt::physics::{self, ECLIPSE, KELVIN_CONV};
-use crate::hamt::uom::Quantity;
-use crate::hamt::uom::units::{
-    dimensionless, hours, kelvin, kg_per_m2_s, kg_per_m2_s_pa, kg_per_m3, kj_per_hr,
-    kj_per_hr_m2_k, m_per_s, meter, square_meter, w_per_m2, w_per_m2_k, watts,
-};
-use crate::trnsys::error::{InputError, TrnSysError};
+use crate::trnsys::error::{Error, InputError};
 use crate::trnsys::iteration_mode::IterationMode;
 use crate::trnsys::param::TrnSysValue;
 use crate::trnsys::*;
 use anyhow::{Context, Ok, Result};
 use csv::Writer;
+use hamt_core::boundary::{celsius_to_kelvin, kelvin_to_celsius};
+use hamt_core::hamt_manager::{HamtManager, HamtSettings};
+use hamt_core::io::load_hamt_data;
+use hamt_core::physics::{self, ECLIPSE};
+use hamt_core::uom::Quantity;
+use hamt_core::uom::units::{
+    dimensionless, hours, kg_per_m2_s, kg_per_m2_s_pa, kg_per_m3, kj_per_hr, kj_per_hr_m2_k,
+    m_per_s, meter, pascals, square_meter, w_per_m2,
+};
 use std::iter;
 use std::path::Path;
 use tracing::{debug, info, warn};
-use tracing_subscriber::fmt::format;
 
 pub(crate) struct TrnSysType {}
 
@@ -81,7 +80,7 @@ impl TrnSysType {
             .values()
             .next()
             .cloned()
-            .ok_or(TrnSysError::from(InputError::MissingItem {
+            .ok_or(Error::from(InputError::MissingItem {
                 item: "Construction".to_string(),
                 name: "No Construction Found.".to_string(),
             }))?;
@@ -261,7 +260,7 @@ impl TrnSysType {
                     let psat =
                         physics::psy_psat_fn_temp(manager.boundary_condition.temp_outside_air);
                     let denom = psat * rh;
-                    if denom > Quantity(ECLIPSE) {
+                    if denom > ECLIPSE * pascals {
                         manager.boundary_condition.vapor_transport_coeff_ext =
                             manager.boundary_condition.mass_convection_coeff_ext * rho_v / denom;
                     } else {
@@ -281,7 +280,7 @@ impl TrnSysType {
                     let psat =
                         physics::psy_psat_fn_temp(manager.boundary_condition.temp_inside_air);
                     let denom = psat * rh;
-                    if denom > Quantity(ECLIPSE) {
+                    if denom > ECLIPSE * pascals {
                         manager.boundary_condition.vapor_transport_coeff_int =
                             manager.boundary_condition.mass_convection_coeff_int * rho_v / denom;
                     } else {
@@ -300,7 +299,13 @@ impl TrnSysType {
                 manager.boundary_condition
             );
 
-            manager.solve_timestep()?;
+            manager.solve_timestep().with_context(|| {
+                format!(
+                    "Solving time step {}, iteration {}",
+                    get_simulation_time(),
+                    get_timestep_iteration()
+                )
+            })?;
 
             // Map outputs
             return self.update_output(state, false);
@@ -327,7 +332,7 @@ impl TrnSysType {
             .as_mut()
             .with_context(|| "End of timestep")?
             .tick_timestep()
-            .with_context(|| "Ticking to next timestep")
+            .with_context(|| format!("At the end of time step {}", get_simulation_time()))
     }
 
     /// Default outputs used during start time before real iteration.
