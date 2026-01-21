@@ -1,0 +1,137 @@
+!- DIN EN 15026 Benchmark Material
+
+Material,
+  EN15026_Material,  !- Name
+  MediumSmooth,      !- Roughness
+  1.0,               !- Thickness {m} - Thick enough for semi-infinite
+  1.5,               !- Conductivity {W/m-K} (dry value)
+  1.824e6,           !- Density {kg/m3} (this is actually rho*cp)
+  1000.0,            !- Specific Heat {J/kg-K} (dummy, rho*cp is given)
+  0.5,               !- Thermal Absorptance
+  0.5,               !- Solar Absorptance
+  0.5;               !- Visible Absorptance
+
+MaterialProperty:HeatAndMoistureTransfer:Settings,
+  EN15026_Material,
+  0.146,             !- Porosity (w_sat / rho_water = 146/1000)
+  0.0;               !- Initial Water Content Ratio {kg/kg} (will be set by initial RH)
+
+! Sorption Isotherm (w vs. phi), at T=293.15K
+MaterialProperty:HeatAndMoistureTransfer:SorptionIsotherm,
+  EN15026_Material,
+  21, !- Number of points
+  0.00, 0.00,
+  0.05, 17.18,
+  0.10, 24.12,
+  0.15, 29.35,
+  0.20, 33.72,
+  0.25, 37.59,
+  0.30, 41.13,
+  0.35, 44.42,
+  0.40, 47.53,
+  0.45, 50.49,
+  0.50, 53.35,
+  0.55, 56.12,
+  0.60, 58.85,
+  0.65, 61.55,
+  0.70, 64.24,
+  0.75, 66.96,
+  0.80, 69.73,
+  0.85, 72.59,
+  0.90, 75.61,
+  0.95, 79.01,
+  1.00, 146.0;
+
+! Vapor Diffusion Resistance (mu vs. phi)
+MaterialProperty:HeatAndMoistureTransfer:Diffusion,
+  EN15026_Material,
+  21, !- Number of points
+  0.00, 200.0,
+  0.05, 171.1,
+  0.10, 151.7,
+  0.15, 137.2,
+  0.20, 125.7,
+  0.25, 116.3,
+  0.30, 108.2,
+  0.35, 101.2,
+  0.40, 95.0,
+  0.45, 89.4,
+  0.50, 84.4,
+  0.55, 79.8,
+  0.60, 75.5,
+  0.65, 71.6,
+  0.70, 67.9,
+  0.75, 64.4,
+  0.80, 61.1,
+  0.85, 58.0,
+  0.90, 55.0,
+  0.95, 52.2,
+  1.00, 49.3;
+
+! Liquid Water Transport - Suction (Dl vs. w)
+MaterialProperty:HeatAndMoistureTransfer:Suction,
+  EN15026_Material,
+  16, !- Number of points
+  0.0, 0.0,
+  73.0, 0.0,
+  80.0, 1.07e-12,
+  85.0, 4.34e-11,
+  90.0, 5.75e-10,
+  95.0, 4.23e-09,
+  100.0, 2.06e-08,
+  105.0, 7.57e-08,
+  110.0, 2.29e-07,
+  115.0, 5.96e-07,
+  120.0, 1.39e-06,
+  125.0, 2.91e-06,
+  130.0, 5.56e-06,
+  135.0, 9.79e-06,
+  140.0, 1.61e-05,
+  146.0, 2.61e-05;
+
+! Liquid Water Transport - Redistribution (Dl vs. w) - Same as suction
+MaterialProperty:HeatAndMoistureTransfer:Redistribution,
+  EN15026_Material,
+  16, !- Number of points
+  0.0, 0.0,
+  73.0, 0.0,
+  80.0, 1.07e-12,
+  85.0, 4.34e-11,
+  90.0, 5.75e-10,
+  95.0, 4.23e-09,
+  100.0, 2.06e-08,
+  105.0, 7.57e-08,
+  110.0, 2.29e-07,
+  115.0, 5.96e-07,
+  120.0, 1.39e-06,
+  125.0, 2.91e-06,
+  130.0, 5.56e-06,
+  135.0, 9.79e-06,
+  140.0, 1.61e-05,
+  146.0, 2.61e-05;
+
+! Thermal Conductivity (lambda vs. w)
+MaterialProperty:HeatAndMoistureTransfer:ThermalConductivity,
+  EN15026_Material,
+  16, !- Number of points
+  0.0, 1.518,
+  10.0, 1.520,
+  20.0, 1.522,
+  30.0, 1.524,
+  40.0, 1.527,
+  50.0, 1.530,
+  60.0, 1.532,
+  70.0, 1.535,
+  80.0, 1.538,
+  90.0, 1.541,
+  100.0, 1.545,
+  110.0, 1.548,
+  120.0, 1.552,
+  130.0, 1.556,
+  140.0, 1.561,
+  146.0, 1.563;
+
+Construction,
+  EN15026_Construction,
+  1,
+  EN15026_Material;
