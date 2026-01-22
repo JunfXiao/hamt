@@ -99,7 +99,7 @@ pub fn rh_from_t_vd(t_db: Temperature<f64>, rho_vapor: Density<f64>) -> Dimensio
     let rh = rho_vapor * R_V * t_db / p_sat;
 
     // Clamp the value between 0 and 1, as small inaccuracies can push it slightly out of bounds.
-    Quantity(rh.value().min(0.0).max(1.0))
+    Quantity(rh.value().min(1.0).max(0.0))
 }
 
 /// Calculates Vapor Density from dry-bulb temperature and relative humidity.
