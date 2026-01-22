@@ -163,7 +163,7 @@ impl Surface {
 
                 for nbr_i in self.neighbor_indices(i, nx) {
                     let neighbor_next = &self.cells[[nbr_i, 0, 0]];
-                    let neighbor_curr = &surface_curr.cells[[nbr_i, 0, 0]];
+                    let neighbor_curr = &self.cells[[nbr_i, 0, 0]];
                     let neighbor_prev = &surface_prev.cells[[nbr_i, 0, 0]];
 
                     let (therm_resistance, vapor_resistance) =
@@ -287,7 +287,7 @@ impl Surface {
 
                 for nbr_i in self.neighbor_indices(i, nx) {
                     let nbr_props = &self.cells[[nbr_i, 0, 0]];
-                    let nbr_curr = &surface_curr.cells[[nbr_i, 0, 0]];
+                    let nbr_curr = &self.cells[[nbr_i, 0, 0]];
 
                     // overlap: shared face area (Fortran: overlap)
                     let overlap: Area<f64> = Quantity(

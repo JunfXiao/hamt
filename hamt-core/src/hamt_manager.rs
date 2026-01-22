@@ -1,16 +1,17 @@
 //! The main orchestrator for the HAMT simulation.
 
 use crate::boundary::BoundaryCondition;
+use crate::cell::CellType;
 use crate::material::{Construction, Material};
 use crate::physics::geometry::{Pt3D, Size3D};
 use crate::surface::Surface;
 use crate::uom::dimensions::{Power, Temperature, Time};
-use crate::uom::units::{dimensionless, hours, kg_per_m2_s_pa};
+use crate::uom::units::{dimensionless, hours, kelvin, kg_per_m2_s_pa};
 use crate::{physics, uom};
 use anyhow::{Context, Result};
 use std::mem;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, info, warn};
 use uom::dimensions::Area;
 use uom::dimensions::Length;
 use uom::units;
@@ -112,7 +113,7 @@ impl HamtManager {
             }
         }
 
-        for _ in 0..self.settings.max_iterations {
+        for iter in 0..self.settings.max_iterations {
             self.surface_next.calculate_iteration(
                 &self.settings,
                 &self.boundary_condition,
@@ -122,14 +123,27 @@ impl HamtManager {
 
             mem::swap(&mut self.surface_curr, &mut self.surface_next);
 
-            if self
-                .surface_curr
-                .check_convergence(&self.surface_next, &self.settings)
-            {
+            let stats = convergence_stats(&self.surface_curr, &self.surface_next, &self.settings);
+            if stats.converged {
+                if !stats.rh_converged {
+                    warn!(
+                        max_delta_rh = stats.max_delta_rh,
+                        max_rh_cell = ?stats.max_rh_cell,
+                        "HAMT temperature converged but RH did not meet tolerance"
+                    );
+                }
                 return Ok(true); // Converged
             }
         }
 
+        let stats = convergence_stats(&self.surface_curr, &self.surface_next, &self.settings);
+        warn!(
+            max_delta_t_k = stats.max_delta_t_k,
+            max_delta_rh = stats.max_delta_rh,
+            max_temp_cell = ?stats.max_temp_cell,
+            max_rh_cell = ?stats.max_rh_cell,
+            "HAMT timestep did not converge within max iterations"
+        );
         Ok(false) // Not converged
     }
 
@@ -144,6 +158,69 @@ impl HamtManager {
             .with_context(|| "Syncing current and previous states")?;
         // `surface_next` is scratch space, so its contents don't matter between steps.
         Ok(())
+    }
+}
+
+struct ConvergenceStats {
+    converged: bool,
+    rh_converged: bool,
+    max_delta_t_k: f64,
+    max_delta_rh: f64,
+    max_temp_cell: Option<[usize; 3]>,
+    max_rh_cell: Option<[usize; 3]>,
+}
+
+fn convergence_stats(
+    surface_curr: &Surface,
+    surface_prev: &Surface,
+    settings: &HamtSettings,
+) -> ConvergenceStats {
+    let temp_tol = settings.temp_convergence_tolerance.value_in(kelvin);
+    let rh_tol = settings.rh_convergence_tolerance;
+    let mut temp_converged = true;
+    let mut rh_converged = true;
+    let mut max_delta_t_k = 0.0;
+    let mut max_delta_rh = 0.0;
+    let mut max_temp_cell = None;
+    let mut max_rh_cell = None;
+
+    for (((x, y, z), cell_curr), cell_prev) in surface_curr
+        .cells
+        .indexed_iter()
+        .zip(surface_prev.cells.iter())
+    {
+        if !matches!(cell_curr.cell_type, CellType::Material(_)) {
+            continue;
+        }
+
+        let delta_t_k = (cell_curr.cell_temp - cell_prev.cell_temp)
+            .value_in(kelvin)
+            .abs();
+        if delta_t_k > max_delta_t_k {
+            max_delta_t_k = delta_t_k;
+            max_temp_cell = Some([x, y, z]);
+        }
+        if delta_t_k > temp_tol {
+            temp_converged = false;
+        }
+
+        let delta_rh = (cell_curr.cell_rh - cell_prev.cell_rh).value().abs();
+        if delta_rh > max_delta_rh {
+            max_delta_rh = delta_rh;
+            max_rh_cell = Some([x, y, z]);
+        }
+        if delta_rh > rh_tol {
+            rh_converged = false;
+        }
+    }
+
+    ConvergenceStats {
+        converged: temp_converged,
+        rh_converged,
+        max_delta_t_k,
+        max_delta_rh,
+        max_temp_cell,
+        max_rh_cell,
     }
 }
 
