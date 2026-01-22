@@ -142,28 +142,13 @@ fn sorption_isotherm(rh: Dimensionless<f64>) -> Quantity<f64, DIM_WATER_CONTENT>
     let r_h2o = r_h2o().value_in(j_per_kg_k);
     let t_ref = t_ref().value_in(kelvin);
     let rho_w = rho_w().value_in(kg_per_m3);
-    println!("RH: {:.2}%", rh.value() * 100.0);
-    println!("Water Saturation: {:?} kg/m³", w_sat);
-    println!("R_h2o: {:.2} J/kg/K", r_h2o);
-    println!("T_ref: {:.2} K", t_ref);
-    println!("Rho_w: {:.2} kg/m³", rho_w);
-    println!(
-        "Result={}",
-        (1.0f64 + (8.0e-8 * r_h2o * t_ref * rho_w * rh.value().ln()).powf(1.6)).powf(-0.375)
-    );
-    println!(
-        "RH Ln rsult: {}",
-        (8.0e-8 * r_h2o * t_ref * rho_w * rh.value().ln()).powf(1.6)
-    );
 
-    w_sat * (1.0f64 + (8.0e-8 * r_h2o * t_ref * rho_w * rh.value().ln()).powf(1.6)).powf(-0.375)
-}
-
-#[test]
-fn create_library_test() {
-    // let lib = create_library();
-    // println!("{:#?}", lib);
-    assert!(!sorption_isotherm(0.5 * dimensionless).is_nan())
+    w_sat
+        * (1.0f64
+            + (8.0e-8 * r_h2o * t_ref * rho_w * rh.value().ln())
+                .abs()
+                .powf(1.6))
+        .powf(-0.375)
 }
 
 fn interpolate_data_points(
@@ -275,7 +260,7 @@ fn create_library() -> MaterialLibrary {
     let sorption_isotherm = get_sorption_isotherm_curve();
     let material = Material {
         name: MAT_NAME.to_string(),
-        thickness: 20.0 * meter,
+        thickness: 10.0 * meter,
         density: rho_mat(),
         conductivity: thermal_conductivity.interpolate(0.5 * water_sat()).0,
         thermal_conductivity: thermal_conductivity,
@@ -315,17 +300,18 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
 
     let mut settings = HamtSettings::default();
     settings.timestep = time_step;
-    settings.max_iterations = 500;
-    settings.temp_convergence_tolerance = 1e-4 * kelvin;
-    settings.rh_convergence_tolerance = 1e-5;
+    settings.max_iterations = 50;
+    settings.temp_convergence_tolerance = 1e-6 * kelvin;
+    settings.rh_convergence_tolerance = 1e-7;
+    settings.max_div = 50;
 
     let boundary_coeff = BoundaryCondition {
-        heat_transfer_coeff_ext: 1e10 * w_per_m2_k,
-        heat_transfer_coeff_int: 1e10 * w_per_m2_k,
-        mass_convection_coeff_ext: 1e10 * m_per_s,
-        mass_convection_coeff_int: 1e10 * m_per_s,
-        vapor_transport_coeff_ext: 1e10 * kg_per_m2_s_pa,
-        vapor_transport_coeff_int: 1e10 * kg_per_m2_s_pa,
+        heat_transfer_coeff_ext: 1e100 * w_per_m2_k,
+        heat_transfer_coeff_int: 1e100 * w_per_m2_k,
+        mass_convection_coeff_ext: 1e100 * m_per_s,
+        mass_convection_coeff_int: 1e100 * m_per_s,
+        vapor_transport_coeff_ext: 1e100 * kg_per_m2_s_pa,
+        vapor_transport_coeff_int: 1e100 * kg_per_m2_s_pa,
         ..Default::default()
     };
 
@@ -354,6 +340,8 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
     )
     .unwrap();
 
+    println!("Cell Count: {}", mgr.surface_curr.cells.len());
+
     let initial_temp = celsius_to_kelvin(20.0);
     let initial_rh = 0.50 * dimensionless;
     for cell in mgr.surface_curr.cells.iter_mut() {
@@ -373,7 +361,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         println!("Preheating to reach stable...");
 
         let mut preheat_time: Time<f64> = 0.0 * hours;
-        while !mgr.solve_timestep()? {
+        while !mgr.solve_timestep()? || preheat_time < 10.0 * hours {
             preheat_time += time_step;
             if preheat_time > 24.0 * 30.0 * hours {
                 return Err(hamt_core::error::Error::Other(
@@ -403,16 +391,26 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
 
         println!("Simulation duration: {:.2} days", (end_time / days).value());
 
+        let mut write_time = true;
         let mut current_time: Time<f64> = 0.0 * hours;
         while current_time <= end_time {
-            println!("Time={:.2} hours", (current_time / hours).value());
-
+            if write_time {
+                print!("\nTime={:.2} hours", (current_time / hours).value());
+                write_time = false;
+            }
+            print!("\rTime={:.2} hours", (current_time / hours).value());
             let mut solve_count = 0;
             // Solving the timestep
             while !mgr.solve_timestep()? {
                 solve_count += 1;
 
-                if solve_count > 300 {
+                print!(
+                    "\rTime={:.2} hours, Iteration {}",
+                    (current_time / hours).value(),
+                    solve_count * mgr.settings.max_iterations
+                );
+
+                if solve_count > 30 {
                     return Err(hamt_core::error::Error::Other(format!(
                         "Convergence failed after {} iterations at {:.2} hours",
                         solve_count,
@@ -423,7 +421,6 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
             }
 
             mgr.tick_timestep()?;
-
             if let Some(sim_day) = simulation_durations_days
                 .iter()
                 .filter(|duration| {
@@ -433,8 +430,9 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                 .next()
             {
                 let sim_day: i32 = sim_day.value_in(days) as i32;
-                println!("Checkpoint reached: {} days", sim_day);
+                println!("\nCheckpoint reached: {} days\n", sim_day);
                 compare_results(&mgr.surface_curr, sim_day);
+                write_time = true;
                 break;
             }
 
@@ -445,14 +443,21 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
     Ok(())
 }
 
+fn print_table_row(values: impl IntoIterator<Item = String>, padding: usize) {
+    for value in values {
+        print!("{:^width$}", value, width = padding);
+    }
+    println!("");
+}
+
+const TABLE_PADDING: usize = 15;
+
 fn compare_results(surface: &Surface, duration_day: i32) {
     let sep = "=".repeat(30);
     println!("{}", sep);
     println!("Comparing at day {}", duration_day);
-    const percentage_range: f64 = 0.025;
-
-    let mut cumulative_depth: Length<f64> = 0.0 * meter;
-
+    const percentage_range_rh: f64 = 0.025;
+    const percentage_range_t: f64 = 0.01;
     let mut temp_ref = REF_TEMPERATURE
         .iter()
         .filter(|(d, _, _)| *d == duration_day)
@@ -463,7 +468,20 @@ fn compare_results(surface: &Surface, duration_day: i32) {
         .map(|(_, depth, wc)| (depth, wc));
 
     println!("{}", sep);
-    println!("Depth (m)\tTemp (C)\tRef Temp (C)\tDiff (%)");
+
+    print_table_row(
+        vec![
+            "Depth (m)",
+            "Temp (C)",
+            "Ref Temp (C)",
+            "Diff (%)",
+            "Result",
+            "Cell Index",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+        TABLE_PADDING,
+    );
     println!("------------------");
 
     let mut passed = true;
@@ -473,21 +491,24 @@ fn compare_results(surface: &Surface, duration_day: i32) {
             .expect(&format!("Searching cell at depth {}", *depth));
         let cell = surface.cells.get(cell_idx).expect("Cannot find the cell");
 
-        println!("Cell at {:.2} m: {:#?}", depth, cell.cell_type);
+        // println!("Cell at {:.2} m: {}", depth, cell.cell_type);
 
         let cell_t = kelvin_to_celsius(cell.cell_temp);
         let diviation = (cell_t - ref_t).abs() / ref_t;
 
-        let turn_passed = diviation <= percentage_range;
+        let turn_passed = diviation <= percentage_range_t;
         passed &= turn_passed;
-        println!(
-            "{:.2}\t{:.2}\t{:.2}\t{:.1}% {}",
-            depth,
-            cell_t,
-            ref_t,
-            diviation * 100.0,
-            if turn_passed { "🆗" } else { "💥" }
-        )
+        print_table_row(
+            vec![
+                format!("{:.2}", depth),
+                format!("{:.2}", cell_t),
+                format!("{:.2}", ref_t),
+                format!("{:.1}%", diviation * 100.0),
+                format!("{}", if turn_passed { "🆗" } else { "💥" }),
+                format!("{:?}", cell_idx),
+            ],
+            TABLE_PADDING,
+        );
     }
     if !passed {
         println!("------------------");
@@ -496,7 +517,20 @@ fn compare_results(surface: &Surface, duration_day: i32) {
     }
 
     println!("{}", sep);
-    println!("Depth (m)\tWater[kg/m3]\tRef Water[kg/m3]\tDiff (%)");
+    print_table_row(
+        vec![
+            "Depth (m)",
+            "Water[kg/m3]",
+            "Ref Water[kg/m3]",
+            "Diff (%)",
+            "Status",
+            "Result",
+            "Cell Index",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+        TABLE_PADDING,
+    );
     println!("------------------");
 
     let mut passed = true;
@@ -509,16 +543,19 @@ fn compare_results(surface: &Surface, duration_day: i32) {
         let cell_wc = cell.volumetric_water.value_in(kg_per_m3);
         let diviation = (cell_wc - ref_wc).abs() / ref_wc;
 
-        let turn_passed = diviation <= percentage_range;
+        let turn_passed = diviation <= percentage_range_rh;
         passed &= turn_passed;
-        println!(
-            "{:.2}\t{:.2}\t{:.2}\t{:.1}% {}",
-            depth,
-            cell_wc,
-            ref_wc,
-            diviation * 100.0,
-            if turn_passed { "🆗" } else { "💥" }
-        )
+        print_table_row(
+            vec![
+                format!("{:.2}", depth),
+                format!("{:.2}", cell_wc),
+                format!("{:.2}", ref_wc),
+                format!("{:.1}", diviation * 100.0),
+                format!("{}", if turn_passed { "🆗" } else { "💥" }),
+                format!("{:?}", cell_idx),
+            ],
+            TABLE_PADDING,
+        );
     }
     if !passed {
         println!("------------------");
@@ -528,19 +565,19 @@ fn compare_results(surface: &Surface, duration_day: i32) {
 }
 
 #[test]
-fn test_din_en_15026_timestep_1h() {
-    run_benchmark_test(1.0 * hours);
+fn test_din_en_15026_timestep_1h() -> Result<()> {
+    run_benchmark_test(1.0 * hours)
 }
 
 #[test]
 
-fn test_din_en_15026_timestep_0_5h() {
-    run_benchmark_test(0.5 * hours);
+fn test_din_en_15026_timestep_0_5h() -> Result<()> {
+    run_benchmark_test(0.5 * hours)
 }
 
 #[test]
-fn test_din_en_15026_timestep_0_1h() {
-    run_benchmark_test(0.1 * hours);
+fn test_din_en_15026_timestep_0_1h() -> Result<()> {
+    run_benchmark_test(0.1 * hours)
 }
 
 #[test]
