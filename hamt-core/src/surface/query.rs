@@ -123,8 +123,8 @@ impl Surface {
     pub fn find_cell_idx_at_depth(&self, target_depth: Length<f64>) -> Option<[usize; 3]> {
         let mut best: Option<([usize; 3], Length<f64>)> = None;
         for ((x, y, z), cell) in self.cells.indexed_iter() {
-            let depth = cell.origin.x();
-            let dist = (depth - target_depth).abs();
+            let length = cell.origin.x() + cell.size.x() / 2.0;
+            let dist = (length - target_depth).abs();
             match best {
                 Some((_, best_dist)) if dist >= best_dist => {}
                 _ => best = Some(([x, y, z], dist)),

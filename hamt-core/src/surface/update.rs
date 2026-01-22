@@ -374,14 +374,24 @@ impl Surface {
 
     /// Get neighbor indices for a 1D cell.
     fn neighbor_indices(&self, i: usize, nx: usize) -> impl Iterator<Item = usize> {
-        // 1. 检查左边 (使用 bool::then_some 生成 Option)
-        let left = (i > 0).then_some(i - 1);
+        let self_cell = self.cells.get([i, 0, 0]).unwrap();
 
-        // 2. 检查右边
-        let right = (i + 1 < nx).then_some(i + 1);
+        let left: Vec<usize> = if matches!(self_cell.cell_type, CellType::Boundary(_, _)) {
+            (0..i).collect()
+        } else if i > 0 {
+            (i - 1..i).collect()
+        } else {
+            vec![]
+        };
 
-        // 3. 将两个 Option 链接起来
-        // Option 也是一种迭代器（由 0 或 1 个元素组成）
+        let right = if matches!(self_cell.cell_type, CellType::Boundary(_, _)) {
+            (i + 1..nx).collect()
+        } else if i + 1 < nx {
+            (i + 1..i + 2).collect()
+        } else {
+            vec![]
+        };
+
         left.into_iter().chain(right)
     }
 
