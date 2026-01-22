@@ -223,8 +223,17 @@ pub fn load_hamt_data<P: AsRef<Path>>(path: P) -> Result<MaterialLibrary> {
             // otherwise use default
 
             let surface_vapor_coef = surface_vapor_coefs.get(name).cloned().unwrap_or_else(||{
-                warn!("Construction '{}' has no surface vapor coefficient defined. Default value is used.", &name);
-                SurfaceVaporCoef::default()
+                if surface_vapor_coefs.is_empty() {
+                    warn!("No surface vapor coefficients defined. Default value is used.");
+                    SurfaceVaporCoef::default()
+                } else {
+                    // use the first surface vapor coefficient
+                    let first_name = surface_vapor_coefs.keys().next().unwrap().clone();
+                    warn!("Construction '{}' has no surface vapor coefficient defined. First value '{}' is used.", &name, &first_name);
+                    surface_vapor_coefs.values().next().unwrap().clone()
+                }
+
+
             });
 
             library.create_construction(name.clone(), layer_names, surface_vapor_coef)?;
