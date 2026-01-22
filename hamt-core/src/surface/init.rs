@@ -203,6 +203,9 @@ impl Surface {
                 }
             })
         }
-        self.user_defined_cell_idx = self.calc_user_defined_cell_idx();
+        self.user_defined_cell_idx = self
+            .user_defined_depth
+            .map(|v| self.find_cell_idx_at_depth(v))
+            .flatten();
     }
 }

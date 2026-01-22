@@ -120,21 +120,17 @@ impl Surface {
         }
     }
 
-    pub fn calc_user_defined_cell_idx(&self) -> Option<[usize; 3]> {
-        if let Some(target_depth) = self.user_defined_depth {
-            let mut best: Option<([usize; 3], Length<f64>)> = None;
-            for ((x, y, z), cell) in self.cells.indexed_iter() {
-                let depth = cell.origin.x();
-                let dist = (depth - target_depth).abs();
-                match best {
-                    Some((_, best_dist)) if dist >= best_dist => {}
-                    _ => best = Some(([x, y, z], dist)),
-                }
+    pub fn find_cell_idx_at_depth(&self, target_depth: Length<f64>) -> Option<[usize; 3]> {
+        let mut best: Option<([usize; 3], Length<f64>)> = None;
+        for ((x, y, z), cell) in self.cells.indexed_iter() {
+            let depth = cell.origin.x();
+            let dist = (depth - target_depth).abs();
+            match best {
+                Some((_, best_dist)) if dist >= best_dist => {}
+                _ => best = Some(([x, y, z], dist)),
             }
-            best.map(|(idx, _)| idx)
-        } else {
-            None
         }
+        best.map(|(idx, _)| idx)
     }
 
     /// This function returns the values of the user-defined depth.
@@ -194,7 +190,7 @@ impl Surface {
                         n_idx, idx
                     )
                 })?;
-                let delta_t = b.cell_temp - n.cell_temp ;
+                let delta_t = b.cell_temp - n.cell_temp;
 
                 // Prefer boundary HTC, fallback to conduction
                 let htc = b.htc;
@@ -203,7 +199,7 @@ impl Surface {
                 let flux_w_m2k = if htc > Quantity(ECLIPSE) {
                     htc
                 } else if k > Quantity(ECLIPSE) && b.size.x() > Quantity(ECLIPSE) {
-                    k / b.size.x() 
+                    k / b.size.x()
                 } else {
                     Quantity(0.0)
                 };

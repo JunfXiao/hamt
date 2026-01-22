@@ -5,7 +5,7 @@
 
 use anyhow::{Ok, Result};
 use hamt_core::boundary::{BoundaryCondition, celsius_to_kelvin, kelvin_to_celsius};
-use hamt_core::cell::{Cell, CellType};
+use hamt_core::cell::{BoundaryLocation, Cell, CellType};
 use hamt_core::hamt_manager::{HamtManager, HamtSettings};
 use hamt_core::io::load_hamt_by_path;
 use hamt_core::material::{Curve, Material, MaterialLibrary, SurfaceVaporCoef};
@@ -30,28 +30,68 @@ use tempfile;
 // Reference results from Table B.1 and B.2
 const REF_WATER_CONTENT: &[(i32, f64, f64)] = &[
     // (days, depth_m, wc_kg_m3)
+    // Source: Tabelle B.1 (Page 37)
+
+    // --- 7 Days ---
     (7, 0.01, 52.4),
     (7, 0.02, 43.4),
     (7, 0.03, 42.9),
+    (7, 0.04, 42.9),
+    (7, 0.05, 42.9),
+    (7, 0.06, 42.9),
+    (7, 0.08, 42.9),
+    (7, 0.10, 42.9),
+    // --- 30 Days ---
     (30, 0.01, 83.1),
     (30, 0.02, 53.3),
     (30, 0.03, 45.7),
+    (30, 0.04, 43.6),
+    (30, 0.05, 43.0),
+    (30, 0.06, 42.9),
+    (30, 0.08, 42.9),
+    (30, 0.10, 42.9),
+    // --- 365 Days ---
     (365, 0.01, 119.7),
     (365, 0.02, 106.6),
     (365, 0.03, 90.8),
+    (365, 0.04, 75.7),
+    (365, 0.05, 64.9),
+    (365, 0.06, 57.8),
+    (365, 0.08, 50.0),
+    (365, 0.10, 46.3),
 ];
 
 const REF_TEMPERATURE: &[(i32, f64, f64)] = &[
     // (days, depth_m, temp_c)
-    (7, 0.01, 26.64),
-    (7, 0.02, 23.84),
-    (7, 0.03, 21.91),
-    (30, 0.01, 28.35),
-    (30, 0.02, 26.75),
-    (30, 0.03, 25.29),
-    (365, 0.01, 29.54),
-    (365, 0.02, 29.06),
-    (365, 0.03, 28.58),
+    // Source: Tabelle B.2 (Page 38)
+
+    // --- 7 Days ---
+    (7, 0.5, 26.64),
+    (7, 1.0, 23.84),
+    (7, 1.5, 21.91),
+    (7, 2.0, 20.82),
+    (7, 2.5, 20.30),
+    (7, 3.0, 20.09),
+    (7, 4.0, 20.01),
+    (7, 5.0, 20.00),
+    // --- 30 Days ---
+    (30, 0.5, 28.35),
+    (30, 1.0, 26.75),
+    (30, 1.5, 25.29),
+    (30, 2.0, 24.01),
+    (30, 2.5, 22.93),
+    (30, 3.0, 22.07),
+    (30, 4.0, 20.92),
+    (30, 5.0, 20.35),
+    // --- 365 Days ---
+    (365, 0.5, 29.54),
+    (365, 1.0, 29.06),
+    (365, 1.5, 28.58),
+    (365, 2.0, 28.11),
+    (365, 2.5, 27.64),
+    (365, 3.0, 27.19),
+    (365, 4.0, 26.30),
+    (365, 5.0, 25.47),
 ];
 
 fn t_ref() -> Temperature<f64> {
@@ -102,7 +142,28 @@ fn sorption_isotherm(rh: Dimensionless<f64>) -> Quantity<f64, DIM_WATER_CONTENT>
     let r_h2o = r_h2o().value_in(j_per_kg_k);
     let t_ref = t_ref().value_in(kelvin);
     let rho_w = rho_w().value_in(kg_per_m3);
-    w_sat * (1.0f64 + (8e-8 * r_h2o * t_ref * rho_w * rh.value().ln()).powf(1.6)).powf(-0.375)
+    println!("RH: {:.2}%", rh.value() * 100.0);
+    println!("Water Saturation: {:?} kg/m³", w_sat);
+    println!("R_h2o: {:.2} J/kg/K", r_h2o);
+    println!("T_ref: {:.2} K", t_ref);
+    println!("Rho_w: {:.2} kg/m³", rho_w);
+    println!(
+        "Result={}",
+        (1.0f64 + (8.0e-8 * r_h2o * t_ref * rho_w * rh.value().ln()).powf(1.6)).powf(-0.375)
+    );
+    println!(
+        "RH Ln rsult: {}",
+        (8.0e-8 * r_h2o * t_ref * rho_w * rh.value().ln()).powf(1.6)
+    );
+
+    w_sat * (1.0f64 + (8.0e-8 * r_h2o * t_ref * rho_w * rh.value().ln()).powf(1.6)).powf(-0.375)
+}
+
+#[test]
+fn create_library_test() {
+    // let lib = create_library();
+    // println!("{:#?}", lib);
+    assert!(!sorption_isotherm(0.5 * dimensionless).is_nan())
 }
 
 fn interpolate_data_points(
@@ -333,6 +394,8 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
 
     println!("\nStarting simulation...");
 
+    println!("\n Boundary Condition:\n {:#?}", boundary_condition);
+
     {
         mgr.boundary_condition = boundary_condition;
 
@@ -359,11 +422,13 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                 }
             }
 
+            mgr.tick_timestep()?;
+
             if let Some(sim_day) = simulation_durations_days
                 .iter()
                 .filter(|duration| {
-                    &current_time.value_in(hours) - duration.value_in(hours)
-                        <= settings.timestep.value_in(hours)
+                    (duration.value_in(hours) - &current_time.value_in(hours)).abs()
+                        <= settings.timestep.value_in(hours) * 0.5
                 })
                 .next()
             {
@@ -380,60 +445,86 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
     Ok(())
 }
 
-fn compare_results(surface: &Surface, duration_days: i32) {
-    println!("Depth (m)\tTemp (C)\tRef Temp (C)\tDiff (%)\tWC (kg/m³)\tRef WC (kg/m³)\tDiff (%)");
-    println!(
-        "----------------------------------------------------------------------------------------------------"
-    );
+fn compare_results(surface: &Surface, duration_day: i32) {
+    let sep = "=".repeat(30);
+    println!("{}", sep);
+    println!("Comparing at day {}", duration_day);
+    const percentage_range: f64 = 0.025;
 
     let mut cumulative_depth: Length<f64> = 0.0 * meter;
-    for cell in surface.cells.iter() {
-        if let CellType::Material(_) = cell.cell_type {
-            cumulative_depth += cell.size.x() / 2.0;
-            let depth_m = cumulative_depth.value_in(meter);
 
-            let temp_c = kelvin_to_celsius(cell.cell_temp);
-            let wc = cell.volumetric_water.value_in(kg_per_m3);
-
-            if let Some((ref_wc, wc_tol_ok)) =
-                find_and_check_ref(REF_WATER_CONTENT, duration_days, depth_m, wc, 0.025)
-            {
-                if let Some((ref_temp, temp_tol_ok)) =
-                    find_and_check_ref(REF_TEMPERATURE, duration_days, depth_m, temp_c, 0.01)
-                {
-                    println!(
-                        "{:.4}\t\t{:.2}\t\t{:.2}\t\t{:.2} {}\t{:.2}\t\t{:.2}\t\t{:.2} {}",
-                        depth_m,
-                        temp_c,
-                        ref_temp,
-                        (temp_c - ref_temp) / ref_temp * 100.0,
-                        if temp_tol_ok { "✅" } else { "❌" },
-                        wc,
-                        ref_wc,
-                        (wc - ref_wc) / ref_wc * 100.0,
-                        if wc_tol_ok { "✅" } else { "❌" },
-                    );
-                }
-            }
-            cumulative_depth += cell.size.x() / 2.0;
-        }
-    }
-}
-
-fn find_and_check_ref(
-    ref_data: &[(i32, f64, f64)],
-    target_days: i32,
-    depth: f64,
-    value: f64,
-    tolerance: f64,
-) -> Option<(f64, bool)> {
-    ref_data
+    let mut temp_ref = REF_TEMPERATURE
         .iter()
-        .find(|&&(d, dep, _)| d == target_days && (dep - depth).abs() < 1e-3)
-        .map(|&(_, _, ref_val)| {
-            let diff = (value - ref_val).abs() / ref_val;
-            (ref_val, diff <= tolerance)
-        })
+        .filter(|(d, _, _)| *d == duration_day)
+        .map(|(_, depth, t)| (depth, t));
+    let mut wc_ref = REF_WATER_CONTENT
+        .iter()
+        .filter(|(d, _, _)| *d == duration_day)
+        .map(|(_, depth, wc)| (depth, wc));
+
+    println!("{}", sep);
+    println!("Depth (m)\tTemp (C)\tRef Temp (C)\tDiff (%)");
+    println!("------------------");
+
+    let mut passed = true;
+    for (depth, ref_t) in temp_ref {
+        let cell_idx = surface
+            .find_cell_idx_at_depth(*depth * meter)
+            .expect(&format!("Searching cell at depth {}", *depth));
+        let cell = surface.cells.get(cell_idx).expect("Cannot find the cell");
+
+        println!("Cell at {:.2} m: {:#?}", depth, cell.cell_type);
+
+        let cell_t = kelvin_to_celsius(cell.cell_temp);
+        let diviation = (cell_t - ref_t).abs() / ref_t;
+
+        let turn_passed = diviation <= percentage_range;
+        passed &= turn_passed;
+        println!(
+            "{:.2}\t{:.2}\t{:.2}\t{:.1}% {}",
+            depth,
+            cell_t,
+            ref_t,
+            diviation * 100.0,
+            if turn_passed { "🆗" } else { "💥" }
+        )
+    }
+    if !passed {
+        println!("------------------");
+        println!("Something's wrong!");
+        panic!("Test failed.")
+    }
+
+    println!("{}", sep);
+    println!("Depth (m)\tWater[kg/m3]\tRef Water[kg/m3]\tDiff (%)");
+    println!("------------------");
+
+    let mut passed = true;
+    for (depth, ref_wc) in wc_ref {
+        let cell_idx = surface
+            .find_cell_idx_at_depth(*depth * meter)
+            .expect(&format!("Searching cell at depth {}", *depth));
+        let cell = surface.cells.get(cell_idx).expect("Cannot find the cell");
+
+        let cell_wc = cell.volumetric_water.value_in(kg_per_m3);
+        let diviation = (cell_wc - ref_wc).abs() / ref_wc;
+
+        let turn_passed = diviation <= percentage_range;
+        passed &= turn_passed;
+        println!(
+            "{:.2}\t{:.2}\t{:.2}\t{:.1}% {}",
+            depth,
+            cell_wc,
+            ref_wc,
+            diviation * 100.0,
+            if turn_passed { "🆗" } else { "💥" }
+        )
+    }
+    if !passed {
+        println!("------------------");
+        println!("Something's wrong!");
+        panic!("Test failed.")
+    }
 }
 
 #[test]
@@ -448,7 +539,6 @@ fn test_din_en_15026_timestep_0_5h() {
 }
 
 #[test]
-
 fn test_din_en_15026_timestep_0_1h() {
     run_benchmark_test(0.1 * hours);
 }
