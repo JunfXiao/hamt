@@ -9,18 +9,13 @@ use std::{
 };
 
 use crate::{
+    boundary::celsius_to_kelvin,
     error::{Error, InvalidInputReason},
-    
-        boundary::celsius_to_kelvin,
-        uom::{
-            DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_THERMAL_CONDUCTIVITY,
-            DIM_WATER_CONTENT, DensityQty, Dimension, DimensionlessQty, Quantity, Temperature,
-            dimensions::{
-                Dimensionless, Length, SpecificHeatCapacity,
-                ThermalConductivity,
-            },
-        },
-    
+    uom::{
+        DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT,
+        DensityQty, Dimension, DimensionlessQty, Quantity, Temperature,
+        dimensions::{Dimensionless, Length, SpecificHeatCapacity, ThermalConductivity},
+    },
 };
 use anyhow::{Context, Ok, Result};
 use tracing::error;
@@ -151,6 +146,7 @@ pub struct Material {
     pub thickness: Length<f64>,
 
     /// Conductivity of the material [W/(m·K)].
+    #[deprecated = "Not used at all"]
     pub conductivity: ThermalConductivity<f64>,
 
     /// Density of the material [kg/m³].
@@ -160,8 +156,11 @@ pub struct Material {
     pub spec_heat: SpecificHeatCapacity<f64>,
 
     // Radiation properties
+    #[deprecated = "Not used at all"]
     pub thermal_absorptance: Dimensionless<f64>,
+    #[deprecated = "Not used at all"]
     pub solar_absorptance: Dimensionless<f64>,
+    #[deprecated = "Not used at all"]
     pub visible_absorptance: Dimensionless<f64>,
 
     // HAMT-specific properties
@@ -192,7 +191,7 @@ pub struct Material {
 
     /// Vapor Diffusion Resistance curve (mu vs. RH).
     ///
-    /// - X: Relative Humidity [-]
+    /// - X: The moisture content ratio $$\frac{w}{w_{sat}}$$ [-]
     /// - Y: Vapor Diffusion Resistance [-]
     pub vapor_diffusion_resistance: Curve<DIM_DIMENSIONLESS, DIM_DIMENSIONLESS>,
 

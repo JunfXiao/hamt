@@ -29,6 +29,7 @@ unit_system!(
     dimension HeatCapacity = Energy / Temperature; // J/K
     dimension SpecificEnergy = Energy / Mass; // J/kg
     dimension SpecificHeatCapacity = HeatCapacity / Mass; // J/(kg·K)
+    dimension VolumetricHeatCapacity = SpecificHeatCapacity * Density; // J/(m³·K)
     dimension EnergyFlux = Power / Area; // W/m²
     dimension MassFlux = Mass / Area / Time; // kg/m²·s
     dimension HeatTransferCoeff = Power / (Area * Temperature); // W/(m²·K)
@@ -37,7 +38,7 @@ unit_system!(
     dimension VaporTransportCoeff = Mass / (Area * Time * Pressure); // kg/(m²·s·Pa)
     dimension MassConvectionCoeff = Length /  Time; // m/s
     dimension Density = Mass / Volume; // kg/m³
-    dimension WaterContent = Dimensionless; // kg/kg
+    dimension WaterContent = Mass / Volume; // kg/kg
     dimension LiquidTransportCoeff = Length^2 / Time; // m²/s
     dimension VaporPermeability = Mass/ (Length * Time * Pressure); // m²/s
 
@@ -70,6 +71,7 @@ unit_system!(
     unit m_per_s: Velocity = meter / seconds;
     unit m_per_s_squared: Acceleration = meter / seconds^2;
     unit hours: Time = 3600.0f64 * seconds;
+    unit days: Time = 24.0f64 * hours;
     unit pascals: Pressure = kilograms / (meter * seconds^2);
     unit joules: Energy = pascals * cubic_meter;
     unit kj: Energy = 1000.0f64 * joules;
@@ -78,6 +80,7 @@ unit_system!(
     unit j_per_k: HeatCapacity = joules / kelvin;
     unit j_per_kg: SpecificEnergy = joules / kilograms;
     unit j_per_kg_k: SpecificHeatCapacity = j_per_k / kilograms;
+    unit j_per_m3_k: VolumetricHeatCapacity = j_per_kg_k * kg_per_m3;
     unit w_per_m2: EnergyFlux = watts / square_meter;
     unit kg_per_m2_s: MassFlux = kilograms / (square_meter * seconds);
     unit w_per_m2_k: HeatTransferCoeff = watts / (square_meter * kelvin);

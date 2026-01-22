@@ -1,14 +1,13 @@
 //! Defines the core `Cell` struct, representing a finite volume element in the 1D HAMT model.
 
-
 use crate::boundary::celsius_to_kelvin;
 use crate::physics::ECLIPSE;
+use crate::uom::Quantity;
 use crate::uom::dimensions::{
     Density, Dimensionless, HeatTransferCoeff, LiquidTransportCoeff, Power, Pressure,
     SpecificHeatCapacity, Temperature, ThermalConductivity, VaporTransportCoeff, Volume,
     WaterContent,
 };
-use crate::uom::Quantity;
 use crate::{
     boundary::BoundaryCondition,
     hamt_manager::HamtSettings,
@@ -250,13 +249,5 @@ impl Cell {
         self.cell_vp = ref_cell.cell_vp;
         self.vp_sat = ref_cell.vp_sat;
         self.volumetric_water = ref_cell.volumetric_water;
-    }
-
-    pub fn water_content(&self) -> WaterContent<f64> {
-        if self.density.value_unchecked() > 0.0 {
-            self.volumetric_water / self.density
-        } else {
-            Quantity(0.0)
-        }
     }
 }

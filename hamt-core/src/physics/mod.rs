@@ -1,11 +1,11 @@
 //! Contains pure physics and psychrometric functions for the HAMT model.
 
+use crate::uom::Quantity;
 use crate::uom::dimensions::{
     Density, Dimensionless, Pressure, SpecificEnergy, SpecificHeatCapacity, Temperature,
     VaporPermeability,
 };
 use crate::uom::units::{self, kelvin, pascals};
-use crate::uom::Quantity;
 pub mod geometry;
 
 /// Universal gas constant for water vapor [J/kg·K].
@@ -75,13 +75,13 @@ pub fn rh_to_vp(rh: Dimensionless<f64>, temp: Temperature<f64>) -> Pressure<f64>
     rh * psy_psat_fn_temp(temp)
 }
 
-/// Calculates the Water Vapor Diffusion Coefficient in air.
+/// Calculates the Water Vapor Diffusion Coefficient of the air (water vapour permeability $\delta_0$).
 ///
 /// # Arguments
 /// * `temp_celsius` - Temperature [°C].
 /// * `amb_pressure` - Ambient barometric pressure [Pa].
 pub fn wvdc(temp: Temperature<f64>, amb_pressure: Pressure<f64>) -> VaporPermeability<f64> {
-    Quantity((2e-7 * temp.value_in(kelvin).powf(0.81)) / amb_pressure.value_in(pascals))
+    Quantity((1.97e-7 * temp.value_in(kelvin).powf(0.81)) / amb_pressure.value_in(pascals))
 }
 
 /// Calculates Relative Humidity from dry-bulb temperature and vapor density.

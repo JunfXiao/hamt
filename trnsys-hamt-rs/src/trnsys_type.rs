@@ -6,7 +6,7 @@ use anyhow::{Context, Ok, Result};
 use csv::Writer;
 use hamt_core::boundary::{celsius_to_kelvin, kelvin_to_celsius};
 use hamt_core::hamt_manager::{HamtManager, HamtSettings};
-use hamt_core::io::load_hamt_data;
+use hamt_core::io::load_hamt_by_path;
 use hamt_core::physics::{self, ECLIPSE};
 use hamt_core::uom::Quantity;
 use hamt_core::uom::units::{
@@ -74,7 +74,7 @@ impl TrnSysType {
             .into());
         }
         // create library
-        let mat_library = load_hamt_data(file_path)?;
+        let mat_library = load_hamt_by_path(file_path)?;
         let construction = mat_library
             .get_construction_read_lock()?
             .values()

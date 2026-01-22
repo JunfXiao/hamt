@@ -93,15 +93,29 @@ impl HamtProperty {
 ///
 /// The file is parsed handling comments (starting with '!') and multi-line entities
 /// ending with ';'.
-pub fn load_hamt_data<P: AsRef<Path>>(path: P) -> Result<MaterialLibrary> {
+pub fn load_hamt_by_path<P: AsRef<Path>>(path: P) -> Result<MaterialLibrary> {
     let mut file = File::open(path.as_ref())?;
+    load_hamt_by_file(file)
+}
+
+/// Loads all material and construction definitions from a specified HAMT data file.
+///
+/// The file is parsed handling comments (starting with '!') and multi-line entities
+/// ending with ';'.
+pub fn load_hamt_by_file(mut file: File) -> Result<MaterialLibrary> {
     let mut content = String::new();
     file.read_to_string(&mut content)
-        .with_context(|| format!("Reading file '{:?}'", path.as_ref()))?;
+        .with_context(|| format!("Reading file '{:?}'", file))?;
+    load_hamt_by_content(&content)
+}
 
+/// Loads all material and construction definitions from a specified HAMT data file.
+///
+/// The file is parsed handling comments (starting with '!') and multi-line entities
+/// ending with ';'.
+pub fn load_hamt_by_content(content: &str) -> Result<MaterialLibrary> {
     // 1. Parse content into a raw HashMap representation
-    let raw_data = parse_idf_content(&content)
-        .with_context(|| format!("Parsing file '{:?}'", path.as_ref()))?;
+    let raw_data = parse_idf_content(content).with_context(|| "Parsing file content")?;
 
     // 2. Initialize Material Library
     let library = MaterialLibrary::new();
@@ -114,12 +128,10 @@ pub fn load_hamt_data<P: AsRef<Path>>(path: P) -> Result<MaterialLibrary> {
             // Params: [Roughness, Thickness, Conductivity, Density, SpecHeat, ThAbs, SolAbs, VisAbs]
             let mat = Material {
                 name: name.clone(),
-                thickness: crate::uom::units::meter
-                    * parse_number::<f64>(&params[1], "Thickness")?,
+                thickness: crate::uom::units::meter * parse_number::<f64>(&params[1], "Thickness")?,
                 conductivity: crate::uom::units::w_per_m_k
                     * parse_number::<f64>(&params[2], "Heat Conductivity")?,
-                density: crate::uom::units::kg_per_m3
-                    * parse_number::<f64>(&params[3], "Density")?,
+                density: crate::uom::units::kg_per_m3 * parse_number::<f64>(&params[3], "Density")?,
                 spec_heat: crate::uom::units::j_per_kg_k
                     * parse_number::<f64>(&params[4], "Specific Heat")?,
                 thermal_absorptance: Quantity(parse_number(&params[5], "Thermal Absorptance")?),
@@ -395,7 +407,7 @@ mod tests {
         // create a temporary file
         let temp_path = std::env::temp_dir().join("test_idf.idf");
         std::fs::write(&temp_path, idf_content).unwrap();
-        let library = load_hamt_data(&temp_path).unwrap();
+        let library = load_hamt_by_path(&temp_path).unwrap();
         assert!(library.get_material("05_AGEPAN_THD_jr_0.035").is_ok());
     }
 }

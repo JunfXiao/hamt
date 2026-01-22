@@ -26,5 +26,8 @@ pub enum Error {
     LockError(String),
 
     #[error("Unhandled error: {0:#}")]
-    Other(#[source] Box<dyn std::error::Error + Send + Sync>),
+    UnhandledError(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("Other error: {0}")]
+    Other(String),
 }
