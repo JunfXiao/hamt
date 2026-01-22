@@ -4,7 +4,6 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     hash::Hash,
-    ops::Sub,
     sync::{Arc, RwLock},
 };
 
@@ -14,7 +13,7 @@ use crate::{
     uom::{
         DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT,
         DensityQty, Dimension, DimensionlessQty, Quantity, Temperature,
-        dimensions::{Dimensionless, Length, SpecificHeatCapacity, ThermalConductivity},
+        dimensions::{Dimensionless, Length, SpecificHeatCapacity},
     },
 };
 use anyhow::{Context, Ok, Result};
@@ -145,10 +144,9 @@ pub struct Material {
     /// Thickness of the material [m].
     pub thickness: Length<f64>,
 
-    /// Conductivity of the material [W/(m·K)].
-    #[deprecated = "Not used at all"]
-    pub conductivity: ThermalConductivity<f64>,
-
+    // /// Conductivity of the material [W/(m·K)].
+    // #[deprecated = "Not used at all"]
+    // pub conductivity: ThermalConductivity<f64>,
     /// Density of the material [kg/m³].
     pub density: DensityQty<f64>,
 
@@ -156,12 +154,12 @@ pub struct Material {
     pub spec_heat: SpecificHeatCapacity<f64>,
 
     // Radiation properties
-    #[deprecated = "Not used at all"]
-    pub thermal_absorptance: Dimensionless<f64>,
-    #[deprecated = "Not used at all"]
-    pub solar_absorptance: Dimensionless<f64>,
-    #[deprecated = "Not used at all"]
-    pub visible_absorptance: Dimensionless<f64>,
+    // #[deprecated = "Not used at all"]
+    // pub thermal_absorptance: Dimensionless<f64>,
+    // #[deprecated = "Not used at all"]
+    // pub solar_absorptance: Dimensionless<f64>,
+    // #[deprecated = "Not used at all"]
+    // pub visible_absorptance: Dimensionless<f64>,
 
     // HAMT-specific properties
     /// Porosity of the material [-].
@@ -225,12 +223,8 @@ impl Default for Material {
         Self {
             name: "Unnamed Material".to_string(),
             thickness: Length::<f64>::zero(),
-            conductivity: ThermalConductivity::<f64>::zero(),
             density: DensityQty::<f64>::zero(),
             spec_heat: SpecificHeatCapacity::<f64>::zero(),
-            thermal_absorptance: Quantity(0.5),
-            solar_absorptance: Quantity(0.5),
-            visible_absorptance: Quantity(0.5),
             porosity: Quantity(0.5),
             initial_water_content: Quantity(0.5),
             sorption_isotherm: Curve::default(),

@@ -158,7 +158,7 @@ impl Surface {
                 let mut oorsum = Quantity(0.0);
                 let mut vpdiff = Quantity(0.0);
 
-                let curr_temp_k = cell_curr.cell_temp;
+                // let curr_temp_k = cell_curr.cell_temp;
                 let curr_vp_pa = cell_curr.cell_vp;
 
                 for nbr_i in self.neighbor_indices(i, nx) {
@@ -213,9 +213,9 @@ impl Surface {
                 let denom = oorsum + (tcap_j_per_k / dt_s);
                 if denom > Quantity(ECLIPSE) {
                     let prev_temp_k = cell_prev.cell_temp;
-                    let other: Power<f64> = tcap_j_per_k * prev_temp_k / dt_s ;
+                    let other: Power<f64> = tcap_j_per_k * prev_temp_k / dt_s;
                     let numer = torsum + qvp + q_adds + other;
-                    numer / denom 
+                    numer / denom
                 } else {
                     cell_curr.cell_temp
                 }
@@ -317,9 +317,7 @@ impl Surface {
                     let dist_m = dist.value_in(crate::uom::units::meter);
 
                     let dw1 = cell_props.dw.value_in(crate::uom::units::m2_per_s);
-                    let dwd_phi1 = cell_props
-                        .dwd_phi
-                        .value_in(crate::uom::units::kg_per_m3);
+                    let dwd_phi1 = cell_props.dwd_phi.value_in(crate::uom::units::kg_per_m3);
                     let rhr1 = if dw1 > 0.0 && dwd_phi1 > 0.0 {
                         dist_m / (overlap_m2 * dw1 * dwd_phi1)
                     } else {
@@ -327,9 +325,7 @@ impl Surface {
                     };
 
                     let dw2 = nbr_props.dw.value_in(crate::uom::units::m2_per_s);
-                    let dwd_phi2 = nbr_props
-                        .dwd_phi
-                        .value_in(crate::uom::units::kg_per_m3);
+                    let dwd_phi2 = nbr_props.dwd_phi.value_in(crate::uom::units::kg_per_m3);
                     let rhr2 = if dw2 > 0.0 && dwd_phi2 > 0.0 {
                         dist_m / (overlap_m2 * dw2 * dwd_phi2)
                     } else {
@@ -346,12 +342,8 @@ impl Surface {
                 // Water Capacity
                 // wcap: storage term dθ/dφ * volume (Fortran: wcap)
                 // Unit: kg
-                let dwd_phi = cell_props
-                    .dwd_phi
-                    .value_in(crate::uom::units::kg_per_m3);
-                let volume = cell_props
-                    .volume
-                    .value_in(crate::uom::units::cubic_meter);
+                let dwd_phi = cell_props.dwd_phi.value_in(crate::uom::units::kg_per_m3);
+                let volume = cell_props.volume.value_in(crate::uom::units::cubic_meter);
                 let wcap = if dwd_phi > 0.0 { dwd_phi * volume } else { 0.0 };
 
                 // (moisture):

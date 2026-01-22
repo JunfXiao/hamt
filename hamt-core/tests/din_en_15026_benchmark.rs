@@ -262,12 +262,8 @@ fn create_library() -> MaterialLibrary {
         name: MAT_NAME.to_string(),
         thickness: 10.0 * meter,
         density: rho_mat(),
-        conductivity: thermal_conductivity.interpolate(0.5 * water_sat()).0,
         thermal_conductivity: thermal_conductivity,
         spec_heat: spec_heat_capacity(),
-        thermal_absorptance: 1.0 * dimensionless,
-        solar_absorptance: 1.0 * dimensionless,
-        visible_absorptance: 1.0 * dimensionless,
         porosity: water_sat() / rho_w(),
         initial_water_content: sorption_isotherm.interpolate(0.5 * dimensionless).0 / rho_mat(), // Initial RH: 50%
         suction: get_liquid_transport_coeff_curve(),
@@ -304,10 +300,11 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
     settings.temp_convergence_tolerance = 1e-6 * kelvin;
     settings.rh_convergence_tolerance = 1e-7;
     settings.max_div = 50;
+    settings.div_length = 1e-6 * meter;
 
     let boundary_coeff = BoundaryCondition {
         heat_transfer_coeff_ext: 1e10 * w_per_m2_k,
-        heat_transfer_coeff_int: 1e100 * w_per_m2_k,
+        heat_transfer_coeff_int: 1e10 * w_per_m2_k,
         mass_convection_coeff_ext: 1e10 * m_per_s,
         mass_convection_coeff_int: 1e10 * m_per_s,
         vapor_transport_coeff_ext: 1e10 * kg_per_m2_s_pa,
@@ -420,7 +417,6 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                 }
             }
 
-            mgr.tick_timestep()?;
             if let Some(sim_day) = simulation_durations_days
                 .iter()
                 .filter(|duration| {
@@ -433,10 +429,11 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                 println!("\nCheckpoint reached: {} days\n", sim_day);
                 compare_results(&mgr.surface_curr, sim_day);
                 write_time = true;
-                break;
             }
 
             current_time += settings.timestep;
+
+            mgr.tick_timestep()?;
         }
     }
 
@@ -456,13 +453,13 @@ fn compare_results(surface: &Surface, duration_day: i32) {
     let sep = "=".repeat(30);
     println!("{}", sep);
     println!("Comparing at day {}", duration_day);
-    const percentage_range_rh: f64 = 0.025;
-    const percentage_range_t: f64 = 0.01;
-    let mut temp_ref = REF_TEMPERATURE
+    const PERCENTAGE_RANGE_RH: f64 = 0.025;
+    const PERCENTAGE_RANGE_T: f64 = 0.01;
+    let temp_ref = REF_TEMPERATURE
         .iter()
         .filter(|(d, _, _)| *d == duration_day)
         .map(|(_, depth, t)| (depth, t));
-    let mut wc_ref = REF_WATER_CONTENT
+    let wc_ref = REF_WATER_CONTENT
         .iter()
         .filter(|(d, _, _)| *d == duration_day)
         .map(|(_, depth, wc)| (depth, wc));
@@ -496,7 +493,7 @@ fn compare_results(surface: &Surface, duration_day: i32) {
         let cell_t = kelvin_to_celsius(cell.cell_temp);
         let diviation = (cell_t - ref_t).abs() / ref_t;
 
-        let turn_passed = diviation <= percentage_range_t;
+        let turn_passed = diviation <= PERCENTAGE_RANGE_T;
         passed &= turn_passed;
         print_table_row(
             vec![
@@ -543,7 +540,7 @@ fn compare_results(surface: &Surface, duration_day: i32) {
         let cell_wc = cell.volumetric_water.value_in(kg_per_m3);
         let diviation = (cell_wc - ref_wc).abs() / ref_wc;
 
-        let turn_passed = diviation <= percentage_range_rh;
+        let turn_passed = diviation <= PERCENTAGE_RANGE_RH;
         passed &= turn_passed;
         print_table_row(
             vec![

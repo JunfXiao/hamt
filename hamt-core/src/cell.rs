@@ -1,12 +1,9 @@
 //! Defines the core `Cell` struct, representing a finite volume element in the 1D HAMT model.
 
 use crate::boundary::celsius_to_kelvin;
-use crate::physics::ECLIPSE;
-use crate::uom::Quantity;
 use crate::uom::dimensions::{
     Density, Dimensionless, HeatTransferCoeff, LiquidTransportCoeff, Power, Pressure,
     SpecificHeatCapacity, Temperature, ThermalConductivity, VaporTransportCoeff, Volume,
-    WaterContent,
 };
 use crate::{
     boundary::BoundaryCondition,
@@ -227,11 +224,7 @@ impl Cell {
 
             let (k, _) = mat.thermal_conductivity.interpolate(water);
 
-            self.w_thermal_c = if k > Quantity(ECLIPSE) {
-                k
-            } else {
-                mat.conductivity
-            };
+            self.w_thermal_c = k;
         }
     }
 

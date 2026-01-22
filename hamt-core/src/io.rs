@@ -94,7 +94,7 @@ impl HamtProperty {
 /// The file is parsed handling comments (starting with '!') and multi-line entities
 /// ending with ';'.
 pub fn load_hamt_by_path<P: AsRef<Path>>(path: P) -> Result<MaterialLibrary> {
-    let mut file = File::open(path.as_ref())?;
+    let file = File::open(path.as_ref())?;
     load_hamt_by_file(file)
 }
 
@@ -129,14 +129,9 @@ pub fn load_hamt_by_content(content: &str) -> Result<MaterialLibrary> {
             let mat = Material {
                 name: name.clone(),
                 thickness: crate::uom::units::meter * parse_number::<f64>(&params[1], "Thickness")?,
-                conductivity: crate::uom::units::w_per_m_k
-                    * parse_number::<f64>(&params[2], "Heat Conductivity")?,
                 density: crate::uom::units::kg_per_m3 * parse_number::<f64>(&params[3], "Density")?,
                 spec_heat: crate::uom::units::j_per_kg_k
                     * parse_number::<f64>(&params[4], "Specific Heat")?,
-                thermal_absorptance: Quantity(parse_number(&params[5], "Thermal Absorptance")?),
-                solar_absorptance: Quantity(parse_number(&params[6], "Solar Absorptance")?),
-                visible_absorptance: Quantity(parse_number(&params[7], "Visible Absorptance")?),
                 ..Default::default()
             };
             materials.insert(name.clone(), mat);
