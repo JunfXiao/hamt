@@ -299,7 +299,8 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
     settings.max_iterations = 50;
     settings.temp_convergence_tolerance = 1e-6 * kelvin;
     settings.rh_convergence_tolerance = 1e-7;
-    settings.max_div = 50;
+    settings.max_div = 80;
+    settings.min_div = 50;
     settings.div_length = 1e-6 * meter;
 
     let boundary_coeff = BoundaryCondition {
@@ -481,7 +482,7 @@ fn compare_results(surface: &Surface, duration_day: i32) {
     );
     println!("------------------");
 
-    let mut passed = true;
+    let mut t_passed = true;
     for (depth, ref_t) in temp_ref {
         let cell_idx = surface
             .find_cell_idx_at_depth(*depth * meter)
@@ -494,7 +495,7 @@ fn compare_results(surface: &Surface, duration_day: i32) {
         let diviation = (cell_t - ref_t).abs() / ref_t;
 
         let turn_passed = diviation <= PERCENTAGE_RANGE_T;
-        passed &= turn_passed;
+        t_passed &= turn_passed;
         print_table_row(
             vec![
                 format!("{:.2}", depth),
@@ -506,11 +507,6 @@ fn compare_results(surface: &Surface, duration_day: i32) {
             ],
             TABLE_PADDING,
         );
-    }
-    if !passed {
-        println!("------------------");
-        println!("Something's wrong!");
-        panic!("Test failed.")
     }
 
     println!("{}", sep);
@@ -530,7 +526,7 @@ fn compare_results(surface: &Surface, duration_day: i32) {
     );
     println!("------------------");
 
-    let mut passed = true;
+    let mut rh_passed = true;
     for (depth, ref_wc) in wc_ref {
         let cell_idx = surface
             .find_cell_idx_at_depth(*depth * meter)
@@ -541,7 +537,7 @@ fn compare_results(surface: &Surface, duration_day: i32) {
         let diviation = (cell_wc - ref_wc).abs() / ref_wc;
 
         let turn_passed = diviation <= PERCENTAGE_RANGE_RH;
-        passed &= turn_passed;
+        rh_passed &= turn_passed;
         print_table_row(
             vec![
                 format!("{:.2}", depth),
@@ -554,7 +550,7 @@ fn compare_results(surface: &Surface, duration_day: i32) {
             TABLE_PADDING,
         );
     }
-    if !passed {
+    if !rh_passed || !t_passed {
         println!("------------------");
         println!("Something's wrong!");
         panic!("Test failed.")
