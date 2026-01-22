@@ -199,7 +199,7 @@ fn get_vapor_diffusion_curve() -> Curve<DIM_DIMENSIONLESS, DIM_DIMENSIONLESS> {
         |x: Dimensionless<f64>| {
             let water_content_ratio = sorption_isotherm(x) / water_sat();
             let rest_water_ratio = 1.0 - water_content_ratio.value();
-            200.0 * (0.573 * rest_water_ratio.powf(2.0) + 0.497) / rest_water_ratio * dimensionless
+            200.0 * (0.503 * rest_water_ratio.powf(2.0) + 0.497) / rest_water_ratio * dimensionless
         },
         x_values,
     )
@@ -279,10 +279,10 @@ fn create_library() -> MaterialLibrary {
     let lib = MaterialLibrary::new();
     let mat = lib.add_material(material).expect("Cannot add material.");
     let surface_coeff = SurfaceVaporCoef {
-        is_external_const: false,
-        external_value: 0.0,
-        internal_value: 0.0,
-        is_internal_const: false,
+        is_external_const: true,
+        external_value: 1e10,
+        internal_value: 1e10,
+        is_internal_const: true,
     };
     lib.create_construction(
         CONSTRUCTION_NAME.to_string(),
@@ -306,12 +306,12 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
     settings.max_div = 50;
 
     let boundary_coeff = BoundaryCondition {
-        heat_transfer_coeff_ext: 1e100 * w_per_m2_k,
+        heat_transfer_coeff_ext: 1e10 * w_per_m2_k,
         heat_transfer_coeff_int: 1e100 * w_per_m2_k,
-        mass_convection_coeff_ext: 1e100 * m_per_s,
-        mass_convection_coeff_int: 1e100 * m_per_s,
-        vapor_transport_coeff_ext: 1e100 * kg_per_m2_s_pa,
-        vapor_transport_coeff_int: 1e100 * kg_per_m2_s_pa,
+        mass_convection_coeff_ext: 1e10 * m_per_s,
+        mass_convection_coeff_int: 1e10 * m_per_s,
+        vapor_transport_coeff_ext: 1e10 * kg_per_m2_s_pa,
+        vapor_transport_coeff_int: 1e10 * kg_per_m2_s_pa,
         ..Default::default()
     };
 

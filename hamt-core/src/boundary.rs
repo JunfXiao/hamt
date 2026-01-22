@@ -37,7 +37,7 @@ pub struct BoundaryCondition {
     /// External mass convection coefficient [m/s].
     pub mass_convection_coeff_ext: MassConvectionCoeff<f64>,
 
-    /// Internal mass convection coefficient [kg/m²s].
+    /// Internal mass convection coefficient [m/s].
     pub mass_convection_coeff_int: MassConvectionCoeff<f64>,
 
     /// External vapor transport coefficient [kg/(m²·s·Pa)].
