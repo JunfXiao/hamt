@@ -159,11 +159,12 @@ impl Surface {
                 let mut vpdiff = Quantity(0.0);
 
                 // let curr_temp_k = cell_curr.cell_temp;
-                let curr_vp_pa = cell_curr.cell_vp;
+                let curr_vp_pa = cell_prev.cell_vp;
 
                 for nbr_i in self.neighbor_indices(i, nx) {
                     let neighbor_next = &self.cells[[nbr_i, 0, 0]];
                     let neighbor_curr = &surface_curr.cells[[nbr_i, 0, 0]];
+                    let neighbor_prev = &surface_prev.cells[[nbr_i, 0, 0]];
 
                     let (therm_resistance, vapor_resistance) =
                         self.calculate_resistance_pair(cell_next, neighbor_next, bc.pressure_air);
@@ -174,7 +175,7 @@ impl Surface {
                         torsum += nbr_temp_k / therm_resistance;
                     }
                     if vapor_resistance > 0.0 * pa_s_per_kg {
-                        let nbr_vp_pa = neighbor_curr.cell_vp;
+                        let nbr_vp_pa = neighbor_prev.cell_vp;
                         vpdiff += (nbr_vp_pa - curr_vp_pa) / vapor_resistance;
                     }
                 }
@@ -191,6 +192,9 @@ impl Surface {
                     && let CellType::Material(_) = cell_next.cell_type
                 {
                     qvp = vpdiff * physics::W_HV;
+                    if qvp.abs() > settings.max_latent_heat {
+                        qvp = Quantity(0.0);
+                    }
                 }
 
                 let q_adds = match cell_next.cell_type {
@@ -294,8 +298,9 @@ impl Surface {
                             .min(nbr_props.size.area_along(0).value_in(units::square_meter)),
                     );
 
-                    // dist: center-to-center distance (Fortran: dist)
-                    let dist = (cell_props.size.x().abs() + nbr_props.size.x().abs()) * 0.5;
+                    // dist: each cell's half-length to the shared face (Fortran: dist)
+                    let dist1 = cell_props.size.x().abs() * 0.5;
+                    let dist2 = nbr_props.size.x().abs() * 0.5;
 
                     let (_, vaporr) =
                         self.calculate_resistance_pair(cell_props, nbr_props, bc.pressure_air);
@@ -314,12 +319,13 @@ impl Surface {
 
                     // rhr1/rhr2: liquid transport resistances for each cell (Fortran: rhr1/rhr2)
                     let overlap_m2 = overlap.value_in(crate::uom::units::square_meter);
-                    let dist_m = dist.value_in(crate::uom::units::meter);
+                    let dist1_m = dist1.value_in(crate::uom::units::meter);
+                    let dist2_m = dist2.value_in(crate::uom::units::meter);
 
                     let dw1 = cell_props.dw.value_in(crate::uom::units::m2_per_s);
                     let dwd_phi1 = cell_props.dwd_phi.value_in(crate::uom::units::kg_per_m3);
                     let rhr1 = if dw1 > 0.0 && dwd_phi1 > 0.0 {
-                        dist_m / (overlap_m2 * dw1 * dwd_phi1)
+                        dist1_m / (overlap_m2 * dw1 * dwd_phi1)
                     } else {
                         0.0
                     };
@@ -327,7 +333,7 @@ impl Surface {
                     let dw2 = nbr_props.dw.value_in(crate::uom::units::m2_per_s);
                     let dwd_phi2 = nbr_props.dwd_phi.value_in(crate::uom::units::kg_per_m3);
                     let rhr2 = if dw2 > 0.0 && dwd_phi2 > 0.0 {
-                        dist_m / (overlap_m2 * dw2 * dwd_phi2)
+                        dist2_m / (overlap_m2 * dw2 * dwd_phi2)
                     } else {
                         0.0
                     };
@@ -398,13 +404,16 @@ impl Surface {
                 .value_unchecked()
                 .min(cell2.size.area_along(0).value_unchecked()),
         );
-        let dist = (cell1.size.x().abs() + cell2.size.x().abs()) * 0.5;
+        let dist1 = cell1.size.x().abs() * 0.5;
+        let dist2 = cell2.size.x().abs() * 0.5;
 
-        if overlap <= Quantity(ECLIPSE) || dist <= Quantity(ECLIPSE) {
+        if overlap <= Quantity(ECLIPSE) || dist1 <= Quantity(ECLIPSE) || dist2 <= Quantity(ECLIPSE)
+        {
             tracing::warn!(
-                "calc_resistance_pair: degenerate geometry overlap={:?}, dist={:?}, cell1={:?}, cell2={:?}",
+                "calc_resistance_pair: degenerate geometry overlap={:?}, dist1={:?}, dist2={:?}, cell1={:?}, cell2={:?}",
                 overlap,
-                dist,
+                dist1,
+                dist2,
                 cell1.cell_type,
                 cell2.cell_type
             );
@@ -416,7 +425,7 @@ impl Surface {
         let thermr1: ThermalResistance<f64> = if htc1 > HeatTransferCoeff::<f64>::zero() {
             1.0 / (htc1 * overlap)
         } else if k1 > ThermalConductivity::<f64>::zero() {
-            dist / (k1 * overlap)
+            dist1 / (k1 * overlap)
         } else {
             Quantity(0.0)
         };
@@ -425,7 +434,7 @@ impl Surface {
         let thermr2: ThermalResistance<f64> = if htc2 > HeatTransferCoeff::<f64>::zero() {
             1.0 / (htc2 * overlap)
         } else if k2 > ThermalConductivity::<f64>::zero() {
-            dist / (k2 * overlap)
+            dist2 / (k2 * overlap)
         } else {
             Quantity(0.0)
         };
@@ -434,7 +443,7 @@ impl Surface {
         let vaporr1: VaporResistance<f64> = if vtc1 > VaporTransportCoeff::<f64>::zero() {
             1.0 / (overlap * vtc1)
         } else if cell1.mu > Quantity(ECLIPSE) {
-            (dist * cell1.mu) / (overlap * physics::wvdc(cell1.cell_temp, pressure_air))
+            (dist1 * cell1.mu) / (overlap * physics::wvdc(cell1.cell_temp, pressure_air))
         } else {
             Quantity(0.0)
         };
@@ -442,7 +451,7 @@ impl Surface {
         let vaporr2: VaporResistance<f64> = if vtc2 > VaporTransportCoeff::<f64>::zero() {
             1.0 / (overlap * vtc2)
         } else if cell2.mu > Quantity(ECLIPSE) {
-            (dist * cell2.mu) / (overlap * physics::wvdc(cell2.cell_temp, pressure_air))
+            (dist2 * cell2.mu) / (overlap * physics::wvdc(cell2.cell_temp, pressure_air))
         } else {
             Quantity(0.0)
         };

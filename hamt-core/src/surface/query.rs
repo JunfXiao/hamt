@@ -270,6 +270,10 @@ impl Surface {
     pub fn check_convergence(&self, other: &Surface, settings: &HamtSettings) -> bool {
         for (((x, y, z), cell_curr), cell_next) in self.cells.indexed_iter().zip(other.cells.iter())
         {
+            if !matches!(cell_curr.cell_type, CellType::Material(_)) {
+                continue;
+            }
+
             let temp_tol = settings
                 .temp_convergence_tolerance
                 .value_in(diman::si::units::kelvin);

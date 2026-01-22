@@ -95,6 +95,7 @@ impl Surface {
             boundary_cell_size,
         );
         cells.push(ext_virtual_cell);
+        base_pt.0 += boundary_cell_thickness;
 
         // --- Material Cells ---
         for mat_arc in construction.layers.iter() {
@@ -127,8 +128,6 @@ impl Surface {
                     * (((PI * (-did_f64 / divs_f64) - PI / 2.0).sin() / 2.0)
                         - ((PI * (-(did_f64 - 1.0) / divs_f64) - PI / 2.0).sin() / 2.0));
 
-                base_pt.0 += length;
-
                 let size = get_size(length);
 
                 let cell = Cell::new(
@@ -138,6 +137,7 @@ impl Surface {
                 );
 
                 cells.push(cell);
+                base_pt.0 += length;
             }
         }
 

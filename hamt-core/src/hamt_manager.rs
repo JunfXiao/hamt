@@ -1,10 +1,10 @@
 //! The main orchestrator for the HAMT simulation.
 
 use crate::boundary::BoundaryCondition;
-use crate::surface::Surface;
 use crate::material::{Construction, Material};
 use crate::physics::geometry::{Pt3D, Size3D};
-use crate::uom::dimensions::{Temperature, Time};
+use crate::surface::Surface;
+use crate::uom::dimensions::{Power, Temperature, Time};
 use crate::uom::units::{dimensionless, hours, kg_per_m2_s_pa};
 use crate::{physics, uom};
 use anyhow::{Context, Result};
@@ -164,6 +164,8 @@ pub struct HamtSettings {
     pub latent_heat_enabled: bool,
     /// Flag to indicate if rain is present on the exterior surface.
     pub rain_enabled: bool,
+    /// Clamp for latent heat contribution [W].
+    pub max_latent_heat: Power<f64>,
     /// Cell division size [m]
     pub div_length: Length<f64>,
     /// Minimum cell amount for a material after division
@@ -186,6 +188,7 @@ impl Default for HamtSettings {
             base_cell_size: Pt3D(0.1 * units::meter, 0.0 * units::meter, 0.0 * units::meter),
             latent_heat_enabled: true,
             rain_enabled: false,
+            max_latent_heat: 100_000.0 * units::watts,
             div_length: 0.05 * units::meter,
             min_div: 3,
             max_div: 20,
