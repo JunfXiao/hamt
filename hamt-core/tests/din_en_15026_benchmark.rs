@@ -6,6 +6,7 @@ use anyhow::{Ok, Result};
 use hamt_core::boundary::{BoundaryCondition, celsius_to_kelvin, kelvin_to_celsius};
 use hamt_core::hamt_manager::{HamtManager, HamtSettings};
 use hamt_core::material::{Curve, Material, MaterialLibrary, SurfaceVaporCoef};
+use hamt_core::physics::ECLIPSE;
 use hamt_core::surface::Surface;
 use hamt_core::uom::dimensions::{
     Density, Dimensionless, HeatCapacity, Length, SpecificHeatCapacity, Temperature, Time,
@@ -111,9 +112,6 @@ fn r_h2o() -> SpecificHeatCapacity<f64> {
 fn water_sat() -> Quantity<f64, DIM_WATER_CONTENT> {
     146.0 * kg_per_m3
 }
-
-const INTERPOLATION_POINTS: usize = 100;
-const INTERPOLATION_DELTA: f64 = 0.05;
 
 fn curve_by_func<const DX: Dimension, const DY: Dimension>(
     func: fn(Quantity<f64, DX>) -> Quantity<f64, DY>,
@@ -301,23 +299,26 @@ fn create_library(init_temp_celsius: f64, init_rh: f64, thickness: f64) -> Mater
     lib
 }
 
+const INTERPOLATION_POINTS: usize = 120;
+const INTERPOLATION_DELTA: f64 = 0.03;
+
 fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
     let start_time = Instant::now();
 
     init_tracing();
 
-    let library = create_library(20.0, 0.5, 10.0);
+    let library = create_library(20.0, 0.5, 15.0);
     let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
 
     let mut settings = HamtSettings::default();
-    const MAX_ITERATIONS: usize = 5000;
+    const MAX_SPLITTING_FACTOR: usize = 3;
     settings.timestep = time_step;
-    settings.max_iterations = 1000;
+    settings.max_iterations = 5000;
     settings.temp_convergence_tolerance = 1e-6 * kelvin;
-    settings.rh_convergence_tolerance = 1e-4;
+    settings.rh_convergence_tolerance = 1e-5;
     settings.max_div = 300;
     settings.min_div = 50;
-    settings.div_length = 1e-7 * meter;
+    settings.div_length = 1e-6 * meter;
 
     let boundary_coeff = BoundaryCondition {
         heat_transfer_coeff_ext: 1e100 * w_per_m2_k,
@@ -396,35 +397,57 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
 
         let mut write_time = true;
         let mut current_time: Time<f64> = 0.0 * hours;
+        let orig_timestep = mgr.settings.timestep;
+        let mut split_factor = 3;
         while current_time <= end_time {
+            let mut proposed_timestep = orig_timestep / 2.0_f64.powi(split_factor);
+
+            // backtracking
+            if split_factor > 1
+                && (current_time.value_unchecked() % (proposed_timestep.value_unchecked() * 2.0)
+                    == 0.0)
+            {
+                split_factor -= 1;
+                proposed_timestep *= 2.0;
+            }
+            mgr.settings.timestep = proposed_timestep;
             if write_time {
                 println!("");
                 write_time = false;
             }
             print!(
-                "\rTime={:.2} hours, Run time: {} seconds ",
+                "\rTime={:.2} hours, Run time: {} seconds ,Timestep dynamic: {:?} (Original: {:?})",
                 (current_time / hours).value(),
-                start_time.elapsed().as_secs()
+                start_time.elapsed().as_secs(),
+                mgr.settings.timestep,
+                orig_timestep
             );
-            let mut solve_count = 0;
+
             // Solving the timestep
             while !mgr.solve_timestep()? {
-                solve_count += 1;
-
+                mgr.settings.timestep = orig_timestep / 2.0_f64.powi(split_factor);
+                mgr.surface_curr
+                    .sync_state_from(&mgr.surface_prev.clone())?;
+                mgr.surface_next
+                    .sync_state_from(&mgr.surface_prev.clone())?;
                 print!(
-                    "\rTime={:.2} hours, Iteration {}",
+                    "\rTime={:.2} hours, Run time: {} seconds ,Timestep dynamic: {:?} (Original: {:?})",
                     (current_time / hours).value(),
-                    solve_count * mgr.settings.max_iterations
+                    start_time.elapsed().as_secs(),
+                    mgr.settings.timestep,
+                    orig_timestep
                 );
 
-                if solve_count > (MAX_ITERATIONS as i32 / (mgr.settings.max_iterations)) {
+                if split_factor > (MAX_SPLITTING_FACTOR as i32) {
                     return Err(hamt_core::error::Error::Other(format!(
-                        "Convergence failed after {} iterations at {:.2} hours",
-                        solve_count * mgr.settings.max_iterations,
+                        "Convergence failed with splitting factor {} at {:.2} hours",
+                        split_factor,
                         (current_time / hours).value()
                     ))
                     .into());
                 }
+
+                split_factor += 1;
             }
 
             if let Some(sim_day) = simulation_durations_days
@@ -442,7 +465,6 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
             }
 
             current_time += settings.timestep;
-
             mgr.tick_timestep()?;
         }
     }

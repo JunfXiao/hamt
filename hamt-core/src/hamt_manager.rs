@@ -7,12 +7,12 @@ use crate::physics::R_V;
 use crate::physics::geometry::{Pt3D, Size3D};
 use crate::surface::Surface;
 use crate::uom::dimensions::{Power, Temperature, Time};
-use crate::uom::units::{dimensionless, hours, kelvin, kg_per_m2_s_pa};
+use crate::uom::units::{dimensionless, hours, kelvin, kg_per_m2_s_pa, seconds};
 use crate::{physics, uom};
 use anyhow::{Context, Result};
 use std::mem;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use uom::dimensions::Area;
 use uom::dimensions::Length;
 use uom::units;
@@ -101,9 +101,13 @@ impl HamtManager {
                 self.boundary_condition.mass_convection_coeff_int
                     / (R_V * self.boundary_condition.temp_inside_air);
         }
+        // Previous stats for adaptive time stepping
+
         let mut stats = ConvergenceStats::default();
 
+
         for _ in 0..self.settings.max_iterations {
+
             self.surface_next.calculate_iteration(
                 &self.settings,
                 &self.boundary_condition,
@@ -112,6 +116,7 @@ impl HamtManager {
             )?;
 
             stats = convergence_stats(&self.surface_next, &self.surface_curr, &self.settings);
+
 
             mem::swap(&mut self.surface_curr, &mut self.surface_next);
 
@@ -126,6 +131,7 @@ impl HamtManager {
                 return Ok(true); // Converged
             }
         }
+
 
         warn!(
             max_delta_t_k = stats.max_delta_t_k,
@@ -151,6 +157,7 @@ impl HamtManager {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct ConvergenceStats {
     converged: bool,
     rh_converged: bool,
@@ -171,6 +178,7 @@ impl Default for ConvergenceStats {
         }
     }
 }
+
 
 fn convergence_stats(
     surface_curr: &Surface,
