@@ -171,7 +171,7 @@ impl TrnSysType {
     pub fn update_output(&self, state: &mut TrnSysState, write_file: bool) -> Result<()> {
         let report_row = if let Some(manager) = &mut state.hamt_manager {
             // Map outputs
-            let report = manager.surface_next.report()?;
+            let report = manager.surface_next.report(&manager.boundary_condition)?;
             let outputs = [
                 kelvin_to_celsius(report.temp_surf_out),
                 kelvin_to_celsius(report.temp_surf_in),
