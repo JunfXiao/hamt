@@ -365,15 +365,21 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         println!("Preheating to reach stable...");
 
         let mut preheat_time: Time<f64> = 0.0 * hours;
-        while !mgr.solve_timestep()? || preheat_time < 100.0 * hours {
-            preheat_time += time_step;
+        while preheat_time < 100.0 * hours {
+            if !mgr.solve_timestep()? {
+                return Err(hamt_core::error::Error::Other(
+                    "Preheating failed: timestep did not converge".to_string(),
+                )
+                .into());
+            }
+            preheat_time += mgr.settings.timestep;
+            mgr.tick_timestep()?;
             if preheat_time > 24.0 * 30.0 * hours {
                 return Err(hamt_core::error::Error::Other(
                     "Preheating failed: Exceeded maximum preheat time".to_string(),
                 )
                 .into());
             }
-            preheat_time += settings.timestep;
         }
 
         println!(
@@ -450,11 +456,14 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                 split_factor += 1;
             }
 
+            let actual_step = mgr.settings.timestep;
+            current_time += actual_step;
+
             if let Some(sim_day) = simulation_durations_days
                 .iter()
                 .filter(|duration| {
                     (duration.value_in(hours) - &current_time.value_in(hours)).abs()
-                        <= settings.timestep.value_in(hours) * 0.5
+                        <= actual_step.value_in(hours) * 0.5
                 })
                 .next()
             {
@@ -464,7 +473,6 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                 write_time = true;
             }
 
-            current_time += settings.timestep;
             mgr.tick_timestep()?;
         }
     }
