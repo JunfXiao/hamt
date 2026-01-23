@@ -23,6 +23,7 @@ use std::fs::File;
 use std::ops::Div;
 use std::path::PathBuf;
 use std::sync::Once;
+use std::time::Instant;
 use tempfile;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
@@ -265,12 +266,12 @@ fn spec_heat_capacity() -> SpecificHeatCapacity<f64> {
 const MAT_NAME: &str = "DIN EN 15026 Mat";
 const CONSTRUCTION_NAME: &str = "DIN EN 15026 Construction";
 
-fn create_library(init_temp_celsius: f64, init_rh: f64) -> MaterialLibrary {
+fn create_library(init_temp_celsius: f64, init_rh: f64, thickness: f64) -> MaterialLibrary {
     let thermal_conductivity = get_thermal_conductivity_curve();
     let sorption_isotherm = get_sorption_isotherm_curve();
     let material = Material {
         name: MAT_NAME.to_string(),
-        thickness: 10.0 * meter,
+        thickness: thickness * meter,
         density: rho_mat(),
         thermal_conductivity: thermal_conductivity,
         spec_heat: spec_heat_capacity(),
@@ -301,19 +302,22 @@ fn create_library(init_temp_celsius: f64, init_rh: f64) -> MaterialLibrary {
 }
 
 fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
+    let start_time = Instant::now();
+
     init_tracing();
 
-    let library = create_library(20.0, 0.5);
+    let library = create_library(20.0, 0.5, 10.0);
     let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
 
     let mut settings = HamtSettings::default();
+    const MAX_ITERATIONS: usize = 5000;
     settings.timestep = time_step;
-    settings.max_iterations = 500;
+    settings.max_iterations = 100;
     settings.temp_convergence_tolerance = 1e-6 * kelvin;
     settings.rh_convergence_tolerance = 1e-4;
-    settings.max_div = 250;
+    settings.max_div = 300;
     settings.min_div = 50;
-    settings.div_length = 1e-5 * meter;
+    settings.div_length = 1e-7 * meter;
 
     let boundary_coeff = BoundaryCondition {
         heat_transfer_coeff_ext: 1e100 * w_per_m2_k,
@@ -394,10 +398,14 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         let mut current_time: Time<f64> = 0.0 * hours;
         while current_time <= end_time {
             if write_time {
-                print!("\nTime={:.2} hours", (current_time / hours).value());
+                println!("");
                 write_time = false;
             }
-            print!("\rTime={:.2} hours", (current_time / hours).value());
+            print!(
+                "\rTime={:.2} hours, Run time: {} seconds ",
+                (current_time / hours).value(),
+                start_time.elapsed().as_secs()
+            );
             let mut solve_count = 0;
             // Solving the timestep
             while !mgr.solve_timestep()? {
@@ -409,10 +417,10 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                     solve_count * mgr.settings.max_iterations
                 );
 
-                if solve_count > 300 {
+                if solve_count > (MAX_ITERATIONS / 100) as i32 {
                     return Err(hamt_core::error::Error::Other(format!(
                         "Convergence failed after {} iterations at {:.2} hours",
-                        solve_count,
+                        solve_count * mgr.settings.max_iterations,
                         (current_time / hours).value()
                     ))
                     .into());

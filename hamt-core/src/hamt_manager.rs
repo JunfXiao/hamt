@@ -101,7 +101,7 @@ impl HamtManager {
                 self.boundary_condition.mass_convection_coeff_int
                     / (R_V * self.boundary_condition.temp_inside_air);
         }
-
+        let mut stats = convergence_stats(&self.surface_curr, &self.surface_next, &self.settings);
         for _ in 0..self.settings.max_iterations {
             self.surface_next.calculate_iteration(
                 &self.settings,
@@ -110,9 +110,10 @@ impl HamtManager {
                 &self.surface_curr,
             )?;
 
+            stats = convergence_stats(&self.surface_next, &self.surface_prev, &self.settings);
+
             mem::swap(&mut self.surface_curr, &mut self.surface_next);
 
-            let stats = convergence_stats(&self.surface_curr, &self.surface_next, &self.settings);
             if stats.converged {
                 if !stats.rh_converged {
                     warn!(
@@ -125,7 +126,6 @@ impl HamtManager {
             }
         }
 
-        let stats = convergence_stats(&self.surface_curr, &self.surface_next, &self.settings);
         warn!(
             max_delta_t_k = stats.max_delta_t_k,
             max_delta_rh = stats.max_delta_rh,

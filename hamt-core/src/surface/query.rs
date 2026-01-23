@@ -3,7 +3,10 @@ use crate::{
     physics::ECLIPSE,
     uom::{
         Dimension, Quantity,
-        dimensions::{Density, Pressure},
+        dimensions::{
+            Density, HeatTransferCoeff, Pressure, ThermalConductivity, ThermalResistance,
+            VaporResistance,
+        },
         units::square_meter,
     },
 };
@@ -167,7 +170,7 @@ impl Surface {
         }
     }
 
-    /// Calculates the heat flux across the surface boundary.
+    /// Calculates the heat flux across the surface boundary (environment -> surface).
     ///
     /// ## Input
     /// - `location`: boundary location (exterior or interior).
@@ -175,40 +178,45 @@ impl Surface {
     /// ## Output
     /// - `avg_flux`: average heat flux across the surface boundary [W/m²].
     pub fn heat_flux(&self, location: BoundaryLocation) -> Result<EnergyFlux<f64>> {
-        // Find the Virtual Cell (Surface Node)
-        // We expect exactly one virtual cell column per location in this 1D model
-        let v_idx = self
-            .virtual_cells(location.clone())
-            .next()
-            .with_context(|| format!("No virtual cell found for location {:?}", location))?;
-        let v = &self.cells[*v_idx];
-
-        // Total Heat Flux in W/m² (Sum of parallel paths: Convection + Radiation + etc.)
         let mut total_flux = Quantity(0.0);
+        let mut total_area = Quantity(0.0);
 
-        // Iterate over all cells that are Boundary cells at this location
-        for (ctype, idxs) in &self.cells_idx_map {
-            if let CellType::Boundary(_, loc) = ctype {
-                if *loc == location {
-                    for idx in idxs {
-                        let b = &self.cells[*idx];
-                        
-                        // Flux = h * (T_b - T_v)
-                        // htc comes from the Boundary cell (e.g., ExtCon, ExtRad)
-                        let htc = b.htc;
-                        if htc > Quantity(ECLIPSE) {
-                            let delta_t = b.cell_temp - v.cell_temp;
-                            total_flux += htc * delta_t;
-                        }
+        let boundary_convection_idx =
+            self.cells_idx_map
+                .iter()
+                .find_map(|(ctype, idxs)| match ctype {
+                    CellType::Boundary(Boundary::Convection, loc) if *loc == location => {
+                        idxs.first().copied()
                     }
-                }
+                    _ => None,
+                });
+
+        let boundary_cell = boundary_convection_idx
+            .and_then(|idx| self.cells.get(idx))
+            .with_context(|| "No boundary convection cell found for surface heat flux")?;
+
+        for idx in self.virtual_cells(location.clone()) {
+            let surf = self
+                .cells
+                .get(*idx)
+                .with_context(|| format!("Failed to get virtual cell {:?}", idx))?;
+            let delta_t = boundary_cell.cell_temp - surf.cell_temp;
+            let htc = boundary_cell.htc;
+            let cell_area = surf.size.area_along(0);
+            if htc > Quantity(ECLIPSE) {
+                total_flux += htc * delta_t * cell_area;
+                total_area += cell_area;
             }
         }
 
-        Ok(total_flux)
+        Ok(if total_area > Quantity(ECLIPSE) {
+            total_flux / total_area
+        } else {
+            Quantity(0.0)
+        })
     }
 
-    /// Calculate the average moisture flux across the surface boundary.
+    /// Calculate the average moisture flux across the surface boundary (environment -> surface).
     ///
     /// Units:
     /// - `vtc`: vapor transfer coefficient [kg/(m²·s·Pa)] (boundary override or cell.vtc).
@@ -223,37 +231,56 @@ impl Surface {
     pub fn moisture_flux(
         &self,
         location: BoundaryLocation,
-        _bc: &BoundaryCondition,
+        bc: &BoundaryCondition,
     ) -> Result<MassFlux<f64>> {
-        // Find the Virtual Cell (Surface Node)
-        let v_idx = self
-            .virtual_cells(location.clone())
-            .next()
-            .with_context(|| format!("No virtual cell found for location {:?}", location))?;
-        let v = &self.cells[*v_idx];
+        let mut accum_flux: MassFlux<f64> = Quantity(0.0);
+        let mut total_area = 0.0;
 
-        let mut total_flux = Quantity(0.0);
-
-        // Iterate over all cells that are Boundary cells at this location (usually just Convection)
-        for (ctype, idxs) in &self.cells_idx_map {
-            if let CellType::Boundary(_, loc) = ctype {
-                if *loc == location {
-                    for idx in idxs {
-                        let b = &self.cells[*idx];
-                        
-                        // Flux = beta * (P_b - P_v)
-                        // vtc comes from the Boundary cell
-                        let vtc = b.vtc;
-                        if vtc > Quantity(0.0) {
-                            let delta_vp = b.cell_vp - v.cell_vp;
-                            total_flux += vtc * delta_vp;
-                        }
+        let boundary_convection_idx =
+            self.cells_idx_map
+                .iter()
+                .find_map(|(ctype, idxs)| match ctype {
+                    CellType::Boundary(Boundary::Convection, loc) if *loc == location => {
+                        idxs.first().copied()
                     }
-                }
+                    _ => None,
+                });
+
+        let boundary_cell = boundary_convection_idx
+            .and_then(|idx| self.cells.get(idx))
+            .with_context(|| "No boundary convection cell found for surface moisture flux")?;
+
+        let vtc_from_bc: VaporTransportCoeff<f64> = match &location {
+            BoundaryLocation::Exterior => bc.vapor_transport_coeff_ext,
+            BoundaryLocation::Interior => bc.vapor_transport_coeff_int,
+        };
+
+        let vtc = if boundary_cell.vtc > Quantity(ECLIPSE) {
+            boundary_cell.vtc
+        } else {
+            vtc_from_bc
+        };
+
+        for idx in self.virtual_cells(location.clone()) {
+            let surf = self
+                .cells
+                .get(*idx)
+                .with_context(|| format!("Failed to get virtual cell {:?}", idx))?;
+
+            let delta_vp: Pressure<f64> = boundary_cell.cell_vp - surf.cell_vp;
+            let cell_area: f64 = surf.size.area_along(0).value_in(square_meter);
+
+            if vtc > Quantity(ECLIPSE) {
+                accum_flux += vtc * delta_vp * cell_area;
+                total_area += cell_area;
             }
         }
 
-        Ok(total_flux)
+        Ok(if total_area > 0.0 {
+            accum_flux / total_area
+        } else {
+            Quantity(0.0)
+        })
     }
 
     /// Checks the maximum change in temperature and RH across cells for convergence.
@@ -291,5 +318,78 @@ impl Surface {
         }
 
         true
+    }
+
+    /// Calculate thermal and vapor resistance between two cells.
+    ///
+    /// # Returns
+    /// A tuple containing the thermal and vapor resistances.
+    /// - Thermal resistance [m²K/W] // TODO Check Unit
+    /// - Vapor resistance [m²Pa/W] // TODO Check Unit
+    pub fn calculate_resistance_pair(
+        cell1: &Cell,
+        cell2: &Cell,
+        pressure_air: Pressure<f64>,
+    ) -> (ThermalResistance<f64>, VaporResistance<f64>) {
+        let overlap: Area<f64> = Quantity(
+            cell1
+                .size
+                .area_along(0)
+                .value_unchecked()
+                .min(cell2.size.area_along(0).value_unchecked()),
+        );
+        let dist1 = cell1.size.x().abs() * 0.5;
+        let dist2 = cell2.size.x().abs() * 0.5;
+
+        if overlap <= Quantity(ECLIPSE) || dist1 <= Quantity(ECLIPSE) || dist2 <= Quantity(ECLIPSE)
+        {
+            tracing::warn!(
+                "calc_resistance_pair: degenerate geometry overlap={:?}, dist1={:?}, dist2={:?}, cell1={:?}, cell2={:?}",
+                overlap,
+                dist1,
+                dist2,
+                cell1.cell_type,
+                cell2.cell_type
+            );
+            return (Quantity(0.0), Quantity(0.0));
+        }
+
+        let htc1 = cell1.htc;
+        let k1 = cell1.w_thermal_c;
+        let thermr1: ThermalResistance<f64> = if htc1 > HeatTransferCoeff::<f64>::zero() {
+            1.0 / (htc1 * overlap)
+        } else if k1 > ThermalConductivity::<f64>::zero() {
+            dist1 / (k1 * overlap)
+        } else {
+            Quantity(0.0)
+        };
+        let htc2 = cell2.htc;
+        let k2 = cell2.w_thermal_c;
+        let thermr2: ThermalResistance<f64> = if htc2 > HeatTransferCoeff::<f64>::zero() {
+            1.0 / (htc2 * overlap)
+        } else if k2 > ThermalConductivity::<f64>::zero() {
+            dist2 / (k2 * overlap)
+        } else {
+            Quantity(0.0)
+        };
+
+        let vtc1 = cell1.vtc;
+        let vaporr1: VaporResistance<f64> = if vtc1 > VaporTransportCoeff::<f64>::zero() {
+            1.0 / (overlap * vtc1)
+        } else if cell1.mu > Quantity(ECLIPSE) {
+            (dist1 * cell1.mu) / (overlap * physics::wvdc(cell1.cell_temp, pressure_air))
+        } else {
+            Quantity(0.0)
+        };
+        let vtc2 = cell2.vtc;
+        let vaporr2: VaporResistance<f64> = if vtc2 > VaporTransportCoeff::<f64>::zero() {
+            1.0 / (overlap * vtc2)
+        } else if cell2.mu > Quantity(ECLIPSE) {
+            (dist2 * cell2.mu) / (overlap * physics::wvdc(cell2.cell_temp, pressure_air))
+        } else {
+            Quantity(0.0)
+        };
+
+        (thermr1 + thermr2, vaporr1 + vaporr2)
     }
 }
