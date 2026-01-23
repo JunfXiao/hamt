@@ -312,7 +312,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
     let mut settings = HamtSettings::default();
     const MAX_ITERATIONS: usize = 5000;
     settings.timestep = time_step;
-    settings.max_iterations = 100;
+    settings.max_iterations = 1000;
     settings.temp_convergence_tolerance = 1e-6 * kelvin;
     settings.rh_convergence_tolerance = 1e-4;
     settings.max_div = 300;
@@ -417,7 +417,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                     solve_count * mgr.settings.max_iterations
                 );
 
-                if solve_count > (MAX_ITERATIONS / 100) as i32 {
+                if solve_count > (MAX_ITERATIONS as i32 / (mgr.settings.max_iterations)) {
                     return Err(hamt_core::error::Error::Other(format!(
                         "Convergence failed after {} iterations at {:.2} hours",
                         solve_count * mgr.settings.max_iterations,
