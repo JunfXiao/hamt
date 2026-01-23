@@ -62,7 +62,7 @@ impl Surface {
     }
 
     /// Update dependent cell properties based on the current iteration's Temp and RH.
-    fn update_cell_properties(
+    pub fn update_cell_properties(
         &mut self,
         bc: &BoundaryCondition,
         settings: &HamtSettings,
