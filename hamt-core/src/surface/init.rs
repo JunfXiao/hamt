@@ -16,7 +16,6 @@ impl Surface {
         area: Area<f64>,
         construction_name: String,
         cells: ArcArray3<Cell>,
-        init_boundary_condition: &BoundaryCondition,
         settings: &HamtSettings,
     ) -> Self {
         let mut surface = Surface {
@@ -25,10 +24,6 @@ impl Surface {
             area,
             cells,
             cells_idx_map: HashMap::new(),
-            ext_vtc: init_boundary_condition.vapor_transport_coeff_ext,
-            int_vtc: init_boundary_condition.vapor_transport_coeff_int,
-            ext_htc: init_boundary_condition.heat_transfer_coeff_ext,
-            int_htc: init_boundary_condition.heat_transfer_coeff_int,
             user_defined_depth: settings.user_defined_depth,
             user_defined_cell_idx: None,
         };
@@ -172,7 +167,6 @@ impl Surface {
             surface_area,
             construction.name.clone(),
             cells_3d,
-            init_boundary_condition,
             settings,
         );
 

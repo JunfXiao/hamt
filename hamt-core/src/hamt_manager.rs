@@ -3,6 +3,7 @@
 use crate::boundary::BoundaryCondition;
 use crate::cell::CellType;
 use crate::material::{Construction, Material};
+use crate::physics::R_V;
 use crate::physics::geometry::{Pt3D, Size3D};
 use crate::surface::Surface;
 use crate::uom::dimensions::{Power, Temperature, Time};
@@ -11,7 +12,7 @@ use crate::{physics, uom};
 use anyhow::{Context, Result};
 use std::mem;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use uom::dimensions::Area;
 use uom::dimensions::Length;
 use uom::units;
@@ -91,29 +92,17 @@ impl HamtManager {
     pub fn solve_timestep(&mut self) -> Result<bool> {
         // Reapply surface vapor coefficients if not using constnat value
         if !self.construction.surface_vapor_coef.is_external_const {
-            let rh = self.boundary_condition.rh_outside_air;
-            if rh > 0.0 * dimensionless {
-                let rho_v = physics::vd_from_t_rh(self.boundary_condition.temp_outside_air, rh);
-                let psat = physics::psy_psat_fn_temp(self.boundary_condition.temp_outside_air);
-                self.boundary_condition.vapor_transport_coeff_ext =
-                    self.boundary_condition.mass_convection_coeff_ext * rho_v / (psat * rh);
-            } else {
-                self.boundary_condition.vapor_transport_coeff_ext = 0.0 * kg_per_m2_s_pa;
-            }
+            self.boundary_condition.vapor_transport_coeff_ext =
+                self.boundary_condition.mass_convection_coeff_ext
+                    / (R_V * self.boundary_condition.temp_outside_air);
         }
         if !self.construction.surface_vapor_coef.is_internal_const {
-            let rh = self.boundary_condition.rh_inside_air;
-            if rh > 0.0 * dimensionless {
-                let rho_v = physics::vd_from_t_rh(self.boundary_condition.temp_inside_air, rh);
-                let psat = physics::psy_psat_fn_temp(self.boundary_condition.temp_inside_air);
-                self.boundary_condition.vapor_transport_coeff_int =
-                    self.boundary_condition.mass_convection_coeff_int * rho_v / (psat * rh);
-            } else {
-                self.boundary_condition.vapor_transport_coeff_int = 0.0 * kg_per_m2_s_pa;
-            }
+            self.boundary_condition.vapor_transport_coeff_int =
+                self.boundary_condition.mass_convection_coeff_int
+                    / (R_V * self.boundary_condition.temp_inside_air);
         }
 
-        for iter in 0..self.settings.max_iterations {
+        for _ in 0..self.settings.max_iterations {
             self.surface_next.calculate_iteration(
                 &self.settings,
                 &self.boundary_condition,

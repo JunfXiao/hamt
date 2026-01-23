@@ -49,10 +49,6 @@ impl Surface {
 
     /// Copy the current iteration state into `surface_next` before property updates.
     pub fn sync_state_from(&mut self, surface_curr: &Surface) -> Result<()> {
-        self.ext_vtc = surface_curr.ext_vtc;
-        self.int_vtc = surface_curr.int_vtc;
-        self.ext_htc = surface_curr.ext_htc;
-        self.int_htc = surface_curr.int_htc;
 
         for (cell, ref_cell) in self.cells.iter_mut().zip(surface_curr.cells.iter()) {
             *cell = ref_cell.clone();

@@ -3,8 +3,6 @@
 //! This defines the base and derived dimensions/units commonly needed by the
 //! hygrothermal solver, plus a few domain-specific constants in SI.
 
-use std::ops::Div;
-
 use diman::unit_system;
 
 unit_system!(

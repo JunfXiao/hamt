@@ -1,5 +1,6 @@
 //! Handles reading and parsing of the HAMT material and construction data file.
 
+use strum::EnumString;
 use tracing::warn;
 
 use crate::error::{self, Error, InvalidInputReason};
@@ -14,16 +15,25 @@ use std::path::Path;
 use std::str::FromStr;
 
 /// Enum defining the expected properties in the IDF file.
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, EnumString)]
 pub enum HamtProperty {
+    #[strum(serialize = "Material")]
     Material,
+    #[strum(serialize = "MaterialProperty:HeatAndMoistureTransfer:Settings")]
     Settings,
+    #[strum(serialize = "MaterialProperty:HeatAndMoistureTransfer:SorptionIsotherm")]
     SorptionIsotherm,
+    #[strum(serialize = "MaterialProperty:HeatAndMoistureTransfer:Suction")]
     Suction,
+    #[strum(serialize = "MaterialProperty:HeatAndMoistureTransfer:Redistribution")]
     Redistribution,
+    #[strum(serialize = "MaterialProperty:HeatAndMoistureTransfer:Diffusion")]
     Diffusion,
+    #[strum(serialize = "MaterialProperty:HeatAndMoistureTransfer:ThermalConductivity")]
     ThermalConductivity,
+    #[strum(serialize = "Construction")]
     Construction,
+    #[strum(serialize = "SurfaceProperties:VaporCoefficients")]
     SurfaceVaporCoefs,
 }
 
@@ -34,43 +44,6 @@ enum LengthSpec {
 }
 
 impl HamtProperty {
-    /// Maps a keyword string to the Enum variant.
-    fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "Material" => Some(Self::Material),
-            "MaterialProperty:HeatAndMoistureTransfer:Settings" => Some(Self::Settings),
-            "MaterialProperty:HeatAndMoistureTransfer:SorptionIsotherm" => {
-                Some(Self::SorptionIsotherm)
-            }
-            "MaterialProperty:HeatAndMoistureTransfer:Suction" => Some(Self::Suction),
-            "MaterialProperty:HeatAndMoistureTransfer:Redistribution" => Some(Self::Redistribution),
-            "MaterialProperty:HeatAndMoistureTransfer:Diffusion" => Some(Self::Diffusion),
-            "MaterialProperty:HeatAndMoistureTransfer:ThermalConductivity" => {
-                Some(Self::ThermalConductivity)
-            }
-            "Construction" => Some(Self::Construction),
-            "SurfaceProperties:VaporCoefficients" => Some(Self::SurfaceVaporCoefs),
-            _ => None,
-        }
-    }
-
-    /// Returns the string representation of the property.
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Material => "Material",
-            Self::Settings => "MaterialProperty:HeatAndMoistureTransfer:Settings",
-            Self::SorptionIsotherm => "MaterialProperty:HeatAndMoistureTransfer:SorptionIsotherm",
-            Self::Suction => "MaterialProperty:HeatAndMoistureTransfer:Suction",
-            Self::Redistribution => "MaterialProperty:HeatAndMoistureTransfer:Redistribution",
-            Self::Diffusion => "MaterialProperty:HeatAndMoistureTransfer:Diffusion",
-            Self::ThermalConductivity => {
-                "MaterialProperty:HeatAndMoistureTransfer:ThermalConductivity"
-            }
-            Self::Construction => "Construction",
-            Self::SurfaceVaporCoefs => "SurfaceProperties:VaporCoefficients",
-        }
-    }
-
     /// Returns the expected parameter length (excluding property keyword and name).
     fn length_spec(&self) -> LengthSpec {
         match self {
@@ -340,8 +313,8 @@ fn parse_idf_content(content: &str) -> Result<HashMap<(HamtProperty, String), Ve
         let params = tokens[2..].to_vec();
 
         let property = match HamtProperty::from_str(prop_str) {
-            Some(p) => p,
-            None => {
+            Ok(p) => p,
+            Err(_) => {
                 warn!("Unknown Keyword: {}", prop_str);
                 continue;
             }

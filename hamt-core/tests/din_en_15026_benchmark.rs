@@ -4,9 +4,7 @@
 //! Test suite for the DIN EN 15026 analytical benchmark (Annex B).
 use anyhow::{Ok, Result};
 use hamt_core::boundary::{BoundaryCondition, celsius_to_kelvin, kelvin_to_celsius};
-use hamt_core::cell::{BoundaryLocation, Cell, CellType};
 use hamt_core::hamt_manager::{HamtManager, HamtSettings};
-use hamt_core::io::load_hamt_by_path;
 use hamt_core::material::{Curve, Material, MaterialLibrary, SurfaceVaporCoef};
 use hamt_core::surface::Surface;
 use hamt_core::uom::dimensions::{
@@ -113,6 +111,9 @@ fn water_sat() -> Quantity<f64, DIM_WATER_CONTENT> {
     146.0 * kg_per_m3
 }
 
+const INTERPOLATION_POINTS: usize = 100;
+const INTERPOLATION_DELTA: f64 = 0.05;
+
 fn curve_by_func<const DX: Dimension, const DY: Dimension>(
     func: fn(Quantity<f64, DX>) -> Quantity<f64, DY>,
     x_range: (Quantity<f64, DX>, Quantity<f64, DX>),
@@ -181,9 +182,10 @@ fn interpolate_data_points(
 }
 
 fn get_sorption_isotherm_curve() -> Curve<DIM_DIMENSIONLESS, DIM_WATER_CONTENT> {
-    let mut x_values: Vec<_> = interpolate_data_points(0.0, 1.0, 15, 0.4)
-        .map(|v| v * dimensionless)
-        .collect();
+    let mut x_values: Vec<_> =
+        interpolate_data_points(0.0, 1.0, INTERPOLATION_POINTS, INTERPOLATION_DELTA)
+            .map(|v| v * dimensionless)
+            .collect();
 
     if let Some(last) = x_values.last_mut() {
         *last = 1.0 * dimensionless;
@@ -194,9 +196,10 @@ fn get_sorption_isotherm_curve() -> Curve<DIM_DIMENSIONLESS, DIM_WATER_CONTENT> 
 
 // The RH - $mu$ curve
 fn get_vapor_diffusion_curve() -> Curve<DIM_DIMENSIONLESS, DIM_DIMENSIONLESS> {
-    let x_values: Vec<_> = interpolate_data_points(0.0, 1.0, 15, 0.4)
-        .map(|v| v * dimensionless)
-        .collect();
+    let x_values: Vec<_> =
+        interpolate_data_points(0.0, 1.0, INTERPOLATION_POINTS, INTERPOLATION_DELTA)
+            .map(|v| v * dimensionless)
+            .collect();
 
     curve_by_func_and_x_values(
         |x: Dimensionless<f64>| {
@@ -210,7 +213,7 @@ fn get_vapor_diffusion_curve() -> Curve<DIM_DIMENSIONLESS, DIM_DIMENSIONLESS> {
 
 fn get_thermal_conductivity_curve() -> Curve<DIM_WATER_CONTENT, DIM_THERMAL_CONDUCTIVITY> {
     let x_range = (0.0 * water_sat(), 1.0 * water_sat());
-    let delta = 0.05 * water_sat();
+    let delta = 0.01 * water_sat();
     curve_by_func(
         |x: Density<f64>| (1.5 + 15.8e-3 * x.value_in(kg_per_m3)) * w_per_m_k,
         x_range,
@@ -219,10 +222,14 @@ fn get_thermal_conductivity_curve() -> Curve<DIM_WATER_CONTENT, DIM_THERMAL_COND
 }
 
 fn get_liquid_transport_coeff_curve() -> Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF> {
-    let x_values: Vec<WaterContent<f64>> =
-        interpolate_data_points(0.0, water_sat().value_in(kg_per_m3), 15, 0.3)
-            .map(|x| x * kg_per_m3)
-            .collect();
+    let x_values: Vec<WaterContent<f64>> = interpolate_data_points(
+        0.0,
+        water_sat().value_in(kg_per_m3),
+        INTERPOLATION_POINTS,
+        INTERPOLATION_DELTA,
+    )
+    .map(|x| x * kg_per_m3)
+    .collect();
 
     curve_by_func_and_x_values(
         |x: WaterContent<f64>| {
@@ -258,7 +265,7 @@ fn spec_heat_capacity() -> SpecificHeatCapacity<f64> {
 const MAT_NAME: &str = "DIN EN 15026 Mat";
 const CONSTRUCTION_NAME: &str = "DIN EN 15026 Construction";
 
-fn create_library() -> MaterialLibrary {
+fn create_library(init_temp_celsius: f64, init_rh: f64) -> MaterialLibrary {
     let thermal_conductivity = get_thermal_conductivity_curve();
     let sorption_isotherm = get_sorption_isotherm_curve();
     let material = Material {
@@ -268,20 +275,20 @@ fn create_library() -> MaterialLibrary {
         thermal_conductivity: thermal_conductivity,
         spec_heat: spec_heat_capacity(),
         porosity: water_sat() / rho_w(),
-        initial_water_content: sorption_isotherm.interpolate(0.5 * dimensionless).0 / rho_mat(), // Initial RH: 50%
+        initial_water_content: sorption_isotherm.interpolate(init_rh * dimensionless).0 / rho_mat(), // Initial RH: 50%
         suction: get_liquid_transport_coeff_curve(),
         redistribution: get_liquid_transport_coeff_curve(),
         sorption_isotherm: sorption_isotherm,
         vapor_diffusion_resistance: get_vapor_diffusion_curve(),
-        initial_temp: celsius_to_kelvin(20.0), // Initial temperature: 20°C
+        initial_temp: celsius_to_kelvin(init_temp_celsius), // Initial temperature: 20°C
     };
     let lib = MaterialLibrary::new();
     let mat = lib.add_material(material).expect("Cannot add material.");
     let surface_coeff = SurfaceVaporCoef {
-        is_external_const: true,
-        external_value: 1e10,
-        internal_value: 1e10,
-        is_internal_const: true,
+        is_external_const: false,
+        external_value: 0.0,
+        internal_value: 0.0,
+        is_internal_const: false,
     };
     lib.create_construction(
         CONSTRUCTION_NAME.to_string(),
@@ -296,25 +303,25 @@ fn create_library() -> MaterialLibrary {
 fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
     init_tracing();
 
-    let library = create_library();
+    let library = create_library(20.0, 0.5);
     let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
 
     let mut settings = HamtSettings::default();
     settings.timestep = time_step;
     settings.max_iterations = 500;
-    settings.temp_convergence_tolerance = 1e-4 * kelvin;
+    settings.temp_convergence_tolerance = 1e-6 * kelvin;
     settings.rh_convergence_tolerance = 1e-4;
-    settings.max_div = 80;
+    settings.max_div = 250;
     settings.min_div = 50;
-    settings.div_length = 1e-6 * meter;
+    settings.div_length = 1e-5 * meter;
 
     let boundary_coeff = BoundaryCondition {
-        heat_transfer_coeff_ext: 1e10 * w_per_m2_k,
-        heat_transfer_coeff_int: 1e10 * w_per_m2_k,
-        mass_convection_coeff_ext: 1e10 * m_per_s,
-        mass_convection_coeff_int: 1e10 * m_per_s,
-        vapor_transport_coeff_ext: 1e10 * kg_per_m2_s_pa,
-        vapor_transport_coeff_int: 1e10 * kg_per_m2_s_pa,
+        heat_transfer_coeff_ext: 1e100 * w_per_m2_k,
+        heat_transfer_coeff_int: 1e100 * w_per_m2_k,
+        mass_convection_coeff_ext: 1e100 * m_per_s,
+        mass_convection_coeff_int: 1e100 * m_per_s,
+        vapor_transport_coeff_ext: 1e100 * kg_per_m2_s_pa,
+        vapor_transport_coeff_int: 1e100 * kg_per_m2_s_pa,
         ..Default::default()
     };
 
@@ -345,17 +352,6 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
 
     println!("Cell Count: {}", mgr.surface_curr.cells.len());
 
-    let initial_temp = celsius_to_kelvin(20.0);
-    let initial_rh = 0.50 * dimensionless;
-    for cell in mgr.surface_curr.cells.iter_mut() {
-        cell.cell_temp = initial_temp;
-        cell.cell_rh = initial_rh;
-    }
-    for cell in mgr.surface_prev.cells.iter_mut() {
-        cell.cell_temp = initial_temp;
-        cell.cell_rh = initial_rh;
-    }
-
     let simulation_durations_days: [Time<f64>; 3] = [7.0 * days, 30.0 * days, 365.0 * days];
 
     {
@@ -364,7 +360,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         println!("Preheating to reach stable...");
 
         let mut preheat_time: Time<f64> = 0.0 * hours;
-        while !mgr.solve_timestep()? || preheat_time < 10.0 * hours {
+        while !mgr.solve_timestep()? || preheat_time < 100.0 * hours {
             preheat_time += time_step;
             if preheat_time > 24.0 * 30.0 * hours {
                 return Err(hamt_core::error::Error::Other(
@@ -563,17 +559,19 @@ fn compare_results(surface: &Surface, duration_day: i32) {
 }
 
 #[test]
+// #[ignore = "Please manually test the DIN EN 15026 benchmark"]
 fn test_din_en_15026_timestep_1h() -> Result<()> {
     run_benchmark_test(1.0 * hours)
 }
 
 #[test]
-
+// #[ignore = "Please manually test the DIN EN 15026 benchmark"]
 fn test_din_en_15026_timestep_0_5h() -> Result<()> {
     run_benchmark_test(0.5 * hours)
 }
 
 #[test]
+// #[ignore = "Please manually test the DIN EN 15026 benchmark"]
 fn test_din_en_15026_timestep_0_1h() -> Result<()> {
     run_benchmark_test(0.1 * hours)
 }

@@ -1,4 +1,5 @@
 use crate::{
+    cell::Boundary,
     physics::ECLIPSE,
     uom::{
         Dimension, Quantity,
@@ -17,7 +18,7 @@ impl Surface {
     }
 
     /// Compute all reporting values on demand.
-    pub fn report(&self) -> Result<SurfaceReport> {
+    pub fn report(&self, bc: &BoundaryCondition) -> Result<SurfaceReport> {
         let temp_surf_out = self
             .avg_virtual_cell(BoundaryLocation::Exterior, |c| c.cell_temp)
             .with_context(|| "Failed to calculate exterior surface temperature")?;
@@ -41,10 +42,10 @@ impl Surface {
             .heat_flux(BoundaryLocation::Interior)
             .with_context(|| "Failed to calculate interior surface heat flux")?;
         let m_surf_ext = self
-            .moisture_flux(BoundaryLocation::Exterior)
+            .moisture_flux(BoundaryLocation::Exterior, bc)
             .with_context(|| "Failed to calculate exterior surface moisture flux")?;
         let m_surf_int = self
-            .moisture_flux(BoundaryLocation::Interior)
+            .moisture_flux(BoundaryLocation::Interior, bc)
             .with_context(|| "Failed to calculate interior surface moisture flux")?;
 
         let water_total: Mass<f64> = self
@@ -174,46 +175,37 @@ impl Surface {
     /// ## Output
     /// - `avg_flux`: average heat flux across the surface boundary [W/m²].
     pub fn heat_flux(&self, location: BoundaryLocation) -> Result<EnergyFlux<f64>> {
-        // Total Heat Flux in W
+        // Find the Virtual Cell (Surface Node)
+        // We expect exactly one virtual cell column per location in this 1D model
+        let v_idx = self
+            .virtual_cells(location.clone())
+            .next()
+            .with_context(|| format!("No virtual cell found for location {:?}", location))?;
+        let v = &self.cells[*v_idx];
+
+        // Total Heat Flux in W/m² (Sum of parallel paths: Convection + Radiation + etc.)
         let mut total_flux = Quantity(0.0);
-        let mut total_area = Quantity(0.0);
 
-        for idx in self.virtual_cells(location.clone()) {
-            if let Some(n_idx) = self.neighbor_toward_center(*idx, &location) {
-                let b = self
-                    .cells
-                    .get(*idx)
-                    .with_context(|| format!("Failed to get virtual cell {:?}", idx))?;
-                let n = self.cells.get(n_idx).with_context(|| {
-                    format!(
-                        "Failed to get neighbor cell {:?} for virtual cell {:?}",
-                        n_idx, idx
-                    )
-                })?;
-                let delta_t = b.cell_temp - n.cell_temp;
-
-                // Prefer boundary HTC, fallback to conduction
-                let htc = b.htc;
-                let k = b.w_thermal_c;
-
-                let flux_w_m2k = if htc > Quantity(ECLIPSE) {
-                    htc
-                } else if k > Quantity(ECLIPSE) && b.size.x() > Quantity(ECLIPSE) {
-                    k / b.size.x()
-                } else {
-                    Quantity(0.0)
-                };
-                let cell_area = b.size.area_along(0);
-                total_flux += flux_w_m2k * delta_t * cell_area;
-                total_area += cell_area;
+        // Iterate over all cells that are Boundary cells at this location
+        for (ctype, idxs) in &self.cells_idx_map {
+            if let CellType::Boundary(_, loc) = ctype {
+                if *loc == location {
+                    for idx in idxs {
+                        let b = &self.cells[*idx];
+                        
+                        // Flux = h * (T_b - T_v)
+                        // htc comes from the Boundary cell (e.g., ExtCon, ExtRad)
+                        let htc = b.htc;
+                        if htc > Quantity(ECLIPSE) {
+                            let delta_t = b.cell_temp - v.cell_temp;
+                            total_flux += htc * delta_t;
+                        }
+                    }
+                }
             }
         }
 
-        if total_area > Quantity(ECLIPSE) {
-            Ok(total_flux / total_area)
-        } else {
-            Ok(Quantity(0.0))
-        }
+        Ok(total_flux)
     }
 
     /// Calculate the average moisture flux across the surface boundary.
@@ -222,48 +214,46 @@ impl Surface {
     /// - `vtc`: vapor transfer coefficient [kg/(m²·s·Pa)] (boundary override or cell.vtc).
     /// - `flux`: instantaneous moisture flux per boundary face [kg/(m²·s)].
     /// - `delta_vp`: vapor pressure difference across boundary face [Pa].
-    /// - `accum`: running sum of flux values used for averaging [kg/(m²·s)].
     ///
     /// ## Input
     /// - `location`: boundary location (exterior or interior).
     ///
     /// ## Output
     /// - `avg_flux`: average moisture flux across the surface boundary [kg/(m²·s)].
-    pub fn moisture_flux(&self, location: BoundaryLocation) -> Result<MassFlux<f64>> {
-        // Accumulated flux in [kg/s]
-        let mut accum_flux: MassFlux<f64> = Quantity(0.0);
-        let mut total_area = 0.0;
+    pub fn moisture_flux(
+        &self,
+        location: BoundaryLocation,
+        _bc: &BoundaryCondition,
+    ) -> Result<MassFlux<f64>> {
+        // Find the Virtual Cell (Surface Node)
+        let v_idx = self
+            .virtual_cells(location.clone())
+            .next()
+            .with_context(|| format!("No virtual cell found for location {:?}", location))?;
+        let v = &self.cells[*v_idx];
 
-        for idx in self.virtual_cells(location.clone()) {
-            let b = self
-                .cells
-                .get(*idx)
-                .with_context(|| format!("Cannot get boundary cell index {:?}", idx))?;
-            if let Some(n_idx) = self.neighbor_toward_center(*idx, &location) {
-                let n = self
-                    .cells
-                    .get(n_idx)
-                    .with_context(|| format!("Cannot get neighbor cell index {:?}", n_idx))?;
+        let mut total_flux = Quantity(0.0);
 
-                let vtc: VaporTransportCoeff<f64> = match &location {
-                    BoundaryLocation::Exterior => self.ext_vtc,
-                    BoundaryLocation::Interior => self.int_vtc,
-                };
-
-                let delta_vp: Pressure<f64> = b.cell_vp - n.cell_vp;
-
-                let cell_area: f64 = b.size.area_along(0).value_in(square_meter);
-
-                accum_flux += vtc * delta_vp * cell_area;
-                total_area += cell_area;
+        // Iterate over all cells that are Boundary cells at this location (usually just Convection)
+        for (ctype, idxs) in &self.cells_idx_map {
+            if let CellType::Boundary(_, loc) = ctype {
+                if *loc == location {
+                    for idx in idxs {
+                        let b = &self.cells[*idx];
+                        
+                        // Flux = beta * (P_b - P_v)
+                        // vtc comes from the Boundary cell
+                        let vtc = b.vtc;
+                        if vtc > Quantity(0.0) {
+                            let delta_vp = b.cell_vp - v.cell_vp;
+                            total_flux += vtc * delta_vp;
+                        }
+                    }
+                }
             }
         }
 
-        if total_area > 0.0 {
-            Ok(accum_flux / total_area)
-        } else {
-            Ok(Quantity(0.0))
-        }
+        Ok(total_flux)
     }
 
     /// Checks the maximum change in temperature and RH across cells for convergence.
