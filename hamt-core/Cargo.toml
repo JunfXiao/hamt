@@ -26,6 +26,7 @@ strum_macros = "0.27.2"
 
 
 [dev-dependencies]
+crossterm = "0.29.0"
 tempfile = "3.24.0"
 
 [features]

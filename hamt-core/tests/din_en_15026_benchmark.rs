@@ -20,12 +20,16 @@ use hamt_core::uom::{
     DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT,
     Dimension, Quantity,
 };
-use std::fs::File;
+use crossterm::{
+    cursor,
+    style::{self, Attribute, Print},
+    terminal::{self, ClearType},
+    ExecutableCommand, QueueableCommand,
+};
+use std::io::{self, IsTerminal, Stdout, Write};
 use std::ops::Div;
-use std::path::PathBuf;
 use std::sync::Once;
 use std::time::Instant;
-use tempfile;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 use tracing_test::traced_test;
@@ -307,211 +311,213 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
 
     init_tracing();
 
-    let library = create_library(20.0, 0.5, 15.0);
-    let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
+    let mut ui = Ui::new("DIN EN 15026 Benchmark")?;
 
-    let mut settings = HamtSettings::default();
-    const MAX_SPLITTING_FACTOR: usize = 3;
-    settings.timestep = time_step;
-    settings.max_iterations = 5000;
-    settings.temp_convergence_tolerance = 1e-6 * kelvin;
-    settings.rh_convergence_tolerance = 1e-5;
-    settings.max_div = 300;
-    settings.min_div = 50;
-    settings.div_length = 1e-6 * meter;
+    let result = (|| -> Result<()> {
+        let library = create_library(20.0, 0.5, 15.0);
+        let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
 
-    let boundary_coeff = BoundaryCondition {
-        heat_transfer_coeff_ext: 1e100 * w_per_m2_k,
-        heat_transfer_coeff_int: 1e100 * w_per_m2_k,
-        mass_convection_coeff_ext: 1e100 * m_per_s,
-        mass_convection_coeff_int: 1e100 * m_per_s,
-        vapor_transport_coeff_ext: 1e100 * kg_per_m2_s_pa,
-        vapor_transport_coeff_int: 1e100 * kg_per_m2_s_pa,
-        ..Default::default()
-    };
+        let mut settings = HamtSettings::default();
+        const MAX_SPLITTING_FACTOR: usize = 3;
+        settings.timestep = time_step;
+        settings.max_iterations = 5000;
+        settings.temp_convergence_tolerance = 1e-6 * kelvin;
+        settings.rh_convergence_tolerance = 1e-5;
+        settings.max_div = 300;
+        settings.min_div = 50;
+        settings.div_length = 1e-6 * meter;
 
-    let boundary_condition_init = BoundaryCondition {
-        temp_outside_air: celsius_to_kelvin(20.0),
-        temp_inside_air: celsius_to_kelvin(20.0),
-        rh_outside_air: 0.5 * dimensionless,
-        rh_inside_air: 0.5 * dimensionless,
-        ..boundary_coeff
-    };
+        let boundary_coeff = BoundaryCondition {
+            heat_transfer_coeff_ext: 1e100 * w_per_m2_k,
+            heat_transfer_coeff_int: 1e100 * w_per_m2_k,
+            mass_convection_coeff_ext: 1e100 * m_per_s,
+            mass_convection_coeff_int: 1e100 * m_per_s,
+            vapor_transport_coeff_ext: 1e100 * kg_per_m2_s_pa,
+            vapor_transport_coeff_int: 1e100 * kg_per_m2_s_pa,
+            ..Default::default()
+        };
 
-    let boundary_condition = BoundaryCondition {
-        temp_outside_air: celsius_to_kelvin(30.0),
-        temp_inside_air: celsius_to_kelvin(30.0),
-        rh_outside_air: 0.95 * dimensionless,
-        rh_inside_air: 0.95 * dimensionless,
-        ..boundary_coeff
-    };
+        let boundary_condition_init = BoundaryCondition {
+            temp_outside_air: celsius_to_kelvin(20.0),
+            temp_inside_air: celsius_to_kelvin(20.0),
+            rh_outside_air: 0.5 * dimensionless,
+            rh_inside_air: 0.5 * dimensionless,
+            ..boundary_coeff
+        };
 
-    let mut mgr = HamtManager::new(
-        Some(settings.clone()),
-        Some(boundary_condition_init),
-        construction,
-        "BenchmarkSurface".to_string(),
-        1.0 * square_meter,
-    )
-    .unwrap();
+        let boundary_condition = BoundaryCondition {
+            temp_outside_air: celsius_to_kelvin(30.0),
+            temp_inside_air: celsius_to_kelvin(30.0),
+            rh_outside_air: 0.95 * dimensionless,
+            rh_inside_air: 0.95 * dimensionless,
+            ..boundary_coeff
+        };
 
-    println!("Cell Count: {}", mgr.surface_curr.cells.len());
+        let mut mgr = HamtManager::new(
+            Some(settings.clone()),
+            Some(boundary_condition_init),
+            construction,
+            "BenchmarkSurface".to_string(),
+            1.0 * square_meter,
+        )
+        .unwrap();
 
-    let simulation_durations_days: [Time<f64>; 3] = [7.0 * days, 30.0 * days, 365.0 * days];
+        ui.log(format!(
+            "Cell Count: {}",
+            mgr.surface_curr.cells.len()
+        ))?;
 
-    {
-        println!("\nRunning benchmark with time step: {:?}", time_step);
-        println!("=================================================");
-        println!("Preheating to reach stable...");
+        let simulation_durations_days: [Time<f64>; 3] = [7.0 * days, 30.0 * days, 365.0 * days];
 
-        let mut preheat_time: Time<f64> = 0.0 * hours;
-        while preheat_time < 100.0 * hours {
-            if !mgr.solve_timestep()? {
-                return Err(hamt_core::error::Error::Other(
-                    "Preheating failed: timestep did not converge".to_string(),
-                )
-                .into());
+        {
+            ui.log(format!(
+                "Running benchmark with time step: {:?}",
+                time_step
+            ))?;
+            ui.log("Preheating to reach stable...".to_string())?;
+
+            let mut preheat_time: Time<f64> = 0.0 * hours;
+            while preheat_time < 100.0 * hours {
+                if !mgr.solve_timestep()? {
+                    return Err(hamt_core::error::Error::Other(
+                        "Preheating failed: timestep did not converge".to_string(),
+                    )
+                    .into());
+                }
+                preheat_time += mgr.settings.timestep;
+                mgr.tick_timestep()?;
+                ui.set_status(format!(
+                    "Preheating | Time={:.2} hours | Run time: {} seconds",
+                    preheat_time.value_in(hours),
+                    start_time.elapsed().as_secs()
+                ))?;
+                if preheat_time > 24.0 * 30.0 * hours {
+                    return Err(hamt_core::error::Error::Other(
+                        "Preheating failed: Exceeded maximum preheat time".to_string(),
+                    )
+                    .into());
+                }
             }
-            preheat_time += mgr.settings.timestep;
-            mgr.tick_timestep()?;
-            if preheat_time > 24.0 * 30.0 * hours {
-                return Err(hamt_core::error::Error::Other(
-                    "Preheating failed: Exceeded maximum preheat time".to_string(),
-                )
-                .into());
-            }
+
+            ui.log(format!(
+                "Preheating completed in {:.2} hours",
+                preheat_time.value_in(hours)
+            ))?;
         }
 
-        println!(
-            "\n\nPreheating completed in {:.2} hours",
-            preheat_time.value_in(hours)
-        );
-    }
+        ui.log("Starting simulation...".to_string())?;
+        ui.log(format!("Boundary Condition:\n{:#?}", boundary_condition))?;
 
-    println!("\n=================================================");
+        {
+            mgr.boundary_condition = boundary_condition;
 
-    println!("\nStarting simulation...");
+            let end_time: Time<f64> = *simulation_durations_days.last().unwrap() + 1.0 * hours;
 
-    println!("\n Boundary Condition:\n {:#?}", boundary_condition);
+            ui.log(format!(
+                "Simulation duration: {:.2} days",
+                (end_time / days).value()
+            ))?;
 
-    {
-        mgr.boundary_condition = boundary_condition;
+            let mut current_time: Time<f64> = 0.0 * hours;
+            let orig_timestep = mgr.settings.timestep;
+            let mut split_factor = 3;
+            let mut fail_details: Vec<(Time<f64>, u32)> = Vec::new();
+            while current_time <= end_time {
+                let mut proposed_timestep = orig_timestep / 2.0_f64.powi(split_factor - 1);
 
-        let end_time: Time<f64> = *simulation_durations_days.last().unwrap() + 1.0 * hours;
-
-        println!("Simulation duration: {:.2} days", (end_time / days).value());
-
-        let mut write_time = true;
-        let mut current_time: Time<f64> = 0.0 * hours;
-        let orig_timestep = mgr.settings.timestep;
-        let mut split_factor = 3;
-        let mut fail_details: Vec<(Time<f64>, u32)> = Vec::new();
-        while current_time <= end_time {
-            let mut proposed_timestep = orig_timestep / 2.0_f64.powi(split_factor - 1);
-
-            // backtracking
-            if split_factor > 1
-                && (current_time.value_unchecked() % (proposed_timestep.value_unchecked() * 2.0)
-                    == 0.0)
-            {
-                split_factor -= 1;
-                proposed_timestep *= 2.0;
-            }
-            mgr.settings.timestep = proposed_timestep;
-            if write_time {
-                println!("");
-                write_time = false;
-            }
-            print!(
-                "\rTime={:.2} hours, Run time: {} seconds | dynamic timestep: {:?} ({:?}) s",
-                (current_time / hours).value(),
-                start_time.elapsed().as_secs(),
-                mgr.settings.timestep,
-                orig_timestep
-            );
-
-            // Solving the timestep
-            while !mgr.solve_timestep()? {
-                mgr.settings.timestep = orig_timestep / 2.0_f64.powi(split_factor);
-                mgr.surface_curr
-                    .sync_state_from(&mgr.surface_prev.clone())?;
-                mgr.surface_next
-                    .sync_state_from(&mgr.surface_prev.clone())?;
-                print!(
-                    "\rTime={:.2} hours, Run time: {} seconds ,Timestep dynamic: {:?} (Original: {:?})",
+                // backtracking
+                if split_factor > 1
+                    && (current_time.value_unchecked()
+                        % (proposed_timestep.value_unchecked() * 2.0)
+                        == 0.0)
+                {
+                    split_factor -= 1;
+                    proposed_timestep *= 2.0;
+                }
+                mgr.settings.timestep = proposed_timestep;
+                ui.set_status(format!(
+                    "Time={:.2} hours | Run time: {} seconds | timestep: {:?} (orig: {:?})",
                     (current_time / hours).value(),
                     start_time.elapsed().as_secs(),
                     mgr.settings.timestep,
                     orig_timestep
-                );
+                ))?;
 
-                if split_factor > (MAX_SPLITTING_FACTOR as i32) {
-                    return Err(hamt_core::error::Error::Other(format!(
-                        "Convergence failed with splitting factor {} at {:.2} hours",
-                        split_factor,
-                        (current_time / hours).value()
-                    ))
-                    .into());
+                // Solving the timestep
+                while !mgr.solve_timestep()? {
+                    mgr.settings.timestep = orig_timestep / 2.0_f64.powi(split_factor);
+                    mgr.surface_curr
+                        .sync_state_from(&mgr.surface_prev.clone())?;
+                    mgr.surface_next
+                        .sync_state_from(&mgr.surface_prev.clone())?;
+                    ui.set_status(format!(
+                        "Time={:.2} hours | Run time: {} seconds | timestep: {:?} (orig: {:?})",
+                        (current_time / hours).value(),
+                        start_time.elapsed().as_secs(),
+                        mgr.settings.timestep,
+                        orig_timestep
+                    ))?;
+
+                    if split_factor > (MAX_SPLITTING_FACTOR as i32) {
+                        return Err(hamt_core::error::Error::Other(format!(
+                            "Convergence failed with splitting factor {} at {:.2} hours",
+                            split_factor,
+                            (current_time / hours).value()
+                        ))
+                        .into());
+                    }
+
+                    split_factor += 1;
                 }
 
-                split_factor += 1;
-            }
+                let actual_step = mgr.settings.timestep;
+                current_time += actual_step;
 
-            let actual_step = mgr.settings.timestep;
-            current_time += actual_step;
-
-            if let Some(sim_day) = simulation_durations_days
-                .iter()
-                .filter(|duration| {
-                    (duration.value_in(hours) - &current_time.value_in(hours)).abs()
-                        <= actual_step.value_in(hours) * 0.5
-                })
-                .next()
-            {
-                let sim_day: i32 = sim_day.value_in(days) as i32;
-                println!("\nCheckpoint reached: {} days\n", sim_day);
-                let fail_count = compare_results(&mgr.surface_curr, sim_day);
-                if fail_count > 0 {
-                    fail_details.push((current_time, fail_count));
+                if let Some(sim_day) = simulation_durations_days
+                    .iter()
+                    .filter(|duration| {
+                        (duration.value_in(hours) - &current_time.value_in(hours)).abs()
+                            <= actual_step.value_in(hours) * 0.5
+                    })
+                    .next()
+                {
+                    let sim_day: i32 = sim_day.value_in(days) as i32;
+                    ui.log(format!("Checkpoint reached: {} days", sim_day))?;
+                    let fail_count = compare_results(&mgr.surface_curr, sim_day, &mut ui)?;
+                    if fail_count > 0 {
+                        fail_details.push((current_time, fail_count));
+                    }
                 }
-                write_time = true;
+
+                mgr.tick_timestep()?;
             }
 
-            mgr.tick_timestep()?;
-        }
-
-        if !fail_details.is_empty() {
-            eprintln!("Test failed in {} benchmarks", fail_details.len());
-            for (time, count) in fail_details.iter() {
-                eprintln!(
-                    "Failed at time: {} hours, Total failures: {}",
-                    time.value_in(hours),
-                    count
-                );
+            if !fail_details.is_empty() {
+                eprintln!("Test failed in {} benchmarks", fail_details.len());
+                for (time, count) in fail_details.iter() {
+                    eprintln!(
+                        "Failed at time: {} hours, Total failures: {}",
+                        time.value_in(hours),
+                        count
+                    );
+                }
+                return Err(anyhow::format_err!(
+                    "Diff larger than allowed. {} failures in total.",
+                    fail_details.len()
+                ));
             }
-            return Err(anyhow::format_err!(
-                "Diff larger than allowed. {} failures in total.",
-                fail_details.len()
-            ));
         }
-    }
 
-    Ok(())
-}
+        Ok(())
+    })();
 
-fn print_table_row(values: impl IntoIterator<Item = String>, padding: usize) {
-    for value in values {
-        print!("{:^width$}", value, width = padding);
-    }
-    println!("");
+    ui.finish()?;
+    result
 }
 
 const TABLE_PADDING: usize = 15;
 
-fn compare_results(surface: &Surface, duration_day: i32) -> u32 {
-    let sep = "=".repeat(30);
-    println!("{}", sep);
-    println!("Comparing at day {}", duration_day);
+fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<u32> {
     const PERCENTAGE_RANGE_RH: f64 = 0.025;
     const PERCENTAGE_RANGE_T: f64 = 0.01;
     let temp_ref = REF_TEMPERATURE
@@ -523,22 +529,21 @@ fn compare_results(surface: &Surface, duration_day: i32) -> u32 {
         .filter(|(d, _, _)| *d == duration_day)
         .map(|(_, depth, wc)| (depth, wc));
 
-    println!("{}", sep);
-
-    print_table_row(
-        vec![
-            "Depth (m)",
-            "Temp (C)",
-            "Ref Temp (C)",
-            "Diff (%)",
-            "Result",
-            "Cell Index",
-        ]
-        .iter()
-        .map(|s| s.to_string()),
+    let mut lines = Vec::new();
+    lines.push(format!("Comparing at day {}", duration_day));
+    let temp_header = format_table_row(
+        &[
+            "Depth (m)".to_string(),
+            "Temp (C)".to_string(),
+            "Ref Temp (C)".to_string(),
+            "Diff (%)".to_string(),
+            "Result".to_string(),
+            "Cell Index".to_string(),
+        ],
         TABLE_PADDING,
     );
-    println!("------------------");
+    lines.push(temp_header.clone());
+    lines.push("-".repeat(temp_header.len()));
     let mut fail_count = 0u32;
     let mut t_passed = true;
     for (depth, ref_t) in temp_ref {
@@ -557,35 +562,33 @@ fn compare_results(surface: &Surface, duration_day: i32) -> u32 {
             fail_count += 1;
         }
         t_passed &= turn_passed;
-        print_table_row(
-            vec![
+        lines.push(format_table_row(
+            &[
                 format!("{:.2}", depth),
                 format!("{:.2}", cell_t),
                 format!("{:.2}", ref_t),
                 format!("{:.1}%", diviation * 100.0),
-                format!("{}", if turn_passed { "🆗" } else { "💥" }),
+                if turn_passed { "OK" } else { "FAIL" }.to_string(),
                 format!("{:?}", cell_idx),
             ],
             TABLE_PADDING,
-        );
+        ));
     }
 
-    println!("{}", sep);
-    print_table_row(
-        vec![
-            "Depth (m)",
-            "Water[kg/m3]",
-            "Ref Water[kg/m3]",
-            "Diff (%)",
-            "Status",
-            "Result",
-            "Cell Index",
-        ]
-        .iter()
-        .map(|s| s.to_string()),
+    lines.push("".to_string());
+    let wc_header = format_table_row(
+        &[
+            "Depth (m)".to_string(),
+            "Water[kg/m3]".to_string(),
+            "Ref Water[kg/m3]".to_string(),
+            "Diff (%)".to_string(),
+            "Status".to_string(),
+            "Cell Index".to_string(),
+        ],
         TABLE_PADDING,
     );
-    println!("------------------");
+    lines.push(wc_header.clone());
+    lines.push("-".repeat(wc_header.len()));
 
     let mut rh_passed = true;
     for (depth, ref_wc) in wc_ref {
@@ -602,26 +605,33 @@ fn compare_results(surface: &Surface, duration_day: i32) -> u32 {
             fail_count += 1;
         }
         rh_passed &= turn_passed;
-        print_table_row(
-            vec![
+        lines.push(format_table_row(
+            &[
                 format!("{:.2}", depth),
                 format!("{:.2}", cell_wc),
                 format!("{:.2}", ref_wc),
                 format!("{:.1}", diviation * 100.0),
-                format!("{}", if turn_passed { "🆗" } else { "💥" }),
+                if turn_passed { "OK" } else { "FAIL" }.to_string(),
                 format!("{:?}", cell_idx),
             ],
             TABLE_PADDING,
-        );
+        ));
     }
     if !rh_passed || !t_passed {
-        println!("------------------");
-        println!("Something's wrong!");
-        println!("Failed count: {}", fail_count);
-        println!("------------------\n")
+        lines.push("-".repeat(TABLE_PADDING * 6));
+        lines.push("Something's wrong!".to_string());
+        lines.push(format!("Failed count: {}", fail_count));
     }
 
-    fail_count
+    if ui.enabled {
+        ui.set_result_lines(lines)?;
+    } else {
+        for line in lines {
+            println!("{}", line);
+        }
+    }
+
+    Ok(fail_count)
 }
 
 #[test]
@@ -670,4 +680,157 @@ pub fn init_tracing() {
             .with_test_writer() // 关键：使用 TestWriter 以便 cargo test 正确捕获输出
             .init();
     });
+}
+
+struct Ui {
+    enabled: bool,
+    stdout: Stdout,
+    title: String,
+    log_lines: Vec<String>,
+    result_lines: Vec<String>,
+    result_history: Vec<String>,
+    status_line: String,
+}
+
+impl Ui {
+    fn new(title: &str) -> Result<Self> {
+        let mut stdout = io::stdout();
+        let enabled = stdout.is_terminal();
+        if enabled {
+            stdout.execute(terminal::EnterAlternateScreen)?;
+            stdout.execute(cursor::Hide)?;
+        }
+        Ok(Self {
+            enabled,
+            stdout,
+            title: title.to_string(),
+            log_lines: Vec::new(),
+            result_lines: Vec::new(),
+            result_history: Vec::new(),
+            status_line: String::new(),
+        })
+    }
+
+    fn log(&mut self, line: String) -> Result<()> {
+        if !self.enabled {
+            println!("{}", line);
+            return Ok(());
+        }
+        self.log_lines.push(line);
+        self.render()
+    }
+
+    fn set_status(&mut self, line: String) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        self.status_line = line;
+        self.render()
+    }
+
+    fn set_result_lines(&mut self, lines: Vec<String>) -> Result<()> {
+        if !self.enabled {
+            for line in lines {
+                println!("{}", line);
+            }
+            return Ok(());
+        }
+        if !self.result_history.is_empty() {
+            self.result_history.push(String::new());
+        }
+        self.result_history.extend(lines.iter().cloned());
+        self.result_lines = lines;
+        self.render()
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        self.enabled = false;
+        self.stdout.execute(style::SetAttribute(Attribute::Reset))?;
+        self.stdout.execute(cursor::Show)?;
+        self.stdout.execute(terminal::LeaveAlternateScreen)?;
+        let _ = self.stdout.flush();
+
+        println!("{}", self.title);
+        println!("{}", "-".repeat(40));
+        for line in &self.log_lines {
+            println!("{}", line);
+        }
+        if !self.result_history.is_empty() {
+            println!("{}", "-".repeat(40));
+            for line in &self.result_history {
+                println!("{}", line);
+            }
+        }
+        Ok(())
+    }
+
+    fn render(&mut self) -> Result<()> {
+        let (cols, rows) = terminal::size().unwrap_or((80, 24));
+        let cols = cols as usize;
+        let mut lines = Vec::new();
+        lines.push(self.title.clone());
+        lines.push("-".repeat(cols.min(80)));
+        lines.extend(self.log_lines.iter().cloned());
+        if !self.result_lines.is_empty() {
+            lines.push("-".repeat(cols.min(80)));
+            lines.extend(self.result_lines.iter().cloned());
+        }
+
+        let max_lines = rows.saturating_sub(1) as usize;
+        if lines.len() > max_lines {
+            lines = lines.split_off(lines.len() - max_lines);
+        }
+
+        self.stdout
+            .queue(cursor::MoveTo(0, 0))?
+            .queue(terminal::Clear(ClearType::All))?;
+
+        for line in lines {
+            let line = truncate_line(&line, cols);
+            self.stdout.queue(Print(line))?;
+            self.stdout.queue(Print("\n"))?;
+        }
+
+        let status = truncate_line(&self.status_line, cols);
+        self.stdout
+            .queue(cursor::MoveTo(0, rows.saturating_sub(1)))?
+            .queue(style::SetAttribute(Attribute::Reverse))?
+            .queue(Print(status))?
+            .queue(style::SetAttribute(Attribute::Reset))?;
+
+        self.stdout.flush()?;
+        Ok(())
+    }
+}
+
+impl Drop for Ui {
+    fn drop(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        let _ = self.stdout.execute(style::SetAttribute(Attribute::Reset));
+        let _ = self.stdout.execute(cursor::Show);
+        let _ = self.stdout.execute(terminal::LeaveAlternateScreen);
+    }
+}
+
+fn format_table_row(values: &[String], padding: usize) -> String {
+    let mut line = String::new();
+    for value in values {
+        line.push_str(&format!("{:^width$}", value, width = padding));
+    }
+    line
+}
+
+fn truncate_line(line: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
+    }
+    if line.len() <= max_cols {
+        return line.to_string();
+    }
+    line.chars().take(max_cols).collect()
 }
