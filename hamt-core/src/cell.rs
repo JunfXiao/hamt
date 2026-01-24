@@ -162,10 +162,11 @@ impl Cell {
     }
 
     /// Returns `true` if the cell is an exterior boundary cell.
-    pub fn is_exterior_boundary(&self) -> bool {
+    pub fn is_exterior(&self) -> bool {
         matches!(
             self.cell_type,
             CellType::Boundary(_, BoundaryLocation::Exterior)
+                | CellType::Virtual(BoundaryLocation::Exterior)
         )
     }
 

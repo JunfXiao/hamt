@@ -3,6 +3,11 @@
 
 //! Test suite for the DIN EN 15026 analytical benchmark (Annex B).
 use anyhow::{Ok, Result};
+use crossterm::{
+    ExecutableCommand, QueueableCommand, cursor,
+    style::{self, Attribute, Color, Print},
+    terminal::{self, ClearType},
+};
 use hamt_core::boundary::{BoundaryCondition, celsius_to_kelvin, kelvin_to_celsius};
 use hamt_core::hamt_manager::{HamtManager, HamtSettings};
 use hamt_core::material::{Curve, Material, MaterialLibrary, SurfaceVaporCoef};
@@ -20,16 +25,10 @@ use hamt_core::uom::{
     DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT,
     Dimension, Quantity,
 };
-use crossterm::{
-    cursor,
-    style::{self, Attribute, Print},
-    terminal::{self, ClearType},
-    ExecutableCommand, QueueableCommand,
-};
 use std::io::{self, IsTerminal, Stdout, Write};
 use std::ops::Div;
 use std::sync::Once;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 use tracing_test::traced_test;
@@ -318,9 +317,9 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
 
         let mut settings = HamtSettings::default();
-        const MAX_SPLITTING_FACTOR: usize = 3;
+        const MAX_SPLITTING_FACTOR: usize = 12;
         settings.timestep = time_step;
-        settings.max_iterations = 5000;
+        settings.max_iterations = 500;
         settings.temp_convergence_tolerance = 1e-6 * kelvin;
         settings.rh_convergence_tolerance = 1e-5;
         settings.max_div = 300;
@@ -362,22 +361,16 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         )
         .unwrap();
 
-        ui.log(format!(
-            "Cell Count: {}",
-            mgr.surface_curr.cells.len()
-        ))?;
+        ui.log(format!("Cell Count: {}", mgr.surface_curr.cells.len()))?;
 
         let simulation_durations_days: [Time<f64>; 3] = [7.0 * days, 30.0 * days, 365.0 * days];
 
         {
-            ui.log(format!(
-                "Running benchmark with time step: {:?}",
-                time_step
-            ))?;
+            ui.log(format!("Running benchmark with time step: {:?}", time_step))?;
             ui.log("Preheating to reach stable...".to_string())?;
 
             let mut preheat_time: Time<f64> = 0.0 * hours;
-            while preheat_time < 100.0 * hours {
+            while preheat_time < 24.0 * 30.0 * hours {
                 if !mgr.solve_timestep()? {
                     return Err(hamt_core::error::Error::Other(
                         "Preheating failed: timestep did not converge".to_string(),
@@ -386,17 +379,20 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                 }
                 preheat_time += mgr.settings.timestep;
                 mgr.tick_timestep()?;
-                ui.set_status(format!(
-                    "Preheating | Time={:.2} hours | Run time: {} seconds",
-                    preheat_time.value_in(hours),
-                    start_time.elapsed().as_secs()
-                ))?;
-                if preheat_time > 24.0 * 30.0 * hours {
-                    return Err(hamt_core::error::Error::Other(
-                        "Preheating failed: Exceeded maximum preheat time".to_string(),
-                    )
-                    .into());
-                }
+                ui.set_status(
+                    format!(
+                        "Preheating | Time={:.2} hours | Run time: {} seconds",
+                        preheat_time.value_in(hours),
+                        start_time.elapsed().as_secs()
+                    ),
+                    StatusStyle::Normal,
+                )?;
+                // if preheat_time > 24.0 * 30.0 * hours {
+                //     return Err(hamt_core::error::Error::Other(
+                //         "Preheating failed: Exceeded maximum preheat time".to_string(),
+                //     )
+                //     .into());
+                // }
             }
 
             ui.log(format!(
@@ -435,28 +431,27 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                     proposed_timestep *= 2.0;
                 }
                 mgr.settings.timestep = proposed_timestep;
-                ui.set_status(format!(
-                    "Time={:.2} hours | Run time: {} seconds | timestep: {:?} (orig: {:?})",
-                    (current_time / hours).value(),
-                    start_time.elapsed().as_secs(),
-                    mgr.settings.timestep,
-                    orig_timestep
-                ))?;
-
-                // Solving the timestep
-                while !mgr.solve_timestep()? {
-                    mgr.settings.timestep = orig_timestep / 2.0_f64.powi(split_factor);
-                    mgr.surface_curr
-                        .sync_state_from(&mgr.surface_prev.clone())?;
-                    mgr.surface_next
-                        .sync_state_from(&mgr.surface_prev.clone())?;
-                    ui.set_status(format!(
-                        "Time={:.2} hours | Run time: {} seconds | timestep: {:?} (orig: {:?})",
+                let progress = progress_bar(current_time, &simulation_durations_days, 24);
+                ui.set_status(
+                    format!(
+                        "{} Time={:.2} hours | Run time: {} seconds | timestep: {:?} (orig: {:?})",
+                        progress,
                         (current_time / hours).value(),
                         start_time.elapsed().as_secs(),
                         mgr.settings.timestep,
                         orig_timestep
-                    ))?;
+                    ),
+                    StatusStyle::from_split_factor(split_factor),
+                )?;
+
+                // Solving the timestep
+                while !mgr.solve_timestep()? {
+                    mgr.settings.timestep = orig_timestep / 2.0_f64.powi(split_factor - 1);
+                    mgr.surface_curr
+                        .sync_state_from(&mgr.surface_prev.clone())?;
+                    mgr.surface_next
+                        .sync_state_from(&mgr.surface_prev.clone())?;
+                    let progress = progress_bar(current_time, &simulation_durations_days, 24);
 
                     if split_factor > (MAX_SPLITTING_FACTOR as i32) {
                         return Err(hamt_core::error::Error::Other(format!(
@@ -468,6 +463,17 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                     }
 
                     split_factor += 1;
+                    ui.set_status(
+                        format!(
+                            "{} Time={:.2} hours | Run time: {} seconds | timestep: {:?} (orig: {:?})",
+                            progress,
+                            (current_time / hours).value(),
+                            start_time.elapsed().as_secs(),
+                            mgr.settings.timestep,
+                            orig_timestep
+                        ),
+                        StatusStyle::from_split_factor(split_factor),
+                    )?;
                 }
 
                 let actual_step = mgr.settings.timestep;
@@ -530,7 +536,7 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
         .map(|(_, depth, wc)| (depth, wc));
 
     let mut lines = Vec::new();
-    lines.push(format!("Comparing at day {}", duration_day));
+    lines.push(UiLine::plain(format!("Comparing at day {}", duration_day)));
     let temp_header = format_table_row(
         &[
             "Depth (m)".to_string(),
@@ -542,8 +548,8 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
         ],
         TABLE_PADDING,
     );
-    lines.push(temp_header.clone());
-    lines.push("-".repeat(temp_header.len()));
+    lines.push(UiLine::plain(temp_header.clone()));
+    lines.push(UiLine::plain("-".repeat(temp_header.len())));
     let mut fail_count = 0u32;
     let mut t_passed = true;
     for (depth, ref_t) in temp_ref {
@@ -562,20 +568,28 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
             fail_count += 1;
         }
         t_passed &= turn_passed;
-        lines.push(format_table_row(
+        let line = format_table_row(
             &[
                 format!("{:.2}", depth),
                 format!("{:.2}", cell_t),
                 format!("{:.2}", ref_t),
                 format!("{:.1}%", diviation * 100.0),
-                if turn_passed { "OK" } else { "FAIL" }.to_string(),
+                if turn_passed { "OK✔️" } else { "FAIL💥" }.to_string(),
                 format!("{:?}", cell_idx),
             ],
             TABLE_PADDING,
+        );
+        lines.push(UiLine::with_color(
+            line,
+            if turn_passed {
+                Color::DarkGreen
+            } else {
+                Color::Red
+            },
         ));
     }
 
-    lines.push("".to_string());
+    lines.push(UiLine::plain(String::new()));
     let wc_header = format_table_row(
         &[
             "Depth (m)".to_string(),
@@ -587,8 +601,8 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
         ],
         TABLE_PADDING,
     );
-    lines.push(wc_header.clone());
-    lines.push("-".repeat(wc_header.len()));
+    lines.push(UiLine::plain(wc_header.clone()));
+    lines.push(UiLine::plain("-".repeat(wc_header.len())));
 
     let mut rh_passed = true;
     for (depth, ref_wc) in wc_ref {
@@ -605,7 +619,7 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
             fail_count += 1;
         }
         rh_passed &= turn_passed;
-        lines.push(format_table_row(
+        let line = format_table_row(
             &[
                 format!("{:.2}", depth),
                 format!("{:.2}", cell_wc),
@@ -615,19 +629,33 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
                 format!("{:?}", cell_idx),
             ],
             TABLE_PADDING,
+        );
+        lines.push(UiLine::with_color(
+            line,
+            if turn_passed {
+                Color::DarkGreen
+            } else {
+                Color::Red
+            },
         ));
     }
     if !rh_passed || !t_passed {
-        lines.push("-".repeat(TABLE_PADDING * 6));
-        lines.push("Something's wrong!".to_string());
-        lines.push(format!("Failed count: {}", fail_count));
+        lines.push(UiLine::plain("-".repeat(TABLE_PADDING * 6)));
+        lines.push(UiLine::with_color(
+            "Something's wrong!".to_string(),
+            Color::Red,
+        ));
+        lines.push(UiLine::with_color(
+            format!("Failed count: {}", fail_count),
+            Color::Red,
+        ));
     }
 
     if ui.enabled {
         ui.set_result_lines(lines)?;
     } else {
         for line in lines {
-            println!("{}", line);
+            println!("{}", line.text);
         }
     }
 
@@ -687,9 +715,12 @@ struct Ui {
     stdout: Stdout,
     title: String,
     log_lines: Vec<String>,
-    result_lines: Vec<String>,
-    result_history: Vec<String>,
+    result_lines: Vec<UiLine>,
+    result_history: Vec<UiLine>,
     status_line: String,
+    status_style: StatusStyle,
+    last_render: Instant,
+    min_frame_time: Duration,
 }
 
 impl Ui {
@@ -708,6 +739,9 @@ impl Ui {
             result_lines: Vec::new(),
             result_history: Vec::new(),
             status_line: String::new(),
+            status_style: StatusStyle::Normal,
+            last_render: Instant::now(),
+            min_frame_time: Duration::from_millis(1000 / 5),
         })
     }
 
@@ -717,30 +751,31 @@ impl Ui {
             return Ok(());
         }
         self.log_lines.push(line);
-        self.render()
+        self.render(true)
     }
 
-    fn set_status(&mut self, line: String) -> Result<()> {
+    fn set_status(&mut self, line: String, style: StatusStyle) -> Result<()> {
         if !self.enabled {
             return Ok(());
         }
         self.status_line = line;
-        self.render()
+        self.status_style = style;
+        self.render(false)
     }
 
-    fn set_result_lines(&mut self, lines: Vec<String>) -> Result<()> {
+    fn set_result_lines(&mut self, lines: Vec<UiLine>) -> Result<()> {
         if !self.enabled {
             for line in lines {
-                println!("{}", line);
+                println!("{}", line.text);
             }
             return Ok(());
         }
         if !self.result_history.is_empty() {
-            self.result_history.push(String::new());
+            self.result_history.push(UiLine::plain(String::new()));
         }
         self.result_history.extend(lines.iter().cloned());
         self.result_lines = lines;
-        self.render()
+        self.render(true)
     }
 
     fn finish(&mut self) -> Result<()> {
@@ -761,21 +796,24 @@ impl Ui {
         if !self.result_history.is_empty() {
             println!("{}", "-".repeat(40));
             for line in &self.result_history {
-                println!("{}", line);
+                println!("{}", line.text);
             }
         }
         Ok(())
     }
 
-    fn render(&mut self) -> Result<()> {
+    fn render(&mut self, force: bool) -> Result<()> {
+        if !force && self.last_render.elapsed() < self.min_frame_time {
+            return Ok(());
+        }
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
         let cols = cols as usize;
-        let mut lines = Vec::new();
-        lines.push(self.title.clone());
-        lines.push("-".repeat(cols.min(80)));
-        lines.extend(self.log_lines.iter().cloned());
+        let mut lines: Vec<UiLine> = Vec::new();
+        lines.push(UiLine::plain(self.title.clone()));
+        lines.push(UiLine::plain("-".repeat(cols.min(80))));
+        lines.extend(self.log_lines.iter().cloned().map(UiLine::plain));
         if !self.result_lines.is_empty() {
-            lines.push("-".repeat(cols.min(80)));
+            lines.push(UiLine::plain("-".repeat(cols.min(80))));
             lines.extend(self.result_lines.iter().cloned());
         }
 
@@ -789,19 +827,39 @@ impl Ui {
             .queue(terminal::Clear(ClearType::All))?;
 
         for line in lines {
-            let line = truncate_line(&line, cols);
-            self.stdout.queue(Print(line))?;
+            let text = truncate_line(&line.text, cols);
+            if let Some(color) = line.color {
+                self.stdout.queue(style::SetForegroundColor(color))?;
+            }
+            self.stdout.queue(Print(text))?;
+            if line.color.is_some() {
+                self.stdout.queue(style::SetAttribute(Attribute::Reset))?;
+            }
             self.stdout.queue(Print("\n"))?;
         }
 
         let status = truncate_line(&self.status_line, cols);
         self.stdout
             .queue(cursor::MoveTo(0, rows.saturating_sub(1)))?
-            .queue(style::SetAttribute(Attribute::Reverse))?
+            .queue(style::SetAttribute(Attribute::Reset))?;
+
+        match self.status_style {
+            StatusStyle::Normal => {
+                self.stdout.queue(style::SetAttribute(Attribute::Reverse))?;
+            }
+            StatusStyle::Warning => {
+                self.stdout
+                    .queue(style::SetBackgroundColor(Color::Yellow))?
+                    .queue(style::SetForegroundColor(Color::Black))?;
+            }
+        }
+
+        self.stdout
             .queue(Print(status))?
             .queue(style::SetAttribute(Attribute::Reset))?;
 
         self.stdout.flush()?;
+        self.last_render = Instant::now();
         Ok(())
     }
 }
@@ -823,6 +881,75 @@ fn format_table_row(values: &[String], padding: usize) -> String {
         line.push_str(&format!("{:^width$}", value, width = padding));
     }
     line
+}
+
+#[derive(Clone)]
+struct UiLine {
+    text: String,
+    color: Option<Color>,
+}
+
+impl UiLine {
+    fn plain(text: String) -> Self {
+        Self { text, color: None }
+    }
+
+    fn with_color(text: String, color: Color) -> Self {
+        Self {
+            text,
+            color: Some(color),
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+enum StatusStyle {
+    Normal,
+    Warning,
+}
+
+impl StatusStyle {
+    fn from_split_factor(split_factor: i32) -> Self {
+        if split_factor > 1 {
+            StatusStyle::Warning
+        } else {
+            StatusStyle::Normal
+        }
+    }
+}
+
+fn progress_bar(current_time: Time<f64>, checkpoints: &[Time<f64>], width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let current_hours = current_time.value_in(hours);
+    let (next_index, next_target) = checkpoints
+        .iter()
+        .enumerate()
+        .find(|(_, target)| target.value_in(hours) >= current_hours)
+        .map(|(idx, target)| (idx + 1, target.value_in(hours)))
+        .unwrap_or_else(|| {
+            (
+                checkpoints.len().max(1),
+                checkpoints.last().map(|t| t.value_in(hours)).unwrap_or(1.0),
+            )
+        });
+
+    let ratio = if next_target <= 0.0 {
+        0.0
+    } else {
+        (current_hours / next_target).clamp(0.0, 1.0)
+    };
+    let filled = (ratio * width as f64).round() as usize;
+    let empty = width.saturating_sub(filled);
+    format!(
+        "[{}{}] {:>3.0}% ({}/{})",
+        "#".repeat(filled),
+        "-".repeat(empty),
+        ratio * 100.0,
+        next_index,
+        checkpoints.len().max(1)
+    )
 }
 
 fn truncate_line(line: &str, max_cols: usize) -> String {

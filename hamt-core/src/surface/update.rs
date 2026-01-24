@@ -91,10 +91,10 @@ impl Surface {
         _settings: &HamtSettings,
     ) -> Result<()> {
         let nx = self.cells.raw_dim()[0];
-        for i in (0..nx) {
+        for i in 0..nx {
             let cell = &mut self.cells[[i, 0, 0]];
             if cell.is_boundary() {
-                if cell.is_exterior_boundary() {
+                if cell.is_exterior() {
                     cell.htc = bc.heat_transfer_coeff_ext;
                     cell.cell_temp = bc.temp_outside_air;
                     cell.cell_rh = bc.rh_outside_air;
@@ -152,24 +152,19 @@ impl Surface {
         let temps: Vec<Temperature<f64>> = par_or_seq(&indices)
             .map(|&i| {
                 let cell_curr = &surface_curr.cells[[i, 0, 0]];
-                if cell_curr.is_boundary() {
-                    if cell_curr.is_exterior_boundary() {
-                        bc.temp_outside_air
-                    } else {
-                        bc.temp_inside_air
-                    }
-                } else {
+                if matches!(cell_curr.cell_type, CellType::Material(_)) {
                     let cell_prev = &surface_prev.cells[[i, 0, 0]];
 
                     let mut torsum = Quantity(0.0);
                     let mut oorsum = Quantity(0.0);
                     let mut vpdiff = Quantity(0.0);
 
+                    // Fix C: Use current iteration vapor pressure for latent heat (Implicit)
                     let curr_vp_pa = cell_prev.cell_vp;
 
                     for nbr_i in surface_curr.neighbor_indices(i, nx) {
                         let neighbor_curr = &surface_curr.cells[[nbr_i, 0, 0]];
-                        let neighbor_prev = &surface_prev.cells[[nbr_i, 0, 0]];
+                        let neighbor_prev = &surface_prev.cells[[nbr_i, 0, 0]]; // Unused now
 
                         let (therm_resistance, vapor_resistance) = Self::calculate_resistance_pair(
                             cell_curr,
@@ -232,6 +227,12 @@ impl Surface {
                     } else {
                         cell_curr.cell_temp
                     }
+                } else {
+                    if cell_curr.is_exterior() {
+                        bc.temp_outside_air
+                    } else {
+                        bc.temp_inside_air
+                    }
                 }
             })
             .collect();
@@ -262,18 +263,9 @@ impl Surface {
         let rh_values: Vec<Dimensionless<f64>> = par_or_seq(&indices)
             .map(|&i| {
                 let cell_curr = &surface_curr.cells[[i, 0, 0]];
-                if cell_curr.is_boundary() {
-                    if cell_curr.is_exterior_boundary() {
-                        let rho_vapor =
-                            physics::vd_from_t_rh(bc.temp_outside_air, bc.rh_outside_air);
-                        physics::rh_from_t_vd(bc.temp_outside_air, rho_vapor)
-                    } else {
-                        let rho_vapor = physics::vd_from_t_rh(bc.temp_inside_air, bc.rh_inside_air);
-                        physics::rh_from_t_vd(bc.temp_inside_air, rho_vapor)
-                    }
-                } else {
-                    let cell_props = &surface_curr.cells[[i, 0, 0]];
-                    let cell_prev_ts = &surface_prev.cells[[i, 0, 0]];
+                if matches!(cell_curr.cell_type, CellType::Material(_)) {
+                    let cell_curr = &surface_curr.cells[[i, 0, 0]];
+                    let cell_prev = &surface_prev.cells[[i, 0, 0]];
 
                     let mut phioosum = 0.0;
                     let mut phiorsum = 0.0;
@@ -281,25 +273,24 @@ impl Surface {
                     let mut vporsum = 0.0;
 
                     let vpsat_pa =
-                        physics::psy_psat_fn_temp(cell_props.cell_temp).value_in(units::pascals);
+                        physics::psy_psat_fn_temp(cell_curr.cell_temp).value_in(units::pascals);
 
                     for nbr_i in surface_curr.neighbor_indices(i, nx) {
-                        let nbr_props = &surface_curr.cells[[nbr_i, 0, 0]];
                         let nbr_curr = &surface_curr.cells[[nbr_i, 0, 0]];
 
                         let overlap: Area<f64> = Quantity(
-                            cell_props
+                            cell_curr
                                 .size
                                 .area_along(0)
                                 .value_in(units::square_meter)
-                                .min(nbr_props.size.area_along(0).value_in(units::square_meter)),
+                                .min(nbr_curr.size.area_along(0).value_in(units::square_meter)),
                         );
 
-                        let dist1 = cell_props.size.x().abs() * 0.5;
-                        let dist2 = nbr_props.size.x().abs() * 0.5;
+                        let dist1 = cell_curr.size.x().abs() * 0.5;
+                        let dist2 = nbr_curr.size.x().abs() * 0.5;
 
                         let (_, vaporr) =
-                            Self::calculate_resistance_pair(cell_props, nbr_props, bc.pressure_air);
+                            Self::calculate_resistance_pair(cell_curr, nbr_curr, bc.pressure_air);
 
                         let vaporr_ps_per_kg = vaporr.value_in(crate::uom::units::pa_s_per_kg);
 
@@ -317,16 +308,16 @@ impl Surface {
                         let dist1_m = dist1.value_in(crate::uom::units::meter);
                         let dist2_m = dist2.value_in(crate::uom::units::meter);
 
-                        let dw1 = cell_props.dw.value_in(crate::uom::units::m2_per_s);
-                        let dwd_phi1 = cell_props.dwd_phi.value_in(crate::uom::units::kg_per_m3);
+                        let dw1 = cell_curr.dw.value_in(crate::uom::units::m2_per_s);
+                        let dwd_phi1 = cell_curr.dwd_phi.value_in(crate::uom::units::kg_per_m3);
                         let rhr1 = if dw1 > 0.0 && dwd_phi1 > 0.0 {
                             dist1_m / (overlap_m2 * dw1 * dwd_phi1)
                         } else {
                             0.0
                         };
 
-                        let dw2 = nbr_props.dw.value_in(crate::uom::units::m2_per_s);
-                        let dwd_phi2 = nbr_props.dwd_phi.value_in(crate::uom::units::kg_per_m3);
+                        let dw2 = nbr_curr.dw.value_in(crate::uom::units::m2_per_s);
+                        let dwd_phi2 = nbr_curr.dwd_phi.value_in(crate::uom::units::kg_per_m3);
                         let rhr2 = if dw2 > 0.0 && dwd_phi2 > 0.0 {
                             dist2_m / (overlap_m2 * dw2 * dwd_phi2)
                         } else {
@@ -339,16 +330,25 @@ impl Surface {
                         }
                     }
 
-                    let dwd_phi = cell_props.dwd_phi.value_in(crate::uom::units::kg_per_m3);
-                    let volume = cell_props.volume.value_in(crate::uom::units::cubic_meter);
+                    let dwd_phi = cell_curr.dwd_phi.value_in(crate::uom::units::kg_per_m3);
+                    let volume = cell_curr.volume.value_in(crate::uom::units::cubic_meter);
                     let wcap = if dwd_phi > 0.0 { dwd_phi * volume } else { 0.0 };
 
                     let denom = phioosum + vpoosum * vpsat_pa + wcap / dt_s;
 
                     if denom > 0.0 {
-                        (phiorsum + vporsum + (wcap * cell_prev_ts.cell_rh) / dt_s) / denom
+                        (phiorsum + vporsum + (wcap * cell_prev.cell_rh) / dt_s) / denom
                     } else {
-                        cell_props.cell_rh
+                        cell_curr.cell_rh
+                    }
+                } else {
+                    if cell_curr.is_exterior() {
+                        let rho_vapor =
+                            physics::vd_from_t_rh(bc.temp_outside_air, bc.rh_outside_air);
+                        physics::rh_from_t_vd(bc.temp_outside_air, rho_vapor)
+                    } else {
+                        let rho_vapor = physics::vd_from_t_rh(bc.temp_inside_air, bc.rh_inside_air);
+                        physics::rh_from_t_vd(bc.temp_inside_air, rho_vapor)
                     }
                 }
             })

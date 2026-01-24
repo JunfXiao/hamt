@@ -105,9 +105,7 @@ impl HamtManager {
 
         let mut stats = ConvergenceStats::default();
 
-
         for _ in 0..self.settings.max_iterations {
-
             self.surface_next.calculate_iteration(
                 &self.settings,
                 &self.boundary_condition,
@@ -117,21 +115,14 @@ impl HamtManager {
 
             stats = convergence_stats(&self.surface_next, &self.surface_curr, &self.settings);
 
-
             mem::swap(&mut self.surface_curr, &mut self.surface_next);
 
             if stats.converged {
-                if !stats.rh_converged {
-                    warn!(
-                        max_delta_rh = stats.max_delta_rh,
-                        max_rh_cell = ?stats.max_rh_cell,
-                        "HAMT temperature converged but RH did not meet tolerance"
-                    );
+                if stats.rh_converged {
+                    return Ok(true); // Converged
                 }
-                return Ok(true); // Converged
             }
         }
-
 
         warn!(
             max_delta_t_k = stats.max_delta_t_k,
@@ -178,7 +169,6 @@ impl Default for ConvergenceStats {
         }
     }
 }
-
 
 fn convergence_stats(
     surface_curr: &Surface,
