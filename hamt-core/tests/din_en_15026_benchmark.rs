@@ -405,8 +405,9 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         let mut current_time: Time<f64> = 0.0 * hours;
         let orig_timestep = mgr.settings.timestep;
         let mut split_factor = 3;
+        let mut fail_details: Vec<(Time<f64>, u32)> = Vec::new();
         while current_time <= end_time {
-            let mut proposed_timestep = orig_timestep / 2.0_f64.powi(split_factor);
+            let mut proposed_timestep = orig_timestep / 2.0_f64.powi(split_factor - 1);
 
             // backtracking
             if split_factor > 1
@@ -422,7 +423,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                 write_time = false;
             }
             print!(
-                "\rTime={:.2} hours, Run time: {} seconds ,Timestep dynamic: {:?} (Original: {:?})",
+                "\rTime={:.2} hours, Run time: {} seconds | dynamic timestep: {:?} ({:?}) s",
                 (current_time / hours).value(),
                 start_time.elapsed().as_secs(),
                 mgr.settings.timestep,
@@ -469,11 +470,29 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
             {
                 let sim_day: i32 = sim_day.value_in(days) as i32;
                 println!("\nCheckpoint reached: {} days\n", sim_day);
-                compare_results(&mgr.surface_curr, sim_day);
+                let fail_count = compare_results(&mgr.surface_curr, sim_day);
+                if fail_count > 0 {
+                    fail_details.push((current_time, fail_count));
+                }
                 write_time = true;
             }
 
             mgr.tick_timestep()?;
+        }
+
+        if !fail_details.is_empty() {
+            eprintln!("Test failed in {} benchmarks", fail_details.len());
+            for (time, count) in fail_details.iter() {
+                eprintln!(
+                    "Failed at time: {} hours, Total failures: {}",
+                    time.value_in(hours),
+                    count
+                );
+            }
+            return Err(anyhow::format_err!(
+                "Diff larger than allowed. {} failures in total.",
+                fail_details.len()
+            ));
         }
     }
 
@@ -489,7 +508,7 @@ fn print_table_row(values: impl IntoIterator<Item = String>, padding: usize) {
 
 const TABLE_PADDING: usize = 15;
 
-fn compare_results(surface: &Surface, duration_day: i32) {
+fn compare_results(surface: &Surface, duration_day: i32) -> u32 {
     let sep = "=".repeat(30);
     println!("{}", sep);
     println!("Comparing at day {}", duration_day);
@@ -520,7 +539,7 @@ fn compare_results(surface: &Surface, duration_day: i32) {
         TABLE_PADDING,
     );
     println!("------------------");
-
+    let mut fail_count = 0u32;
     let mut t_passed = true;
     for (depth, ref_t) in temp_ref {
         let cell_idx = surface
@@ -534,6 +553,9 @@ fn compare_results(surface: &Surface, duration_day: i32) {
         let diviation = (cell_t - ref_t).abs() / ref_t;
 
         let turn_passed = diviation <= PERCENTAGE_RANGE_T;
+        if !turn_passed {
+            fail_count += 1;
+        }
         t_passed &= turn_passed;
         print_table_row(
             vec![
@@ -576,6 +598,9 @@ fn compare_results(surface: &Surface, duration_day: i32) {
         let diviation = (cell_wc - ref_wc).abs() / ref_wc;
 
         let turn_passed = diviation <= PERCENTAGE_RANGE_RH;
+        if !turn_passed {
+            fail_count += 1;
+        }
         rh_passed &= turn_passed;
         print_table_row(
             vec![
@@ -592,8 +617,11 @@ fn compare_results(surface: &Surface, duration_day: i32) {
     if !rh_passed || !t_passed {
         println!("------------------");
         println!("Something's wrong!");
-        panic!("Test failed.")
+        println!("Failed count: {}", fail_count);
+        println!("------------------\n")
     }
+
+    fail_count
 }
 
 #[test]
