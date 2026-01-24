@@ -160,11 +160,11 @@ impl Surface {
                     let mut vpdiff = Quantity(0.0);
 
                     // Fix C: Use current iteration vapor pressure for latent heat (Implicit)
-                    let curr_vp_pa = cell_prev.cell_vp;
+                    let curr_vp_pa = cell_curr.cell_vp;
 
                     for nbr_i in surface_curr.neighbor_indices(i, nx) {
                         let neighbor_curr = &surface_curr.cells[[nbr_i, 0, 0]];
-                        let neighbor_prev = &surface_prev.cells[[nbr_i, 0, 0]]; // Unused now
+                        // let neighbor_prev = &surface_prev.cells[[nbr_i, 0, 0]]; // Unused now
 
                         let (therm_resistance, vapor_resistance) = Self::calculate_resistance_pair(
                             cell_curr,
@@ -178,7 +178,8 @@ impl Surface {
                             torsum += nbr_temp_k / therm_resistance;
                         }
                         if vapor_resistance > 0.0 * pa_s_per_kg {
-                            let nbr_vp_pa = neighbor_prev.cell_vp;
+                            // Fix C: Use current iteration vapor pressure
+                            let nbr_vp_pa = neighbor_curr.cell_vp;
                             vpdiff += (nbr_vp_pa - curr_vp_pa) / vapor_resistance;
                         }
                     }
@@ -257,6 +258,11 @@ impl Surface {
         surface_prev: &Surface,
         surface_curr: &Surface,
     ) -> Result<()> {
+        // Fix B: Capture updated temperatures from the heat step (T_k+1)
+        // We use a cheap collect here to make these available inside the parallel map.
+        // `self.cells` currently holds the temperatures updated by `calculate_temp_next`.
+        let updated_temps: Vec<Temperature<f64>> = self.cells.iter().map(|c| c.cell_temp).collect();
+
         let nx = self.cells.raw_dim()[0];
         let dt_s = settings.timestep.value_in(units::seconds);
         let indices: Vec<usize> = (0..nx).collect();
@@ -272,8 +278,9 @@ impl Surface {
                     let mut vpoosum = 0.0;
                     let mut vporsum = 0.0;
 
-                    let vpsat_pa =
-                        physics::psy_psat_fn_temp(cell_curr.cell_temp).value_in(units::pascals);
+                    // Fix B: Use the NEW temperature for Psat calculation
+                    let temp_new = updated_temps[i];
+                    let vpsat_pa = physics::psy_psat_fn_temp(temp_new).value_in(units::pascals);
 
                     for nbr_i in surface_curr.neighbor_indices(i, nx) {
                         let nbr_curr = &surface_curr.cells[[nbr_i, 0, 0]];
