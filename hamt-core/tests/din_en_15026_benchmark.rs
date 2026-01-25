@@ -8,10 +8,6 @@ use crossterm::{
     style::{self, Attribute, Color, Print},
     terminal::{self, ClearType},
 };
-use hamt_core::boundary::{BoundaryCondition, celsius_to_kelvin, kelvin_to_celsius};
-use hamt_core::hamt_manager::{HamtManager, HamtSettings};
-use hamt_core::material::{Curve, Material, MaterialLibrary, SurfaceVaporCoef};
-use hamt_core::physics::ECLIPSE;
 use hamt_core::surface::Surface;
 use hamt_core::uom::dimensions::{
     Density, Dimensionless, HeatCapacity, Length, SpecificHeatCapacity, Temperature, Time,
@@ -25,10 +21,27 @@ use hamt_core::uom::{
     DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT,
     Dimension, Quantity,
 };
-use std::io::{self, IsTerminal, Stdout, Write};
-use std::ops::Div;
+use hamt_core::{
+    boundary::{BoundaryCondition, celsius_to_kelvin, kelvin_to_celsius},
+    uom::units::seconds,
+};
+use hamt_core::{
+    cell::BoundaryLocation,
+    hamt_manager::{AdaptiveState, HamtManager, HamtSettings},
+};
+use hamt_core::{
+    material::{Curve, Material, MaterialLibrary, SurfaceVaporCoef},
+    uom::dimensions::Mass,
+};
+use hamt_core::{physics::ECLIPSE, uom::units::kilograms};
 use std::sync::Once;
 use std::time::{Duration, Instant};
+use std::{
+    borrow::Cow,
+    io::{self, IsTerminal, Stdout, Write},
+    ops::Deref,
+};
+use std::{cell::RefCell, ops::Div, rc::Rc};
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 use tracing_test::traced_test;
@@ -267,37 +280,43 @@ fn spec_heat_capacity() -> SpecificHeatCapacity<f64> {
 const MAT_NAME: &str = "DIN EN 15026 Mat";
 const CONSTRUCTION_NAME: &str = "DIN EN 15026 Construction";
 
-fn create_library(init_temp_celsius: f64, init_rh: f64, thickness: f64) -> MaterialLibrary {
+fn create_library(init_temp_celsius: f64, init_rh: f64, thicknesses: Vec<f64>) -> MaterialLibrary {
     let thermal_conductivity = get_thermal_conductivity_curve();
     let sorption_isotherm = get_sorption_isotherm_curve();
-    let material = Material {
+    let base_material = Material {
         name: MAT_NAME.to_string(),
-        thickness: thickness * meter,
+        thickness: 0.0 * meter, // Placeholder, will be overridden
         density: rho_mat(),
         thermal_conductivity: thermal_conductivity,
         spec_heat: spec_heat_capacity(),
         porosity: water_sat() / rho_w(),
-        initial_water_content: sorption_isotherm.interpolate(init_rh * dimensionless).0 / rho_mat(), // Initial RH: 50%
+        initial_water_content: sorption_isotherm.interpolate(init_rh * dimensionless).0 / rho_mat(),
         suction: get_liquid_transport_coeff_curve(),
         redistribution: get_liquid_transport_coeff_curve(),
         sorption_isotherm: sorption_isotherm,
         vapor_diffusion_resistance: get_vapor_diffusion_curve(),
-        initial_temp: celsius_to_kelvin(init_temp_celsius), // Initial temperature: 20°C
+        initial_temp: celsius_to_kelvin(init_temp_celsius),
     };
+
     let lib = MaterialLibrary::new();
-    let mat = lib.add_material(material).expect("Cannot add material.");
+    let mut layer_names = Vec::new();
+
+    for (i, d) in thicknesses.iter().enumerate() {
+        let mut mat = base_material.clone();
+        mat.name = format!("{}_{}", MAT_NAME, i);
+        mat.thickness = *d * meter;
+        layer_names.push(mat.name.clone());
+        lib.add_material(mat).expect("Cannot add material.");
+    }
+
     let surface_coeff = SurfaceVaporCoef {
         is_external_const: false,
         external_value: 0.0,
         internal_value: 0.0,
         is_internal_const: false,
     };
-    lib.create_construction(
-        CONSTRUCTION_NAME.to_string(),
-        vec![MAT_NAME.to_string()],
-        surface_coeff,
-    )
-    .expect("Cannot create construction");
+    lib.create_construction(CONSTRUCTION_NAME.to_string(), layer_names, surface_coeff)
+        .expect("Cannot create construction");
 
     lib
 }
@@ -310,21 +329,25 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
 
     init_tracing();
 
-    let mut ui = Ui::new("DIN EN 15026 Benchmark")?;
+    let mut ui = Rc::new(RefCell::new(Ui::new("DIN EN 15026 Benchmark")?));
 
     let result = (|| -> Result<()> {
-        let library = create_library(20.0, 0.5, 15.0);
+        // Use 3 layers to optimize grid:
+        // 1. Surface (0.1m): Fine grid for moisture profile
+        // 2. Transition (1.0m): Intermediate grid
+        // 3. Bulk (48.9m): Coarse grid for semi-infinite thermal mass
+        let library = create_library(20.0, 0.5, vec![15.0]);
         let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
 
         let mut settings = HamtSettings::default();
-        const MAX_SPLITTING_FACTOR: usize = 12;
         settings.timestep = time_step;
         settings.max_iterations = 500;
         settings.temp_convergence_tolerance = 1e-6 * kelvin;
         settings.rh_convergence_tolerance = 1e-5;
-        settings.max_div = 300;
-        settings.min_div = 50;
-        settings.div_length = 1e-6 * meter;
+        settings.max_div = 200;
+        settings.min_div = 20;
+        settings.div_length = 1e-5 * meter;
+        settings.adj_length = 1e-4 * meter;
 
         let boundary_coeff = BoundaryCondition {
             heat_transfer_coeff_ext: 1e100 * w_per_m2_k,
@@ -344,6 +367,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
             ..boundary_coeff
         };
 
+        // Semi-infinite assumption: Step change on outside, Inside remains at initial conditions
         let boundary_condition = BoundaryCondition {
             temp_outside_air: celsius_to_kelvin(30.0),
             temp_inside_air: celsius_to_kelvin(30.0),
@@ -361,141 +385,185 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         )
         .unwrap();
 
-        ui.log(format!("Cell Count: {}", mgr.surface_curr.cells.len()))?;
+        ui.borrow_mut()
+            .log(format!("Cell Count: {}", mgr.surface_curr.cells.len()))?;
 
-        let simulation_durations_days: [Time<f64>; 3] = [7.0 * days, 30.0 * days, 365.0 * days];
+        let simulation_durations_days: Cow<[Time<f64>; 3]> =
+            Cow::Owned([7.0 * days, 30.0 * days, 365.0 * days]);
 
         {
-            ui.log(format!("Running benchmark with time step: {:?}", time_step))?;
-            ui.log("Preheating to reach stable...".to_string())?;
+            ui.borrow_mut()
+                .log(format!("Running benchmark with time step: {:?}", time_step))?;
+            ui.borrow_mut()
+                .log("Preheating to reach stable...".to_string())?;
 
-            let mut preheat_time: Time<f64> = 0.0 * hours;
-            while preheat_time < 24.0 * 30.0 * hours {
-                if !mgr.solve_timestep()? {
-                    return Err(hamt_core::error::Error::Other(
-                        "Preheating failed: timestep did not converge".to_string(),
-                    )
-                    .into());
+            let mut prev_t: Temperature<f64> = 0.0 * kelvin;
+            let mut prev_water: Mass<f64> = 0.0 * kilograms;
+            let mut constant_time: Time<f64> = 0.0 * seconds;
+            let mut allowed_err: Dimensionless<f64> = 0.001 * dimensionless;
+            let mut adap_state = AdaptiveState::default();
+
+            let make_progress_bar_preheat = {
+                let ui_clone = ui.clone();
+                let start_time_for_ui = Rc::new(start_time);
+                let t_avg = prev_t.clone();
+                let water_total = prev_water.clone();
+                let orig_timestep_for_ui = Rc::new(mgr.settings.timestep.clone());
+                move || {
+                    let ui_clone = ui_clone.clone();
+                    let start_time_for_ui = start_time_for_ui.clone();
+                    let orig_timestep_for_ui = orig_timestep_for_ui.clone();
+                    move |state: &AdaptiveState| -> Result<()> {
+                        let orig_timestep = (*orig_timestep_for_ui).clone();
+                        let current_step = if state.split_factor > 0 {
+                            orig_timestep / 2.0_f64.powi(state.split_factor - 1)
+                        } else {
+                            orig_timestep.clone()
+                        };
+                        ui_clone.borrow_mut().set_status(
+                            format!(
+                                "Preheat T_avg={:.2} deg, Water={:.2} kg | Time={:.2} hours | Run time: {} seconds | timestep: {:?} (orig: {:?})",
+                                kelvin_to_celsius(t_avg),
+                                water_total.value_in(kilograms),
+                                (state.current_time / hours).value(),
+                                start_time_for_ui.elapsed().as_secs(),
+                                current_step,
+                                orig_timestep
+                            ),
+                            StatusStyle::from_split_factor(state.split_factor),
+                        )
+                    }
                 }
-                preheat_time += mgr.settings.timestep;
-                mgr.tick_timestep()?;
-                ui.set_status(
-                    format!(
-                        "Preheating | Time={:.2} hours | Run time: {} seconds",
-                        preheat_time.value_in(hours),
-                        start_time.elapsed().as_secs()
-                    ),
-                    StatusStyle::Normal,
-                )?;
-                // if preheat_time > 24.0 * 30.0 * hours {
+            };
+            while constant_time < 240.0 * hours {
+                // if !mgr.solve_timestep()? {
                 //     return Err(hamt_core::error::Error::Other(
-                //         "Preheating failed: Exceeded maximum preheat time".to_string(),
+                //         "Preheating failed: timestep did not converge".to_string(),
                 //     )
                 //     .into());
                 // }
+
+                let set_progress_bar = make_progress_bar_preheat();
+                mgr.solve_timestep_adaptive(&mut adap_state, Some(Box::new(set_progress_bar)))?;
+                // adaptive_state.current_time += mgr.settings.timestep;
+
+                let curr_t = mgr
+                    .surface_prev
+                    .avg_virtual_cell(BoundaryLocation::Exterior, |c| c.cell_temp)?;
+                let curr_water = mgr
+                    .surface_prev
+                    .cells
+                    .iter()
+                    .filter(|c| matches!(c.cell_type, hamt_core::cell::CellType::Material(_)))
+                    .map(|c| c.volumetric_water * c.volume)
+                    .sum::<Mass<f64>>();
+
+                if ((curr_water - prev_water) / prev_water).value() < allowed_err
+                    && ((curr_t - prev_t) / prev_t).value() < allowed_err
+                {
+                    constant_time += mgr.settings.timestep;
+                } else {
+                    constant_time = 0.0 * hours;
+                }
+
+                prev_t = curr_t;
+                prev_water = curr_water;
+
+                if adap_state.current_time > 24.0 * 30.0 * hours {
+                    return Err(hamt_core::error::Error::Other(format!(
+                        "Preheat failed: Exceeded maximum preheat time {:?}",
+                        adap_state.current_time
+                    ))
+                    .into());
+                }
             }
 
-            ui.log(format!(
-                "Preheating completed in {:.2} hours",
-                preheat_time.value_in(hours)
+            ui.borrow_mut().log(format!(
+                "Preheat completed in {:.2} hours",
+                adap_state.current_time.value_in(hours)
             ))?;
         }
 
-        ui.log("Starting simulation...".to_string())?;
-        ui.log(format!("Boundary Condition:\n{:#?}", boundary_condition))?;
+        ui.borrow_mut().log("Starting simulation...".to_string())?;
+        ui.borrow_mut()
+            .log(format!("Boundary Condition:\n{:#?}", boundary_condition))?;
 
         {
             mgr.boundary_condition = boundary_condition;
 
             let end_time: Time<f64> = *simulation_durations_days.last().unwrap() + 1.0 * hours;
 
-            ui.log(format!(
+            ui.borrow_mut().log(format!(
                 "Simulation duration: {:.2} days",
                 (end_time / days).value()
             ))?;
 
+            let mut adap_state = AdaptiveState::default();
+
+            let mut fail_details: Vec<(Time<f64>, u32)> = Vec::new();
             let mut current_time: Time<f64> = 0.0 * hours;
             let orig_timestep = mgr.settings.timestep;
-            let mut split_factor = 3;
-            let mut fail_details: Vec<(Time<f64>, u32)> = Vec::new();
-            while current_time <= end_time {
-                let mut proposed_timestep = orig_timestep / 2.0_f64.powi(split_factor - 1);
 
-                // backtracking
-                if split_factor > 1
-                    && (current_time.value_unchecked()
-                        % (proposed_timestep.value_unchecked() * 2.0)
-                        == 0.0)
-                {
-                    split_factor -= 1;
-                    proposed_timestep *= 2.0;
-                }
-                mgr.settings.timestep = proposed_timestep;
-                let progress = progress_bar(current_time, &simulation_durations_days, 24);
-                ui.set_status(
-                    format!(
-                        "{} Time={:.2} hours | Run time: {} seconds | timestep: {:?} (orig: {:?})",
-                        progress,
-                        (current_time / hours).value(),
-                        start_time.elapsed().as_secs(),
-                        mgr.settings.timestep,
-                        orig_timestep
-                    ),
-                    StatusStyle::from_split_factor(split_factor),
-                )?;
-
-                // Solving the timestep
-                while !mgr.solve_timestep()? {
-                    mgr.settings.timestep = orig_timestep / 2.0_f64.powi(split_factor - 1);
-                    mgr.surface_curr
-                        .sync_state_from(&mgr.surface_prev.clone())?;
-                    mgr.surface_next
-                        .sync_state_from(&mgr.surface_prev.clone())?;
-                    let progress = progress_bar(current_time, &simulation_durations_days, 24);
-
-                    if split_factor > (MAX_SPLITTING_FACTOR as i32) {
-                        return Err(hamt_core::error::Error::Other(format!(
-                            "Convergence failed with splitting factor {} at {:.2} hours",
-                            split_factor,
-                            (current_time / hours).value()
-                        ))
-                        .into());
+            let make_progress_bar = {
+                let ui_clone = ui.clone();
+                let start_time_for_ui = Rc::new(start_time);
+                let simulation_durations_for_ui = simulation_durations_days.clone();
+                let orig_timestep_for_ui = Rc::new(orig_timestep);
+                move || {
+                    let ui_clone = ui_clone.clone();
+                    let start_time_for_ui = start_time_for_ui.clone();
+                    let simulation_durations_for_ui = simulation_durations_for_ui.clone();
+                    let orig_timestep_for_ui = orig_timestep_for_ui.clone();
+                    move |state: &AdaptiveState| -> Result<()> {
+                        let orig_timestep = (*orig_timestep_for_ui).clone();
+                        let current_step = if state.split_factor > 0 {
+                            orig_timestep / 2.0_f64.powi(state.split_factor - 1)
+                        } else {
+                            orig_timestep.clone()
+                        };
+                        let progress = progress_bar(
+                            state.current_time,
+                            simulation_durations_for_ui.as_ref(),
+                            24,
+                        );
+                        ui_clone.borrow_mut().set_status(
+                            format!(
+                                "{} Time={:.2} hours | Run time: {} seconds | timestep: {:?} (orig: {:?})",
+                                progress,
+                                (state.current_time / hours).value(),
+                                start_time_for_ui.elapsed().as_secs(),
+                                current_step,
+                                orig_timestep
+                            ),
+                            StatusStyle::from_split_factor(state.split_factor),
+                        )
                     }
-
-                    split_factor += 1;
-                    ui.set_status(
-                        format!(
-                            "{} Time={:.2} hours | Run time: {} seconds | timestep: {:?} (orig: {:?})",
-                            progress,
-                            (current_time / hours).value(),
-                            start_time.elapsed().as_secs(),
-                            mgr.settings.timestep,
-                            orig_timestep
-                        ),
-                        StatusStyle::from_split_factor(split_factor),
-                    )?;
                 }
+            };
 
-                let actual_step = mgr.settings.timestep;
-                current_time += actual_step;
+            while current_time <= end_time {
+                let set_progress_bar = make_progress_bar();
+                mgr.solve_timestep_adaptive(&mut adap_state, Some(Box::new(set_progress_bar)))?;
+
+                current_time = adap_state.current_time;
 
                 if let Some(sim_day) = simulation_durations_days
                     .iter()
                     .filter(|duration| {
                         (duration.value_in(hours) - &current_time.value_in(hours)).abs()
-                            <= actual_step.value_in(hours) * 0.5
+                            <= mgr.settings.timestep.value_in(hours) * 0.5
                     })
                     .next()
                 {
                     let sim_day: i32 = sim_day.value_in(days) as i32;
-                    ui.log(format!("Checkpoint reached: {} days", sim_day))?;
-                    let fail_count = compare_results(&mgr.surface_curr, sim_day, &mut ui)?;
+                    ui.borrow_mut()
+                        .log(format!("Checkpoint reached: {} days", sim_day))?;
+                    let fail_count =
+                        compare_results(&mgr.surface_next, sim_day, &mut *ui.borrow_mut())?;
                     if fail_count > 0 {
                         fail_details.push((current_time, fail_count));
                     }
                 }
-
-                mgr.tick_timestep()?;
             }
 
             if !fail_details.is_empty() {
@@ -517,7 +585,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         Ok(())
     })();
 
-    ui.finish()?;
+    ui.borrow_mut().finish()?;
     result
 }
 
@@ -625,7 +693,7 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
                 format!("{:.2}", cell_wc),
                 format!("{:.2}", ref_wc),
                 format!("{:.1}", diviation * 100.0),
-                if turn_passed { "OK" } else { "FAIL" }.to_string(),
+                if turn_passed { "OK✔️" } else { "FAIL💥" }.to_string(),
                 format!("{:?}", cell_idx),
             ],
             TABLE_PADDING,

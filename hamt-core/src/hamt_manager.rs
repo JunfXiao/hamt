@@ -8,8 +8,8 @@ use crate::physics::geometry::{Pt3D, Size3D};
 use crate::surface::Surface;
 use crate::uom::dimensions::{Power, Temperature, Time};
 use crate::uom::units::{dimensionless, hours, kelvin, kg_per_m2_s_pa, seconds};
-use crate::{physics, uom};
-use anyhow::{Context, Result};
+use crate::{error, physics, uom};
+use anyhow::{Context, Ok, Result};
 use std::mem;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -132,6 +132,102 @@ impl HamtManager {
             "HAMT timestep did not converge within max iterations"
         );
         Ok(false) // Not converged
+    }
+
+    pub fn solve_timestep_adaptive(
+        &mut self,
+        adaptive_state: &mut AdaptiveState,
+        mut callback_state_change: Option<Box<dyn FnMut(&AdaptiveState) -> Result<()>>>,
+    ) -> Result<()> {
+        adaptive_state.substep_time = 0.0 * hours;
+        let orig_timestep = self.settings.timestep;
+
+        if adaptive_state.split_factor < 1 {
+            adaptive_state.split_factor = 1;
+        }
+        if adaptive_state.split_factor > adaptive_state.max_split_factor as i32 {
+            adaptive_state.split_factor = adaptive_state.max_split_factor as i32;
+        }
+
+        let timestep_for_split = |split_factor: i32| orig_timestep / 2.0_f64.powi(split_factor - 1);
+
+        // Track remaining substeps as integer rounds so the sum lands exactly on orig_timestep.
+        let mut rounds_remaining = 1_i32 << (adaptive_state.split_factor - 1);
+        self.settings.timestep = timestep_for_split(adaptive_state.split_factor);
+
+        while rounds_remaining > 0 {
+            if adaptive_state.retry_wait_time > 0 {
+                adaptive_state.retry_wait_time -= 1;
+            }
+
+            adaptive_state.reset_time_in_contineous = true;
+            if let Some(ref mut callback) = callback_state_change {
+                callback(adaptive_state)?;
+            }
+
+            // Solving the timestep
+            let mut solve_in_one_timestep = true;
+            while !self.solve_timestep()? {
+                solve_in_one_timestep = false;
+                adaptive_state.reset_time_in_contineous = false;
+                adaptive_state.split_factor += 1;
+                if adaptive_state.split_factor > adaptive_state.max_split_factor as i32 {
+                    self.settings.timestep = orig_timestep;
+                    return Err(error::Error::Other(format!(
+                        "Convergence failed with splitting factor {} at {:.2} hours",
+                        adaptive_state.split_factor,
+                        (adaptive_state.current_time / hours).value()
+                    ))
+                    .into());
+                }
+
+                adaptive_state.time_in_contineous_split += 1;
+                adaptive_state.retry_wait_time +=
+                    adaptive_state.time_in_contineous_split * adaptive_state.split_factor;
+
+                // Split by 2 -> remaining rounds double (k -> 2k).
+                rounds_remaining *= 2;
+                self.settings.timestep = timestep_for_split(adaptive_state.split_factor);
+                if let Some(ref mut callback) = callback_state_change {
+                    callback(adaptive_state)?;
+                }
+
+                self.surface_curr
+                    .sync_state_from(&self.surface_prev.clone())?;
+                self.surface_next
+                    .sync_state_from(&self.surface_prev.clone())?;
+            }
+
+            let actual_step = self.settings.timestep;
+            adaptive_state.substep_time += actual_step;
+            adaptive_state.current_time += actual_step;
+            rounds_remaining -= 1;
+            self.tick_timestep()?;
+
+            if adaptive_state.reset_time_in_contineous {
+                adaptive_state.time_in_contineous_split = 0;
+            }
+
+            if solve_in_one_timestep {
+                adaptive_state.retry_wait_time -= adaptive_state.split_factor;
+            }
+
+            // Backtracking: only merge steps when aligned (even rounds remaining).
+            if solve_in_one_timestep
+                && adaptive_state.split_factor > 1
+                && adaptive_state.retry_wait_time <= 0
+                && rounds_remaining % 2 == 0
+            {
+                adaptive_state.retry_wait_time = 0;
+                adaptive_state.split_factor -= 1;
+                rounds_remaining /= 2;
+                self.settings.timestep = timestep_for_split(adaptive_state.split_factor);
+            }
+        }
+
+        self.settings.timestep = orig_timestep;
+        adaptive_state.substep_time = orig_timestep;
+        Ok(())
     }
 
     /// Executes after the timestep has been calculated.
@@ -271,6 +367,32 @@ impl Default for HamtSettings {
             max_div: 20,
             adj_length: 0.00005 * units::meter,
             user_defined_depth: None,
+        }
+    }
+}
+
+pub struct AdaptiveState {
+    pub substep_time: Time<f64>,
+    pub current_time: Time<f64>,
+    pub split_factor: i32,
+    pub max_split_factor: i32,
+    pub fail_details: Vec<(Time<f64>, u32)>,
+    pub retry_wait_time: i32,
+    pub time_in_contineous_split: i32,
+    pub reset_time_in_contineous: bool,
+}
+
+impl Default for AdaptiveState {
+    fn default() -> Self {
+        Self {
+            substep_time: 0.0 * units::seconds,
+            current_time: 0.0 * units::seconds,
+            split_factor: 1,
+            max_split_factor: 12,
+            fail_details: Vec::new(),
+            retry_wait_time: 0,
+            time_in_contineous_split: 0,
+            reset_time_in_contineous: false,
         }
     }
 }
