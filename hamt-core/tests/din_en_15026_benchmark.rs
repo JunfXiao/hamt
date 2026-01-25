@@ -26,7 +26,7 @@ use hamt_core::{
     uom::units::seconds,
 };
 use hamt_core::{
-    cell::BoundaryLocation,
+    cell::{BoundaryLocation, CellType},
     hamt_manager::{AdaptiveState, HamtManager, HamtSettings},
 };
 use hamt_core::{
@@ -256,8 +256,8 @@ fn get_liquid_transport_coeff_curve() -> Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRA
                 - 1.1566e-7 * (w - 73.0).powi(4)
                 + 2.5969e-9 * (w - 73.0).powi(5))
             .exp();
-            let dpc_dw = -0.125e8 / 0.375 * w_sat.powf(1.0 / 0.375) / w.powf(1.0 / 0.375 + 1.0);
-            return k_w * dpc_dw.abs() * m2_per_s;
+            let dpc_dw = 0.125e8 * 0.375 * w_sat.powf(0.375) / w.powf(1.375);
+            return k_w * dpc_dw * m2_per_s;
         },
         x_values,
     )
@@ -322,7 +322,8 @@ fn create_library(init_temp_celsius: f64, init_rh: f64, thicknesses: Vec<f64>) -
 }
 
 const INTERPOLATION_POINTS: usize = 120;
-const INTERPOLATION_DELTA: f64 = 0.03;
+const INTERPOLATION_DELTA: f64 = 0.6;
+const DIAGNOSTIC_SAMPLE: bool = true;
 
 fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
     let start_time = Instant::now();
@@ -367,7 +368,6 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
             ..boundary_coeff
         };
 
-        // Semi-infinite assumption: Step change on outside, Inside remains at initial conditions
         let boundary_condition = BoundaryCondition {
             temp_outside_air: celsius_to_kelvin(30.0),
             temp_inside_air: celsius_to_kelvin(30.0),
@@ -591,6 +591,30 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
 
 const TABLE_PADDING: usize = 15;
 
+fn log_resistances(surface: &Surface, duration_day: i32) -> Option<String> {
+    let mut mats = surface
+        .cells
+        .iter()
+        .filter(|c| matches!(c.cell_type, CellType::Material(_)));
+    if let Some(c0) = mats.next() {
+        Some(format!(
+            "Diag day {}: c0 temp={:.2}K, rh={:.3}, w={:.3e}kg/m3, mu={:.3}, dw={:.3e}m2/s, dwdphi={:.3e}, k={:.3}W/mK, density={:.3}kg/m3, spech={:.3}J/kgK",
+            duration_day,
+            c0.cell_temp.value_in(kelvin),
+            c0.cell_rh.value(),
+            c0.volumetric_water.value_in(kg_per_m3),
+            c0.mu.value(),
+            c0.dw.value_in(m2_per_s),
+            c0.dwd_phi.value_in(kg_per_m3),
+            c0.w_thermal_c.value_in(w_per_m_k),
+            c0.density.value_in(kg_per_m3),
+            c0.spech.value_in(j_per_kg_k),
+        ))
+    } else {
+        None
+    }
+}
+
 fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<u32> {
     const PERCENTAGE_RANGE_RH: f64 = 0.025;
     const PERCENTAGE_RANGE_T: f64 = 0.01;
@@ -604,6 +628,12 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
         .map(|(_, depth, wc)| (depth, wc));
 
     let mut lines = Vec::new();
+
+    if DIAGNOSTIC_SAMPLE {
+        if let Some(line) = log_resistances(surface, duration_day) {
+            lines.push(UiLine::plain(line));
+        }
+    }
     lines.push(UiLine::plain(format!("Comparing at day {}", duration_day)));
     let temp_header = format_table_row(
         &[

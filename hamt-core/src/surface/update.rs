@@ -38,11 +38,8 @@ impl Surface {
         // --- Update moisture-dependent properties for all cells ---
         self.update_cell_properties(bc, settings)?;
 
-        // --- Pre-calculate next-step temperatures for all cells ---
-        self.calculate_temp_next(settings, bc, surface_prev, surface_curr)?;
-
-        // --- Pre-calculate next-step relative humidity for all cells ---
-        self.calculate_rh_next(settings, bc, surface_prev, surface_curr)?;
+        // --- Combined Heat and Moisture Step ---
+        self.calculate_physics_step(settings, bc, surface_prev, surface_curr)?;
 
         // --- Update moisture-dependent properties for all cells ---
         self.update_cell_properties(bc, settings)?;
@@ -138,8 +135,8 @@ impl Surface {
         Ok(())
     }
 
-    /// Heat step: compute next temperatures for all cells.
-    fn calculate_temp_next(
+    /// Combined Heat and Moisture step: compute next T and RH for all cells.
+    fn calculate_physics_step(
         &mut self,
         settings: &HamtSettings,
         bc: &BoundaryCondition,
@@ -147,13 +144,23 @@ impl Surface {
         surface_curr: &Surface,
     ) -> Result<()> {
         let dt_s = settings.timestep;
+        let dt_s_val = dt_s.value_in(units::seconds);
         let nx = self.cells.raw_dim()[0];
         let indices: Vec<usize> = (0..nx).collect();
-        let temps: Vec<Temperature<f64>> = par_or_seq(&indices)
+
+        let results: Vec<(Temperature<f64>, Dimensionless<f64>)> = par_or_seq(&indices)
             .map(|&i| {
                 let cell_curr = &surface_curr.cells[[i, 0, 0]];
-                if matches!(cell_curr.cell_type, CellType::Material(_)) {
+
+                if matches!(
+                    cell_curr.cell_type,
+                    CellType::Material(_) | CellType::Boundary(_, _)
+                ) {
                     let cell_prev = &surface_prev.cells[[i, 0, 0]];
+
+                    // ==========================================
+                    // 1. Heat Calculation (Calculate T_next)
+                    // ==========================================
 
                     let mut torsum = Quantity(0.0);
                     let mut oorsum = Quantity(0.0);
@@ -164,7 +171,6 @@ impl Surface {
 
                     for nbr_i in surface_curr.neighbor_indices(i, nx) {
                         let neighbor_curr = &surface_curr.cells[[nbr_i, 0, 0]];
-                        // let neighbor_prev = &surface_prev.cells[[nbr_i, 0, 0]]; // Unused now
 
                         let (therm_resistance, vapor_resistance) = Self::calculate_resistance_pair(
                             cell_curr,
@@ -194,7 +200,7 @@ impl Surface {
 
                     let mut qvp = Quantity(0.0);
                     if settings.latent_heat_enabled
-                        && let CellType::Material(_) = cell_curr.cell_type
+                        && matches!(cell_curr.cell_type, CellType::Material(_))
                     {
                         qvp = vpdiff * physics::W_HV;
                         if qvp.abs() > settings.max_latent_heat {
@@ -219,71 +225,43 @@ impl Surface {
                         _ => 0.0 * watts,
                     };
 
-                    let denom = oorsum + (tcap_j_per_k / dt_s);
-                    if denom > Quantity(ECLIPSE) {
+                    let denom_t = oorsum + (tcap_j_per_k / dt_s);
+                    let t_next = if denom_t > Quantity(ECLIPSE) {
                         let prev_temp_k = cell_prev.cell_temp;
                         let other: Power<f64> = tcap_j_per_k * prev_temp_k / dt_s;
                         let numer = torsum + qvp + q_adds + other;
-                        numer / denom
+                        numer / denom_t
                     } else {
                         cell_curr.cell_temp
-                    }
-                } else {
-                    if cell_curr.is_exterior() {
-                        bc.temp_outside_air
-                    } else {
-                        bc.temp_inside_air
-                    }
-                }
-            })
-            .collect();
+                    };
 
-        if let Some(cells) = self.cells.as_slice_mut() {
-            par_or_seq_mut(cells).enumerate().for_each(|(i, cell)| {
-                cell.cell_temp = temps[i];
-            });
-        } else {
-            for i in 0..nx {
-                self.cells[[i, 0, 0]].cell_temp = temps[i];
-            }
-        }
-        Ok(())
-    }
-
-    /// Moisture step: compute next RH for all cells.
-    fn calculate_rh_next(
-        &mut self,
-        settings: &HamtSettings,
-        bc: &BoundaryCondition,
-        surface_prev: &Surface,
-        surface_curr: &Surface,
-    ) -> Result<()> {
-        // Fix B: Capture updated temperatures from the heat step (T_k+1)
-        // We use a cheap collect here to make these available inside the parallel map.
-        // `self.cells` currently holds the temperatures updated by `calculate_temp_next`.
-        let updated_temps: Vec<Temperature<f64>> = self.cells.iter().map(|c| c.cell_temp).collect();
-
-        let nx = self.cells.raw_dim()[0];
-        let dt_s = settings.timestep.value_in(units::seconds);
-        let indices: Vec<usize> = (0..nx).collect();
-        let rh_values: Vec<Dimensionless<f64>> = par_or_seq(&indices)
-            .map(|&i| {
-                let cell_curr = &surface_curr.cells[[i, 0, 0]];
-                if matches!(cell_curr.cell_type, CellType::Material(_)) {
-                    let cell_curr = &surface_curr.cells[[i, 0, 0]];
-                    let cell_prev = &surface_prev.cells[[i, 0, 0]];
+                    // ==========================================
+                    // 2. Moisture Calculation (Calculate RH_next)
+                    // ==========================================
 
                     let mut phioosum = 0.0;
                     let mut phiorsum = 0.0;
                     let mut vpoosum = 0.0;
                     let mut vporsum = 0.0;
 
-                    // Fix B: Use the NEW temperature for Psat calculation
-                    let temp_new = updated_temps[i];
-                    let vpsat_pa = physics::psy_psat_fn_temp(temp_new).value_in(units::pascals);
+                    // Fix B: Use the NEW temperature for Psat calculation (Tight Coupling)
+                    let vpsat_pa = physics::psy_psat_fn_temp(t_next).value_in(units::pascals);
 
                     for nbr_i in surface_curr.neighbor_indices(i, nx) {
                         let nbr_curr = &surface_curr.cells[[nbr_i, 0, 0]];
+
+                        // Re-calculate resistances as needed by physics (simplification: reuse same state as heat step)
+                        let (_, vaporr) =
+                            Self::calculate_resistance_pair(cell_curr, nbr_curr, bc.pressure_air);
+                        let vaporr_ps_per_kg = vaporr.value_in(crate::uom::units::pa_s_per_kg);
+
+                        if vaporr_ps_per_kg > 0.0 {
+                            vpoosum += 1.0 / vaporr_ps_per_kg;
+                            let nbr_vp_pa = (nbr_curr.cell_rh
+                                * physics::psy_psat_fn_temp(nbr_curr.cell_temp))
+                            .value_in(units::pascals);
+                            vporsum += nbr_vp_pa / vaporr_ps_per_kg;
+                        }
 
                         let overlap: Area<f64> = Quantity(
                             cell_curr
@@ -292,24 +270,8 @@ impl Surface {
                                 .value_in(units::square_meter)
                                 .min(nbr_curr.size.area_along(0).value_in(units::square_meter)),
                         );
-
                         let dist1 = cell_curr.size.x().abs() * 0.5;
                         let dist2 = nbr_curr.size.x().abs() * 0.5;
-
-                        let (_, vaporr) =
-                            Self::calculate_resistance_pair(cell_curr, nbr_curr, bc.pressure_air);
-
-                        let vaporr_ps_per_kg = vaporr.value_in(crate::uom::units::pa_s_per_kg);
-
-                        if vaporr_ps_per_kg > 0.0 {
-                            vpoosum += 1.0 / vaporr_ps_per_kg;
-
-                            let nbr_vp_pa = (nbr_curr.cell_rh
-                                * physics::psy_psat_fn_temp(nbr_curr.cell_temp))
-                            .value_in(units::pascals);
-
-                            vporsum += nbr_vp_pa / vaporr_ps_per_kg;
-                        }
 
                         let overlap_m2 = overlap.value_in(crate::uom::units::square_meter);
                         let dist1_m = dist1.value_in(crate::uom::units::meter);
@@ -317,6 +279,7 @@ impl Surface {
 
                         let dw1 = cell_curr.dw.value_in(crate::uom::units::m2_per_s);
                         let dwd_phi1 = cell_curr.dwd_phi.value_in(crate::uom::units::kg_per_m3);
+
                         let rhr1 = if dw1 > 0.0 && dwd_phi1 > 0.0 {
                             dist1_m / (overlap_m2 * dw1 * dwd_phi1)
                         } else {
@@ -338,24 +301,35 @@ impl Surface {
                     }
 
                     let dwd_phi = cell_curr.dwd_phi.value_in(crate::uom::units::kg_per_m3);
-                    let volume = cell_curr.volume.value_in(crate::uom::units::cubic_meter);
-                    let wcap = if dwd_phi > 0.0 { dwd_phi * volume } else { 0.0 };
+                    let volume_m3 = cell_curr.volume.value_in(crate::uom::units::cubic_meter);
+                    let wcap = if dwd_phi > 0.0 {
+                        dwd_phi * volume_m3
+                    } else {
+                        0.0
+                    };
 
-                    let denom = phioosum + vpoosum * vpsat_pa + wcap / dt_s;
+                    let denom_rh = phioosum + vpoosum * vpsat_pa + wcap / dt_s_val;
 
-                    if denom > 0.0 {
-                        (phiorsum + vporsum + (wcap * cell_prev.cell_rh) / dt_s) / denom
+                    let rh_next = if denom_rh > 0.0 {
+                        Quantity(
+                            (phiorsum + vporsum + (wcap * cell_prev.cell_rh.value()) / dt_s_val)
+                                / denom_rh,
+                        )
                     } else {
                         cell_curr.cell_rh
-                    }
+                    };
+
+                    (t_next, rh_next)
                 } else {
+                    // Boundary Logic
                     if cell_curr.is_exterior() {
-                        let rho_vapor =
-                            physics::vd_from_t_rh(bc.temp_outside_air, bc.rh_outside_air);
-                        physics::rh_from_t_vd(bc.temp_outside_air, rho_vapor)
+                        let t = bc.temp_outside_air;
+                        let rho = physics::vd_from_t_rh(t, bc.rh_outside_air);
+                        (t, physics::rh_from_t_vd(t, rho))
                     } else {
-                        let rho_vapor = physics::vd_from_t_rh(bc.temp_inside_air, bc.rh_inside_air);
-                        physics::rh_from_t_vd(bc.temp_inside_air, rho_vapor)
+                        let t = bc.temp_inside_air;
+                        let rho = physics::vd_from_t_rh(t, bc.rh_inside_air);
+                        (t, physics::rh_from_t_vd(t, rho))
                     }
                 }
             })
@@ -363,15 +337,15 @@ impl Surface {
 
         if let Some(cells) = self.cells.as_slice_mut() {
             par_or_seq_mut(cells).enumerate().for_each(|(i, cell)| {
-                cell.cell_rh = Quantity(rh_values[i]).clamp(Quantity(0.0), Quantity(1.01));
+                cell.cell_temp = results[i].0;
+                cell.cell_rh = results[i].1.clamp(Quantity(0.0), Quantity(1.01));
             });
         } else {
             for i in 0..nx {
-                self.cells[[i, 0, 0]].cell_rh =
-                    Quantity(rh_values[i]).clamp(Quantity(0.0), Quantity(1.01));
+                self.cells[[i, 0, 0]].cell_temp = results[i].0;
+                self.cells[[i, 0, 0]].cell_rh = results[i].1.clamp(Quantity(0.0), Quantity(1.01));
             }
         }
-
         Ok(())
     }
 
@@ -379,17 +353,8 @@ impl Surface {
     fn neighbor_indices(&self, i: usize, nx: usize) -> impl Iterator<Item = usize> {
         let self_cell = self.cells.get([i, 0, 0]).unwrap();
 
-        let left: Vec<usize> = if matches!(self_cell.cell_type, CellType::Boundary(_, _)) {
-            (0..i).collect()
-        } else if i > 0 {
-            (i - 1..i).collect()
-        } else {
-            vec![]
-        };
-
-        let right = if matches!(self_cell.cell_type, CellType::Boundary(_, _)) {
-            (i + 1..nx).collect()
-        } else if i + 1 < nx {
+        let left: Vec<usize> = if i > 0 { (i - 1..i).collect() } else { vec![] };
+        let right = if i + 1 < nx {
             (i + 1..i + 2).collect()
         } else {
             vec![]
