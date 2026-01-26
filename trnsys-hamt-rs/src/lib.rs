@@ -14,7 +14,6 @@ use tracing::{debug, error};
 use trnsys::*;
 
 mod fpu_guard;
-mod storage;
 mod trnsys;
 mod trnsys_type;
 
