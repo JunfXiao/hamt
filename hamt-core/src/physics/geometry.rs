@@ -2,10 +2,7 @@ use std::ops;
 
 use tracing::error;
 
-use crate::uom::{
-    AreaQty, VolumeQty,
-    dimensions::{Area, Length},
-};
+use crate::uom::dimensions::{Area, Length, Volume};
 
 /// A point or vector in 3D space.
 /// ## Coordinates:
@@ -40,12 +37,12 @@ impl Pt3D {
             2 => self.0 * self.1,
             _ => {
                 error!("Invalid axis for area: {}", axis);
-                AreaQty::<f64>::zero()
+                Area::<f64>::zero()
             }
         }
     }
 
-    pub fn volume(&self) -> VolumeQty<f64> {
+    pub fn volume(&self) -> Volume<f64> {
         self.0 * self.1 * self.2
     }
 }

@@ -246,8 +246,8 @@ fn get_thermal_conductivity_curve() -> Curve<DIM_WATER_CONTENT, DIM_THERMAL_COND
 
 fn get_liquid_transport_coeff_curve() -> Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF> {
     let x_values: Vec<WaterContent<f64>> = interpolate_data_points(
-        0.0,
-        water_sat().value_in(kg_per_m3),
+        0.5 * water_sat().value_in(kg_per_m3),
+        0.95 * water_sat().value_in(kg_per_m3),
         INTERPOLATION_POINTS,
         INTERPOLATION_DELTA,
     )
@@ -351,7 +351,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         // 1. Surface (0.1m): Fine grid for moisture profile
         // 2. Transition (1.0m): Intermediate grid
         // 3. Bulk (48.9m): Coarse grid for semi-infinite thermal mass
-        let library = create_library(20.0, 0.5, vec![0.15,0.85,19.0], vec![Some(50), Some(35), Some(15)]);
+        let library = create_library(20.0, 0.5, vec![0.1,0.9,4.0,10.0, 20.0], vec![Some(40), Some(60), Some(60), Some(60), Some(60)]);
         let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
 
         let mut settings = HamtSettings::default();
@@ -365,12 +365,12 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         settings.adj_length = 1e-4 * meter;
 
         let boundary_coeff = BoundaryCondition {
-            heat_transfer_coeff_ext: 1e100 * w_per_m2_k,
-            heat_transfer_coeff_int: 0.0 * w_per_m2_k,
-            mass_convection_coeff_ext: 1e100 * m_per_s,
-            mass_convection_coeff_int: 0.0 * m_per_s,
-            vapor_transport_coeff_ext: 1e100 * kg_per_m2_s_pa,
-            vapor_transport_coeff_int: 0.0 * kg_per_m2_s_pa,
+            heat_transfer_coeff_ext: 9e9 * w_per_m2_k,
+            heat_transfer_coeff_int: 9e-9 * w_per_m2_k,
+            mass_convection_coeff_ext: 9e9 * m_per_s,
+            mass_convection_coeff_int: 9e-9 * m_per_s,
+            vapor_transport_coeff_ext: 9e9 * kg_per_m2_s_pa,
+            vapor_transport_coeff_int: 9e-9 * kg_per_m2_s_pa,
             ..Default::default()
         };
 
@@ -542,19 +542,19 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                             24,
                         );
                         let realworld_elapsed = start_time_for_ui.elapsed().as_secs();
-                        let speed = if realworld_elapsed > 0 {
-                            (state.current_time / hours).value() as u64 / realworld_elapsed
+                        let speed: f64 = if realworld_elapsed > 0 {
+                            (state.current_time).value_in(hours) / realworld_elapsed as f64
                         } else {
-                            0
+                            0.0
                         };
-                        let estimated_time = if speed > 0 {
-                            ((end_time - state.current_time) / hours).value() as u64 / speed
+                        let estimated_time = if speed > 0.0 {
+                            ((end_time - state.current_time)).value_in(hours) as f64 / speed
                         } else {
-                            f64::INFINITY as u64
+                            0.0
                         };
                         ui_clone.borrow_mut().set_status(
                             format!(
-                                "{} Time={:.2} hours | Run time: {} seconds | {:.2} hr/s, ETA: {:.1} hr | timestep: {:?} (orig: {:?})",
+                                "{} Time={:.2} hours | Run time: {} seconds | {:.2} hr/s, ETA: {:.1} s | timestep: {:?} (orig: {:?})",
                                 progress,
                                 (state.current_time / hours).value(),
                                 start_time_for_ui.elapsed().as_secs(),

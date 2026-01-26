@@ -7,7 +7,7 @@ use crate::physics::R_V;
 use crate::physics::geometry::{Pt3D, Size3D};
 use crate::surface::Surface;
 use crate::uom::dimensions::{Power, Temperature, Time};
-use crate::uom::units::{dimensionless, hours, kelvin, kg_per_m2_s_pa, seconds};
+use crate::uom::units::{hours, kelvin};
 use crate::{error, physics, uom};
 use anyhow::{Context, Ok, Result};
 use std::mem;
@@ -124,13 +124,13 @@ impl HamtManager {
             }
         }
 
-        warn!(
-            max_delta_t_k = stats.max_delta_t_k,
-            max_delta_rh = stats.max_delta_rh,
-            max_temp_cell = ?stats.max_temp_cell,
-            max_rh_cell = ?stats.max_rh_cell,
-            "HAMT timestep did not converge within max iterations"
-        );
+        // warn!(
+        //     max_delta_t_k = stats.max_delta_t_k,
+        //     max_delta_rh = stats.max_delta_rh,
+        //     max_temp_cell = ?stats.max_temp_cell,
+        //     max_rh_cell = ?stats.max_rh_cell,
+        //     "HAMT timestep did not converge within max iterations"
+        // );
         Ok(false) // Not converged
     }
 

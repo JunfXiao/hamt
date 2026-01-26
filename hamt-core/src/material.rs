@@ -12,8 +12,8 @@ use crate::{
     error::{Error, InvalidInputReason},
     uom::{
         DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT,
-        DensityQty, Dimension, DimensionlessQty, Quantity, Temperature,
-        dimensions::{Dimensionless, Length, SpecificHeatCapacity},
+         Dimension, Quantity, 
+        dimensions::{Density, Dimensionless, Length, SpecificHeatCapacity, Temperature},
     },
 };
 use anyhow::{Context, Ok, Result};
@@ -148,7 +148,7 @@ pub struct Material {
     // #[deprecated = "Not used at all"]
     // pub conductivity: ThermalConductivity<f64>,
     /// Density of the material [kg/m³].
-    pub density: DensityQty<f64>,
+    pub density: Density<f64>,
 
     /// Specific heat of the material [J/(kg·K)].
     pub spec_heat: SpecificHeatCapacity<f64>,
@@ -226,7 +226,7 @@ impl Default for Material {
         Self {
             name: "Unnamed Material".to_string(),
             thickness: Length::<f64>::zero(),
-            density: DensityQty::<f64>::zero(),
+            density: Density::<f64>::zero(),
             spec_heat: SpecificHeatCapacity::<f64>::zero(),
             porosity: Quantity(0.5),
             initial_water_content: Quantity(0.5),
@@ -249,12 +249,12 @@ impl Material {
         }
     }
 
-    pub fn initial_water_density(&self) -> DensityQty<f64> {
+    pub fn initial_water_density(&self) -> Density<f64> {
         let density = self.density;
         self.initial_water_content * density
     }
 
-    pub fn initial_rh(&self) -> DimensionlessQty<f64> {
+    pub fn initial_rh(&self) -> Dimensionless<f64> {
         self.sorption_isotherm
             .reverse_interpolate(self.initial_water_density())
             .0

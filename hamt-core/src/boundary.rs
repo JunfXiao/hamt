@@ -3,10 +3,9 @@ use serde::Serialize;
 use crate::{
     physics::{ATMOSPHERE_PRESSURE, KELVIN_CONV},
     uom::{
-        PressureQty, Quantity,
+        Quantity,
         dimensions::{
-            Dimensionless, HeatTransferCoeff, MassConvectionCoeff, Power, Temperature,
-            VaporTransportCoeff,
+            Dimensionless, HeatTransferCoeff, MassConvectionCoeff, Power, Pressure, Temperature, VaporTransportCoeff
         },
         units::{self, m_per_s, w_per_m2_k, watts},
     },
@@ -26,7 +25,7 @@ pub struct BoundaryCondition {
     /// Relative humidity of the inside air [-].
     pub rh_inside_air: Dimensionless<f64>,
     /// Pressure of the air [Pa].
-    pub pressure_air: PressureQty<f64>,
+    pub pressure_air: Pressure<f64>,
 
     /// External heat transfer coefficient [W/m²K].
     pub heat_transfer_coeff_ext: HeatTransferCoeff<f64>,

@@ -119,10 +119,10 @@ impl Surface {
                 let did_f64 = did as f64;
                 let divs_f64 = divs as f64;
                 // Make cells smaller near the surface using sine distribution
-                let length = mat_thickness_m
-                    * (((PI * (-did_f64 / divs_f64) - PI / 2.0).sin() / 2.0)
-                        - ((PI * (-(did_f64 - 1.0) / divs_f64) - PI / 2.0).sin() / 2.0));
-
+                // let length = mat_thickness_m
+                //     * (((PI * (-did_f64 / divs_f64) - PI / 2.0).sin() / 2.0)
+                //         - ((PI * (-(did_f64 - 1.0) / divs_f64) - PI / 2.0).sin() / 2.0));
+                let length = mat_thickness_m / divs_f64; // uniform division
                 let size = get_size(length);
 
                 let cell = Cell::new(

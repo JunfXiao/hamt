@@ -34,7 +34,6 @@ unit_system!(
     dimension HeatTransferCoeff = Power / (Area * Temperature); // W/(m²·K)
     dimension ThermalConductivity = Power / (Length * Temperature); // W/(m·K)
     dimension ThermalConductance = Power / Temperature;
-    dimension LiquidTransferCoeff = Length^2 / Time;
     dimension VaporTransportCoeff = Mass / (Area * Time * Pressure); // kg/(m²·s·Pa)
     dimension MassConvectionCoeff = Length /  Time; // m/s
     dimension Density = Mass / Volume; // kg/m³
@@ -45,6 +44,8 @@ unit_system!(
     dimension ThermalResistance =Temperature / Power; // K/W
     // Vapor resistance (Pa·s/kg), consistent with WVDC-based formulation
     dimension VaporResistance = Pressure * Time / Mass;
+    dimension VaporConductance = Dimensionless / VaporResistance;
+    dimension MassResistance = Dimensionless / MassFlux;
 
     // Base units
     #[base(Length)]
@@ -96,6 +97,7 @@ unit_system!(
     unit kg_per_m_s_pa: VaporPermeability = kilograms / (meter * seconds * pascals);
     // Vapor resistance: Pa·s/kg
     unit pa_s_per_kg: VaporResistance = pascals * seconds / kilograms;
+    unit s_per_kg: MassResistance = seconds / kilograms;
 
     // Domain constants (SI)
     constant WATER_DENSITY = 1000.0f64 * kg_per_m3;
@@ -108,21 +110,6 @@ unit_system!(
 pub type HamtQuantity<S, const D: Dimension> = Quantity<S, D>;
 pub type HamtDimension = Dimension;
 
-// Helpful quantity aliases using the dimension consts
-pub type DimensionlessQty<S> = Quantity<S, { DIM_DIMENSIONLESS }>;
-pub type TimeQty<S> = Quantity<S, { DIM_TIME }>;
-pub type Temperature<S> = Quantity<S, { DIM_TEMPERATURE }>;
-pub type PressureQty<S> = Quantity<S, { DIM_PRESSURE }>;
-pub type AreaQty<S> = Quantity<S, { DIM_AREA }>;
-pub type VolumeQty<S> = Quantity<S, { DIM_VOLUME }>;
-pub type PowerQty<S> = Quantity<S, { DIM_POWER }>;
-pub type DensityQty<S> = Quantity<S, { DIM_DENSITY }>;
-pub type WaterContentQty<S> = Quantity<S, { DIM_WATER_CONTENT }>;
-pub type SpecificHeatCapacityQty<S> = Quantity<S, { DIM_SPECIFIC_HEAT_CAPACITY }>;
-pub type ThermalConductivityQty<S> = Quantity<S, { DIM_THERMAL_CONDUCTIVITY }>;
-pub type HeatTransportCoeffQty<S> = Quantity<S, { DIM_HEAT_TRANSFER_COEFF }>;
-pub type LiquidTransportCoeffQty<S> = Quantity<S, { DIM_LIQUID_TRANSPORT_COEFF }>;
-pub type VaporTransportCoeffQty<S> = Quantity<S, { DIM_VAPOR_TRANSPORT_COEFF }>;
 
 // Dimension constants for const-generic quantities
 //
