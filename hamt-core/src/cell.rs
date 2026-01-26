@@ -210,7 +210,7 @@ impl Cell {
 
         if let CellType::Material(mat) = &self.cell_type {
             let (water, dwdphi) = mat.sorption_isotherm.interpolate(rh_self);
-            
+
             self.volumetric_water = water;
 
             self.dwd_phi = dwdphi;
@@ -221,8 +221,8 @@ impl Cell {
                 mat.redistribution.interpolate(water)
             };
 
-            self.dw = dw;
-
+            // make sure dw is positive
+            self.dw = dw.abs();
 
             let (mu, _) = mat.vapor_diffusion_resistance.interpolate(rh_self);
 
@@ -242,7 +242,6 @@ impl Cell {
         self.w_thermal_c = ref_cell.w_thermal_c;
         self.dwd_phi = ref_cell.dwd_phi;
         self.dw = ref_cell.dw;
-
         self.cell_temp = ref_cell.cell_temp;
         self.cell_rh = ref_cell.cell_rh;
         self.cell_vp = ref_cell.cell_vp;

@@ -8,7 +8,6 @@ use crossterm::{
     style::{self, Attribute, Color, Print},
     terminal::{self, ClearType},
 };
-use hamt_core::{physics::ATMOSPHERE_PRESSURE, surface::Surface, uom::{constants::VAPOR_GAS_CONSTANT, units::pascals}};
 use hamt_core::uom::dimensions::{
     Density, Dimensionless, HeatCapacity, Length, SpecificHeatCapacity, Temperature, Time,
     VolumetricHeatCapacity, WaterContent,
@@ -33,8 +32,12 @@ use hamt_core::{
     material::{Curve, Material, MaterialLibrary, SurfaceVaporCoef},
     uom::dimensions::Mass,
 };
+use hamt_core::{
+    physics::ATMOSPHERE_PRESSURE,
+    surface::Surface,
+    uom::{constants::VAPOR_GAS_CONSTANT, units::pascals},
+};
 use hamt_core::{physics::ECLIPSE, uom::units::kilograms};
-use std::{collections::HashSet, sync::Once};
 use std::time::{Duration, Instant};
 use std::{
     borrow::Cow,
@@ -42,6 +45,7 @@ use std::{
     ops::Deref,
 };
 use std::{cell::RefCell, ops::Div, rc::Rc};
+use std::{collections::HashSet, sync::Once};
 use tracing::{Instrument, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 use tracing_test::traced_test;
@@ -50,7 +54,7 @@ use tracing_test::traced_test;
 const REF_WATER_CONTENT: &[(i32, f64, f64)] = &[
     // (days, depth_m, wc_kg_m3)
     // Source: Tabelle B.1 (Page 37)
-// (1, 0.01, 26.64),
+    // (1, 0.01, 26.64),
     // --- 7 Days ---
     (7, 0.01, 52.4),
     (7, 0.02, 43.4),
@@ -83,7 +87,7 @@ const REF_WATER_CONTENT: &[(i32, f64, f64)] = &[
 const REF_TEMPERATURE: &[(i32, f64, f64)] = &[
     // (days, depth_m, temp_c)
     // Source: Tabelle B.2 (Page 38)
-// (1, 0.5, 26.64),
+    // (1, 0.5, 26.64),
     // --- 7 Days ---
     (7, 0.5, 26.64),
     (7, 1.0, 23.84),
@@ -164,7 +168,7 @@ fn sorption_isotherm(rh: Dimensionless<f64>) -> Quantity<f64, DIM_WATER_CONTENT>
 
     w_sat
         * (1.0f64
-            + (8.0e-8 * r_h2o * (t_ref+10.0) * rho_w * rh.value().ln())
+            + (8.0e-8 * r_h2o * (t_ref + 10.0) * rho_w * rh.value().ln())
                 .abs()
                 .powf(1.6))
         .powf(-0.375)
@@ -176,24 +180,19 @@ fn interpolate_data_points(
     d_point_len: usize,
     proportion: f64,
 ) -> impl Iterator<Item = f64> {
-
     assert!(proportion > 0.0 && proportion < 1.0);
 
     let k = proportion * 5.0;
-    
 
     let denom = 1.0 - (-k).exp();
-    
+
     let n = (d_point_len - 1) as f64;
 
     (0..d_point_len).map(move |i| {
-
         let t = i as f64 / n;
-
 
         let numer = 1.0 - (-k * t).exp();
         let ratio = numer / denom;
-
 
         start + ratio * (end - start)
     })
@@ -221,14 +220,20 @@ fn get_vapor_diffusion_curve() -> Curve<DIM_DIMENSIONLESS, DIM_DIMENSIONLESS> {
 
     curve_by_func_and_x_values(
         |x: Dimensionless<f64>| {
-            let x = x.value().clamp(0.0, 0.99) * dimensionless;
+            let x = x.value().clamp(0.0, 1.0) * dimensionless;
             let water_content_ratio = sorption_isotherm(x) / water_sat();
             let rest_water_ratio = 1.0 - water_content_ratio.value();
             // 200.0 * (0.503 * rest_water_ratio.powf(2.0) + 0.497) / rest_water_ratio * dimensionless
             // According to https://wufi.de/en/wp-content/uploads/sites/11/2015/04/WUFI-Pro-Benchmarktest-EN15026_en.pdf
-            let delta_p:Quantity<f64, _> = 1.0/ (VAPOR_GAS_CONSTANT * t_ref().value_in(kelvin)) * 26.1e-6 / 200.0 * rest_water_ratio / (0.503 * rest_water_ratio.powf(2.0) + 0.497);
+            let delta_p: Quantity<f64, _> =
+                1.0 / (VAPOR_GAS_CONSTANT * t_ref().value_in(kelvin)) * 26.1e-6 / 200.0
+                    * rest_water_ratio
+                    / (0.503 * rest_water_ratio.powf(2.0) + 0.497);
 
-            1.968e-7 * t_ref().value_in(kelvin).powf(0.81) / ATMOSPHERE_PRESSURE.value_in(pascals) / delta_p.value_in(kg_per_m2_s_pa) * dimensionless
+            1.968e-7 * t_ref().value_in(kelvin).powf(0.81)
+                / ATMOSPHERE_PRESSURE.value_in(pascals)
+                / delta_p.value_in(kg_per_m2_s_pa)
+                * dimensionless
         },
         x_values,
     )
@@ -246,7 +251,7 @@ fn get_thermal_conductivity_curve() -> Curve<DIM_WATER_CONTENT, DIM_THERMAL_COND
 
 fn get_liquid_transport_coeff_curve() -> Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF> {
     let x_values: Vec<WaterContent<f64>> = interpolate_data_points(
-        0.5 * water_sat().value_in(kg_per_m3),
+        0.0 * water_sat().value_in(kg_per_m3),
         0.95 * water_sat().value_in(kg_per_m3),
         INTERPOLATION_POINTS,
         INTERPOLATION_DELTA,
@@ -259,7 +264,7 @@ fn get_liquid_transport_coeff_curve() -> Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRA
             let w = x.value_in(kg_per_m3);
             let w_sat = water_sat().value_in(kg_per_m3);
             let w_ratio = w / w_sat;
-            let p_suc = 0.125e8f64 * ((w_ratio).powf(-1.0f64/0.375)-1.0).powf(0.625);
+            let p_suc = 0.125e8f64 * ((w_ratio).powf(-1.0f64 / 0.375) - 1.0).powf(0.625);
 
             let k_w = (-39.2619 + 0.0704 * (w - 73.0)
                 - 1.7420e-4 * (w - 73.0).powi(2)
@@ -268,7 +273,7 @@ fn get_liquid_transport_coeff_curve() -> Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRA
                 + 2.5969e-9 * (w - 73.0).powi(5))
             .exp();
             // let dpc_dw = 0.125e8 * 0.375 * w_sat.powf(0.375) / w.powf(1.375);
-            let dpc_dw = - p_suc * 0.625f64 / (1.0f64 - w_ratio.powf(1.0/0.375)) /0.375 / w;
+            let dpc_dw = p_suc * 0.625f64 / (1.0f64 - w_ratio.powf(1.0 / 0.375)) / 0.375 / w;
             return k_w * dpc_dw * m2_per_s;
         },
         x_values,
@@ -292,7 +297,12 @@ fn spec_heat_capacity() -> SpecificHeatCapacity<f64> {
 const MAT_NAME: &str = "DIN EN 15026 Mat";
 const CONSTRUCTION_NAME: &str = "DIN EN 15026 Construction";
 
-fn create_library(init_temp_celsius: f64, init_rh: f64, thicknesses: Vec<f64>, num_divs: Vec<Option<usize>>) -> MaterialLibrary {
+fn create_library(
+    init_temp_celsius: f64,
+    init_rh: f64,
+    thicknesses: Vec<f64>,
+    num_divs: Vec<Option<usize>>,
+) -> MaterialLibrary {
     let thermal_conductivity = get_thermal_conductivity_curve();
     let sorption_isotherm = get_sorption_isotherm_curve();
     let base_material = Material {
@@ -335,7 +345,7 @@ fn create_library(init_temp_celsius: f64, init_rh: f64, thicknesses: Vec<f64>, n
     lib
 }
 
-const INTERPOLATION_POINTS: usize = 120;
+const INTERPOLATION_POINTS: usize = 200;
 const INTERPOLATION_DELTA: f64 = 0.6;
 const DIAGNOSTIC_SAMPLE: bool = true;
 
@@ -351,7 +361,12 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         // 1. Surface (0.1m): Fine grid for moisture profile
         // 2. Transition (1.0m): Intermediate grid
         // 3. Bulk (48.9m): Coarse grid for semi-infinite thermal mass
-        let library = create_library(20.0, 0.5, vec![0.1,0.9,4.0,10.0, 20.0], vec![Some(40), Some(60), Some(60), Some(60), Some(60)]);
+        let library = create_library(
+            20.0,
+            0.5,
+            vec![0.1, 0.9, 4.0, 10.0, 20.0],
+            vec![Some(40), Some(60), Some(60), Some(60), Some(60)],
+        );
         let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
 
         let mut settings = HamtSettings::default();
@@ -402,27 +417,34 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         ui.borrow_mut()
             .log(format!("Cell Count: {}", mgr.surface_curr.cells.len()))?;
 
-        let mut simulation_durations_days: Cow<Vec<Time<f64>>> =
-            Cow::Owned(REF_TEMPERATURE.iter().chain(REF_WATER_CONTENT.iter()).map(|(d,_,_)| d).collect::<HashSet<_>>()
-        .into_iter().map(|d| (*d as f64) * days).collect());
-        simulation_durations_days.to_mut().sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut simulation_durations_days: Cow<Vec<Time<f64>>> = Cow::Owned(
+            REF_TEMPERATURE
+                .iter()
+                .chain(REF_WATER_CONTENT.iter())
+                .map(|(d, _, _)| d)
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .map(|d| (*d as f64) * days)
+                .collect(),
+        );
+        simulation_durations_days
+            .to_mut()
+            .sort_by(|a, b| a.partial_cmp(b).unwrap());
         {
             ui.borrow_mut()
                 .log(format!("Running benchmark with time step: {:?}", time_step))?;
             ui.borrow_mut()
                 .log("Preheating to reach stable...".to_string())?;
 
-            let mut prev_t: Temperature<f64> = 0.0 * kelvin;
-            let mut prev_water: Mass<f64> = 0.0 * kilograms;
+            let mut prev_delta_t: Temperature<f64> = 0.0 * kelvin;
+            let mut prev_delta_rh: Dimensionless<f64> = 0.0 * dimensionless;
             let mut constant_time: Time<f64> = 0.0 * seconds;
-            let mut allowed_err: Dimensionless<f64> = 0.001 * dimensionless;
+            let allowed_err: Dimensionless<f64> = 1e-6 * dimensionless;
             let mut adap_state = AdaptiveState::default();
 
             let make_progress_bar_preheat = {
                 let ui_clone = ui.clone();
                 let start_time_for_ui = Rc::new(start_time);
-                let t_avg = prev_t.clone();
-                let water_total = prev_water.clone();
                 let orig_timestep_for_ui = Rc::new(mgr.settings.timestep.clone());
                 move || {
                     let ui_clone = ui_clone.clone();
@@ -437,9 +459,9 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                         };
                         ui_clone.borrow_mut().set_status(
                             format!(
-                                "Preheat T_avg={:.2} deg, Water={:.2} kg | Time={:.2} hours | Run time: {} seconds | () | timestep: {:?} (orig: {:?})",
-                                kelvin_to_celsius(t_avg),
-                                water_total.value_in(kilograms),
+                                "Preheat ΔT={:.2e} K, Δrh={:.2e}% | Time={:.2} hours | Run time: {} seconds | () | timestep: {:?} (orig: {:?})",
+                                prev_delta_t.value_in(kelvin),
+                                prev_delta_rh.value()*100.0,
                                 (state.current_time / hours).value(),
                                 start_time_for_ui.elapsed().as_secs(),
                                 current_step,
@@ -450,7 +472,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                     }
                 }
             };
-            while constant_time < 240.0 * hours {
+            while constant_time < 30.0 * days {
                 // if !mgr.solve_timestep()? {
                 //     return Err(hamt_core::error::Error::Other(
                 //         "Preheating failed: timestep did not converge".to_string(),
@@ -462,34 +484,48 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                 mgr.solve_timestep_adaptive(&mut adap_state, Some(Box::new(set_progress_bar)))?;
                 // adaptive_state.current_time += mgr.settings.timestep;
 
-                let curr_t = mgr
-                    .surface_prev
-                    .avg_virtual_cell(BoundaryLocation::Exterior, |c| c.cell_temp)?;
-                let curr_water = mgr
+                let min_rh = mgr
                     .surface_prev
                     .cells
                     .iter()
                     .filter(|c| matches!(c.cell_type, hamt_core::cell::CellType::Material(_)))
-                    .map(|c| c.volumetric_water * c.volume)
-                    .sum::<Mass<f64>>();
+                    .map(|c| c.cell_rh)
+                    .reduce(|a, b| a.min(b))
+                    .unwrap_or_default();
+                let max_rh = mgr
+                    .surface_prev
+                    .cells
+                    .iter()
+                    .filter(|c| matches!(c.cell_type, hamt_core::cell::CellType::Material(_)))
+                    .map(|c| c.cell_rh)
+                    .reduce(|a, b| a.max(b))
+                    .unwrap_or_default();
 
-                if ((curr_water - prev_water) / prev_water).value() < allowed_err
-                    && ((curr_t - prev_t) / prev_t).value() < allowed_err
+                let min_t = mgr
+                    .surface_prev
+                    .cells
+                    .iter()
+                    .filter(|c| matches!(c.cell_type, hamt_core::cell::CellType::Material(_)))
+                    .map(|c| c.cell_temp)
+                    .reduce(|a, b| a.min(b))
+                    .unwrap_or_default();
+                let max_t = mgr
+                    .surface_prev
+                    .cells
+                    .iter()
+                    .filter(|c| matches!(c.cell_type, hamt_core::cell::CellType::Material(_)))
+                    .map(|c| c.cell_temp)
+                    .reduce(|a, b| a.max(b))
+                    .unwrap_or_default();
+                prev_delta_t = max_t - min_t;
+                prev_delta_rh = max_rh - min_rh;
+
+                if prev_delta_t.value_in(kelvin) < allowed_err
+                    && prev_delta_rh.value() < allowed_err
                 {
                     constant_time += mgr.settings.timestep;
                 } else {
                     constant_time = 0.0 * hours;
-                }
-
-                prev_t = curr_t;
-                prev_water = curr_water;
-
-                if adap_state.current_time > 24.0 * 30.0 * hours {
-                    return Err(hamt_core::error::Error::Other(format!(
-                        "Preheat failed: Exceeded maximum preheat time {:?}",
-                        adap_state.current_time
-                    ))
-                    .into());
                 }
             }
 
@@ -548,7 +584,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                             0.0
                         };
                         let estimated_time = if speed > 0.0 {
-                            ((end_time - state.current_time)).value_in(hours) as f64 / speed
+                            (end_time - state.current_time).value_in(hours) as f64 / speed
                         } else {
                             0.0
                         };
@@ -592,10 +628,10 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                         fail_details.push((current_time, fail_count));
 
                         // TO DEBUG
-                                        return Err(anyhow::format_err!(
-                    "Diff larger than allowed. {} failures in total.",
-                    fail_details.len()
-                ));
+                        return Err(anyhow::format_err!(
+                            "Diff larger than allowed. {} failures in total.",
+                            fail_details.len()
+                        ));
                     }
                 }
             }
@@ -632,8 +668,7 @@ fn log_resistances(surface: &Surface, duration_day: i32) -> Option<String> {
         .filter(|c| matches!(c.cell_type, CellType::Material(_)));
     if let Some(c0) = mats.next() {
         Some(format!(
-            "Diag day {}: c0 size={:.2e}m temp={:.3}K, rh={:.3e}, w={:.3e}kg/m3, mu={:.3}, dw={:.3e}m2/s, dwdphi={:.3e}, k={:.3}W/mK, density={:.2}kg/m3, spech={:.2}J/kgK\nvp={:.2} Pa, vp_sat={:.2} Pa vtc={:.2e} kg/m2sPa, htc={:.2e} W/m2K"
-            ,
+            "Diag day {}: c0 size={:.2e}m temp={:.3}K, rh={:.3e}, w={:.3e}kg/m3, mu={:.3}, dw={:.3e}m2/s, dwdphi={:.3e}, k={:.3}W/mK, density={:.2}kg/m3, spech={:.2}J/kgK\nvp={:.2} Pa, vp_sat={:.2} Pa vtc={:.2e} kg/m2sPa, htc={:.2e} W/m2K",
             duration_day,
             c0.size.x().value_in(meter),
             c0.cell_temp.value_in(kelvin),
@@ -649,8 +684,7 @@ fn log_resistances(surface: &Surface, duration_day: i32) -> Option<String> {
             c0.vp_sat.value_in(pascals),
             c0.vtc.value_in(kg_per_m2_s_pa),
             c0.htc.value_in(w_per_m2_k)
-        )
-    )
+        ))
     } else {
         None
     }
@@ -672,15 +706,15 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
 
     if DIAGNOSTIC_SAMPLE {
         if let Some(line) = log_resistances(surface, duration_day) {
-            let mut i=0;
+            let mut i = 0;
             let line_size = 100;
             let max_i = line.len() / line_size;
             while i <= max_i {
-                lines.push(UiLine::plain(line.chars().skip(i * line_size).take(line_size).collect()));
+                lines.push(UiLine::plain(
+                    line.chars().skip(i * line_size).take(line_size).collect(),
+                ));
                 i += 1;
-                
             }
-            
         }
     }
     lines.push(UiLine::plain(format!("Comparing at day {}", duration_day)));
@@ -1109,19 +1143,23 @@ fn truncate_line(line: &str, max_cols: usize) -> String {
     line.chars().take(max_cols).collect()
 }
 
-
-
-
 #[test]
-fn test_isotherm(){
+fn test_isotherm() {
     let curve = get_sorption_isotherm_curve();
-    let target = 108.8;
-    let calculated = curve.interpolate(0.897 * dimensionless).0.value_in(kg_per_m3);
+    let target = 91.37;
+    let calculated = curve
+        .interpolate(0.8540 * dimensionless)
+        .0
+        .value_in(kg_per_m3);
 
-    assert!((calculated - 108.8).abs()/target < 0.005);
+    assert!(
+        (calculated - 108.8).abs() / target < 0.005,
+        "Calculated value: {}",
+        calculated
+    );
 }
 
 #[test]
-fn test_porosity(){
+fn test_porosity() {
     assert_eq!((water_sat() / rho_w()).value(), 0.146);
 }
