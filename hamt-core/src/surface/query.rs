@@ -7,7 +7,7 @@ use crate::{
             Density, HeatTransferCoeff, Pressure, ThermalConductivity, ThermalResistance,
             VaporResistance,
         },
-        units::square_meter,
+        units::{dimensionless, kg_per_m2_s, kg_per_m2_s_pa, m_per_s, meter, square_meter, w_per_m2_k},
     },
 };
 
@@ -117,7 +117,7 @@ impl Surface {
                 sum_area += area;
             }
         }
-        if sum_area > Quantity(ECLIPSE) {
+        if sum_area > ECLIPSE{
             Ok(sum / sum_area)
         } else {
             Ok(Quantity(0.0))
@@ -177,7 +177,7 @@ impl Surface {
     ///
     /// ## Output
     /// - `avg_flux`: average heat flux across the surface boundary [W/m²].
-    pub fn heat_flux(&self, location: BoundaryLocation) -> Result<EnergyFlux<f64>> {
+    pub fn heat_flux(&self, location: BoundaryLocation) -> Result<EnergyFluxDensity<f64>> {
         let mut total_flux = Quantity(0.0);
         let mut total_area = Quantity(0.0);
 
@@ -203,13 +203,13 @@ impl Surface {
             let delta_t = boundary_cell.cell_temp - surf.cell_temp;
             let htc = boundary_cell.htc;
             let cell_area = surf.size.area_along(0);
-            if htc > Quantity(ECLIPSE) {
+            if htc > ECLIPSE * w_per_m2_k {
                 total_flux += htc * delta_t * cell_area;
                 total_area += cell_area;
             }
         }
 
-        Ok(if total_area > Quantity(ECLIPSE) {
+        Ok(if total_area > ECLIPSE * square_meter {
             total_flux / total_area
         } else {
             Quantity(0.0)
@@ -232,8 +232,8 @@ impl Surface {
         &self,
         location: BoundaryLocation,
         bc: &BoundaryCondition,
-    ) -> Result<MassFlux<f64>> {
-        let mut accum_flux: MassFlux<f64> = Quantity(0.0);
+    ) -> Result<MassFluxDensity<f64>> {
+        let mut accum_flux: MassFluxDensity<f64> = Quantity(0.0);
         let mut total_area = 0.0;
 
         let boundary_convection_idx =
@@ -255,7 +255,7 @@ impl Surface {
             BoundaryLocation::Interior => bc.vapor_transport_coeff_int,
         };
 
-        let vtc = if boundary_cell.vtc > Quantity(ECLIPSE) {
+        let vtc = if boundary_cell.vtc > ECLIPSE * kg_per_m2_s_pa {
             boundary_cell.vtc
         } else {
             vtc_from_bc
@@ -270,7 +270,7 @@ impl Surface {
             let delta_vp: Pressure<f64> = boundary_cell.cell_vp - surf.cell_vp;
             let cell_area: f64 = surf.size.area_along(0).value_in(square_meter);
 
-            if vtc > Quantity(ECLIPSE) {
+            if vtc > ECLIPSE * kg_per_m2_s_pa {
                 accum_flux += vtc * delta_vp * cell_area;
                 total_area += cell_area;
             }
@@ -341,7 +341,7 @@ impl Surface {
         let dist1 = cell1.size.x().abs() * 0.5;
         let dist2 = cell2.size.x().abs() * 0.5;
 
-        if overlap <= Quantity(ECLIPSE) || dist1 <= Quantity(ECLIPSE) || dist2 <= Quantity(ECLIPSE)
+        if overlap <= ECLIPSE * square_meter || dist1 <= ECLIPSE * meter || dist2 <= ECLIPSE * meter
         {
             tracing::warn!(
                 "calc_resistance_pair: degenerate geometry overlap={:?}, dist1={:?}, dist2={:?}, cell1={:?}, cell2={:?}",
@@ -376,7 +376,7 @@ impl Surface {
         let vtc1 = cell1.vtc;
         let vaporr1: VaporResistance<f64> = if vtc1 > VaporTransportCoeff::<f64>::zero() {
             1.0 / (overlap * vtc1)
-        } else if cell1.mu > Quantity(ECLIPSE) {
+        } else if cell1.mu > ECLIPSE * dimensionless {
             (dist1 * cell1.mu) / (overlap * physics::wvdc(cell1.cell_temp, pressure_air))
         } else {
             Quantity(0.0)
@@ -384,7 +384,7 @@ impl Surface {
         let vtc2 = cell2.vtc;
         let vaporr2: VaporResistance<f64> = if vtc2 > VaporTransportCoeff::<f64>::zero() {
             1.0 / (overlap * vtc2)
-        } else if cell2.mu > Quantity(ECLIPSE) {
+        } else if cell2.mu > ECLIPSE * dimensionless {
             (dist2 * cell2.mu) / (overlap * physics::wvdc(cell2.cell_temp, pressure_air))
         } else {
             Quantity(0.0)

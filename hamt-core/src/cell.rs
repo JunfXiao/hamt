@@ -95,7 +95,7 @@ pub struct Cell {
     /// Additional Power from external sources [W]
     pub additional_power: Power<f64>,
 
-    /// Vapor Transfer Coefficient [m/s].
+    /// Vapor Transfer Coefficient [kg/(m²·s·Pa)].
     ///
     /// Updated by [Cell::calc_dependent_state]
     pub vtc: VaporTransportCoeff<f64>,
@@ -195,23 +195,22 @@ impl Cell {
     }
 
     pub fn calc_dependent_state(&mut self, bc: &BoundaryCondition, settings: &HamtSettings) {
-        let t_curr = self.cell_temp;
-        let rh_curr = self.cell_rh;
+        let t_self = self.cell_temp;
+        let rh_self = self.cell_rh;
 
-        let vp_sat_pa = physics::psy_psat_fn_temp(t_curr);
+        let vp_sat_pa = physics::psy_psat_fn_temp(t_self);
 
         self.vp_sat = vp_sat_pa;
 
-        self.cell_vp = rh_curr * vp_sat_pa;
+        self.cell_vp = rh_self * vp_sat_pa;
 
         if let CellType::Material(mat) = &self.cell_type {
-            let (water, dwdphi) = mat.sorption_isotherm.interpolate(rh_curr);
+            let (water, dwdphi) = mat.sorption_isotherm.interpolate(rh_self);
 
             self.volumetric_water = water;
 
             self.dwd_phi = dwdphi;
 
-            todo!("Find out why d_w is wrong?");
             let (dw, _) = if bc.is_raining && settings.rain_enabled {
                 mat.suction.interpolate(water)
             } else {
@@ -220,7 +219,7 @@ impl Cell {
 
             self.dw = dw;
 
-            let (mu, _) = mat.vapor_diffusion_resistance.interpolate(rh_curr);
+            let (mu, _) = mat.vapor_diffusion_resistance.interpolate(rh_self);
 
             self.mu = mu;
 

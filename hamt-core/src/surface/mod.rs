@@ -6,7 +6,7 @@ use tracing::debug;
 use crate::cell::{BoundaryLocation, Cell, CellType};
 use crate::uom::DensityQty;
 use crate::uom::dimensions::{
-    Area, Dimensionless, EnergyFlux, Length, Mass, MassFlux, Temperature,
+    Area, Dimensionless, EnergyFluxDensity, Length, Mass, MassFluxDensity, Temperature,
     VaporTransportCoeff,
 };
 use crate::{boundary::BoundaryCondition, hamt_manager::HamtSettings, physics};
@@ -26,10 +26,10 @@ pub struct SurfaceReport {
     pub temp_surf_user_def: Temperature<f64>,
     pub rh_surf_user_def: Dimensionless<f64>,
     pub water_surf_user_def: DensityQty<f64>,
-    pub q_surf_ext: EnergyFlux<f64>,
-    pub q_surf_int: EnergyFlux<f64>,
-    pub m_surf_ext: MassFlux<f64>,
-    pub m_surf_int: MassFlux<f64>,
+    pub q_surf_ext: EnergyFluxDensity<f64>,
+    pub q_surf_int: EnergyFluxDensity<f64>,
+    pub m_surf_ext: MassFluxDensity<f64>,
+    pub m_surf_int: MassFluxDensity<f64>,
     pub water_total: Mass<f64>,
 }
 

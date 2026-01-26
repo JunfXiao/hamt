@@ -28,10 +28,12 @@ unit_system!(
     dimension SpecificEnergy = Energy / Mass; // J/kg
     dimension SpecificHeatCapacity = HeatCapacity / Mass; // J/(kg·K)
     dimension VolumetricHeatCapacity = SpecificHeatCapacity * Density; // J/(m³·K)
-    dimension EnergyFlux = Power / Area; // W/m²
-    dimension MassFlux = Mass / Area / Time; // kg/m²·s
+    dimension EnergyFluxDensity = Power / Area; // W/m²
+    dimension MassFluxDensity = Mass / Area / Time; // kg/m²·s
+    dimension MassFlux = Mass / Time;
     dimension HeatTransferCoeff = Power / (Area * Temperature); // W/(m²·K)
     dimension ThermalConductivity = Power / (Length * Temperature); // W/(m·K)
+    dimension ThermalConductance = Power / Temperature;
     dimension LiquidTransferCoeff = Length^2 / Time;
     dimension VaporTransportCoeff = Mass / (Area * Time * Pressure); // kg/(m²·s·Pa)
     dimension MassConvectionCoeff = Length /  Time; // m/s
@@ -40,7 +42,7 @@ unit_system!(
     dimension LiquidTransportCoeff = Length^2 / Time; // m²/s
     dimension VaporPermeability = Mass/ (Length * Time * Pressure); // m²/s
 
-    dimension ThermalResistance = Dimensionless / Length / ThermalConductivity; // K/W
+    dimension ThermalResistance =Temperature / Power; // K/W
     // Vapor resistance (Pa·s/kg), consistent with WVDC-based formulation
     dimension VaporResistance = Pressure * Time / Mass;
 
@@ -79,9 +81,11 @@ unit_system!(
     unit j_per_kg: SpecificEnergy = joules / kilograms;
     unit j_per_kg_k: SpecificHeatCapacity = j_per_k / kilograms;
     unit j_per_m3_k: VolumetricHeatCapacity = j_per_kg_k * kg_per_m3;
-    unit w_per_m2: EnergyFlux = watts / square_meter;
-    unit kg_per_m2_s: MassFlux = kilograms / (square_meter * seconds);
+    unit w_per_m2: EnergyFluxDensity = watts / square_meter;
+    unit kg_per_m2_s: MassFluxDensity = kilograms / (square_meter * seconds);
+    unit kg_per_s: MassFlux = kilograms / seconds;
     unit w_per_m2_k: HeatTransferCoeff = watts / (square_meter * kelvin);
+    unit w_per_k: ThermalConductance = watts / kelvin;
     unit kj_per_hr_m2_k: HeatTransferCoeff = kj_per_hr / (square_meter * kelvin);
     unit w_per_m_k: ThermalConductivity = watts / (meter * kelvin);
     unit kg_per_m3: Density = kilograms / cubic_meter;
@@ -209,6 +213,7 @@ pub const DIM_VAPOR_TRANSPORT_COEFF: Dimension = Dimension {
     mass: 1,
     temperature: 0,
 };
+
 
 #[cfg(test)]
 mod tests {

@@ -5,7 +5,7 @@ use crate::uom::dimensions::{
     Density, Dimensionless, Pressure, SpecificEnergy, SpecificHeatCapacity, Temperature,
     VaporPermeability,
 };
-use crate::uom::units::{self, kelvin, pascals};
+use crate::uom::units::{self, kelvin, kg_per_m3, pascals};
 pub mod geometry;
 
 /// Universal gas constant for water vapor [J/kg·K].
@@ -92,7 +92,7 @@ pub fn wvdc(temp: Temperature<f64>, amb_pressure: Pressure<f64>) -> VaporPermeab
 /// # Returns
 /// * `rh` - Relative humidity [0-1].
 pub fn rh_from_t_vd(t_db: Temperature<f64>, rho_vapor: Density<f64>) -> Dimensionless<f64> {
-    if rho_vapor <= Quantity(ECLIPSE) {
+    if rho_vapor <= ECLIPSE * kg_per_m3 {
         return Quantity(0.0);
     }
     let p_sat = psy_psat_fn_temp(t_db);

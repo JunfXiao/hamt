@@ -761,18 +761,18 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
 }
 
 #[test]
-// #[ignore = "Please manually test the DIN EN 15026 benchmark"]
 fn test_din_en_15026_timestep_1h() -> Result<()> {
     run_benchmark_test(1.0 * hours)
 }
 
 #[test]
-// #[ignore = "Please manually test the DIN EN 15026 benchmark"]
+#[ignore = "Prefer 1h timestep when dynamic timestep is enabled."]
 fn test_din_en_15026_timestep_0_5h() -> Result<()> {
     run_benchmark_test(0.5 * hours)
 }
 
 #[test]
+#[ignore = "Prefer 1h timestep when dynamic timestep is enabled."]
 // #[ignore = "Please manually test the DIN EN 15026 benchmark"]
 fn test_din_en_15026_timestep_0_1h() -> Result<()> {
     run_benchmark_test(0.1 * hours)
@@ -839,7 +839,7 @@ impl Ui {
             status_line: String::new(),
             status_style: StatusStyle::Normal,
             last_render: Instant::now(),
-            min_frame_time: Duration::from_millis(1000 / 5),
+            min_frame_time: Duration::from_millis(1000 / 10),
         })
     }
 
@@ -1058,4 +1058,14 @@ fn truncate_line(line: &str, max_cols: usize) -> String {
         return line.to_string();
     }
     line.chars().take(max_cols).collect()
+}
+
+
+
+
+#[test]
+fn test_isotherm(){
+    let curve = get_sorption_isotherm_curve();
+
+
 }

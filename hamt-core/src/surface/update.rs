@@ -2,18 +2,16 @@ use crate::{
     parallel::{par_or_seq, par_or_seq_mut},
     physics::ECLIPSE,
     uom::{
-        Quantity,
-        dimensions::{
-            Area, HeatTransferCoeff, Power, Pressure, ThermalConductivity, ThermalResistance,
-            VaporResistance, VaporTransportCoeff,
-        },
-        units::{k_per_w, kg_per_m2_s_pa, pa_s_per_kg, watts},
+        self, DIM_POWER, Quantity, dimensions::{
+            Area, HeatTransferCoeff, MassFlux, Power, Pressure, ThermalConductance, ThermalConductivity, ThermalResistance, VaporResistance, VaporTransportCoeff
+        }, units::{joules, k_per_w, kelvin, kg_per_m2_s_pa, kilograms, pa_s_per_kg, pascals, seconds, w_per_k, watts}
     },
 };
 
 use super::*;
 use crate::uom::units;
 use anyhow::Result;
+use diman::si::units::watt;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -161,10 +159,9 @@ impl Surface {
                     // ==========================================
                     // 1. Heat Calculation (Calculate T_next)
                     // ==========================================
-
-                    let mut torsum = Quantity(0.0);
-                    let mut oorsum = Quantity(0.0);
-                    let mut vpdiff = Quantity(0.0);
+                    let mut oorsum:ThermalConductance<f64> = 0.0 * w_per_k;
+                    let mut torsum: Power<f64> = 0.0 * watts;
+                    let mut vapor_diffusion:MassFlux<f64> = 0.0 * kilograms / seconds;
 
                     // Fix C: Use current iteration vapor pressure for latent heat (Implicit)
                     let curr_vp_pa = cell_curr.cell_vp;
@@ -172,7 +169,7 @@ impl Surface {
                     for nbr_i in surface_curr.neighbor_indices(i, nx) {
                         let neighbor_curr = &surface_curr.cells[[nbr_i, 0, 0]];
 
-                        let (therm_resistance, vapor_resistance) = Self::calculate_resistance_pair(
+                        let (therm_resistance, vapor_resistance_coeff) = Self::calculate_resistance_pair(
                             cell_curr,
                             neighbor_curr,
                             bc.pressure_air,
@@ -183,10 +180,10 @@ impl Surface {
                             oorsum += 1.0 / therm_resistance;
                             torsum += nbr_temp_k / therm_resistance;
                         }
-                        if vapor_resistance > 0.0 * pa_s_per_kg {
+                        if vapor_resistance_coeff > 0.0 * pa_s_per_kg {
                             // Fix C: Use current iteration vapor pressure
                             let nbr_vp_pa = neighbor_curr.cell_vp;
-                            vpdiff += (nbr_vp_pa - curr_vp_pa) / vapor_resistance;
+                            vapor_diffusion += (nbr_vp_pa - curr_vp_pa) / vapor_resistance_coeff;
                         }
                     }
 
@@ -198,13 +195,13 @@ impl Surface {
                     let tcap_j_per_k =
                         (density * spech + volumetric_water * physics::W_SPECH) * volume;
 
-                    let mut qvp = Quantity(0.0);
+                    let mut q_vapor: Power<f64> =0.0 * watts;
                     if settings.latent_heat_enabled
                         && matches!(cell_curr.cell_type, CellType::Material(_))
                     {
-                        qvp = vpdiff * physics::W_HV;
-                        if qvp.abs() > settings.max_latent_heat {
-                            qvp = Quantity(0.0);
+                        q_vapor = vapor_diffusion * physics::W_HV;
+                        if q_vapor.abs() > settings.max_latent_heat {
+                            q_vapor = Quantity(0.0);
                         }
                     }
 
@@ -229,7 +226,7 @@ impl Surface {
                     let t_next = if denom_t > Quantity(ECLIPSE) {
                         let prev_temp_k = cell_prev.cell_temp;
                         let other: Power<f64> = tcap_j_per_k * prev_temp_k / dt_s;
-                        let numer = torsum + qvp + q_adds + other;
+                        let numer = torsum + q_vapor + q_adds + other;
                         numer / denom_t
                     } else {
                         cell_curr.cell_temp
