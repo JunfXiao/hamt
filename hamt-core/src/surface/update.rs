@@ -2,9 +2,15 @@ use crate::{
     parallel::{par_or_seq, par_or_seq_mut},
     physics::ECLIPSE,
     uom::{
-        self, DIM_POWER, Quantity, dimensions::{
-            Area, HeatTransferCoeff, MassFlux, Power, Pressure, ThermalConductance, ThermalConductivity, ThermalResistance, VaporResistance, VaporTransportCoeff
-        }, units::{joules, k_per_w, kelvin, kg_per_m2_s_pa, kilograms, pa_s_per_kg, pascals, seconds, w_per_k, watts}
+        self, DIM_POWER, Quantity,
+        dimensions::{
+            Area, HeatTransferCoeff, MassFlux, Power, Pressure, ThermalConductance,
+            ThermalConductivity, ThermalResistance, VaporResistance, VaporTransportCoeff,
+        },
+        units::{
+            joules, k_per_w, kelvin, kg_per_m2_s_pa, kilograms, pa_s_per_kg, pascals, seconds,
+            w_per_k, watts,
+        },
     },
 };
 
@@ -159,9 +165,9 @@ impl Surface {
                     // ==========================================
                     // 1. Heat Calculation (Calculate T_next)
                     // ==========================================
-                    let mut oorsum:ThermalConductance<f64> = 0.0 * w_per_k;
+                    let mut oorsum: ThermalConductance<f64> = 0.0 * w_per_k;
                     let mut torsum: Power<f64> = 0.0 * watts;
-                    let mut vapor_diffusion:MassFlux<f64> = 0.0 * kilograms / seconds;
+                    let mut vapor_diffusion: MassFlux<f64> = 0.0 * kilograms / seconds;
 
                     // Fix C: Use current iteration vapor pressure for latent heat (Implicit)
                     let curr_vp_pa = cell_curr.cell_vp;
@@ -169,11 +175,12 @@ impl Surface {
                     for nbr_i in surface_curr.neighbor_indices(i, nx) {
                         let neighbor_curr = &surface_curr.cells[[nbr_i, 0, 0]];
 
-                        let (therm_resistance, vapor_resistance_coeff) = Self::calculate_resistance_pair(
-                            cell_curr,
-                            neighbor_curr,
-                            bc.pressure_air,
-                        );
+                        let (therm_resistance, vapor_resistance_coeff) =
+                            Self::calculate_resistance_pair(
+                                cell_curr,
+                                neighbor_curr,
+                                bc.pressure_air,
+                            );
 
                         if therm_resistance > 0.0 * k_per_w {
                             let nbr_temp_k = neighbor_curr.cell_temp;
@@ -195,7 +202,7 @@ impl Surface {
                     let tcap_j_per_k =
                         (density * spech + volumetric_water * physics::W_SPECH) * volume;
 
-                    let mut q_vapor: Power<f64> =0.0 * watts;
+                    let mut q_vapor: Power<f64> = 0.0 * watts;
                     if settings.latent_heat_enabled
                         && matches!(cell_curr.cell_type, CellType::Material(_))
                     {
