@@ -5,7 +5,7 @@ use crate::uom::dimensions::{
     Density, Dimensionless, Pressure, SpecificEnergy, SpecificHeatCapacity, Temperature,
     VaporPermeability,
 };
-use crate::uom::units::{self, kelvin, kg_per_m3, pascals};
+use crate::uom::units::{self, kelvin, kg_per_m_s_pa, kg_per_m3, m2_per_s, pascals};
 pub mod geometry;
 
 /// Universal gas constant for water vapor [J/kg·K].
@@ -22,7 +22,7 @@ pub const W_DENSITY: Density<f64> = Quantity(1000.0);
 
 pub const ATMOSPHERE_PRESSURE: Pressure<f64> = Quantity(101_325.0);
 
-pub const ECLIPSE: f64 = 1e-6;
+pub const ECLIPSE: f64 = 1e-16;
 
 /// Calculates saturation vapor pressure as a function of temperature.
 /// Implements the Hyland & Wexler formulation as seen in EnergyPlus.
@@ -50,11 +50,12 @@ pub fn psy_psat_fn_temp(t: Temperature<f64>) -> Pressure<f64> {
         )
     } else {
         // Above freezing: saturation pressure over water
+        // Hyland and Wexler Formula
         const C8: f64 = -5800.2206;
         const C9: f64 = 1.3914993;
-        const C10: f64 = -0.048640239;
-        const C11: f64 = 0.41764768e-4;
-        const C12: f64 = -0.14452093e-7;
+        const C10: f64 = -4.8640239e-2;
+        const C11: f64 = 4.1764768e-5;
+        const C12: f64 = -1.4452093e-8;
         const C13: f64 = 6.5459673;
         Quantity(
             (C8 / t_kelvin
@@ -80,8 +81,8 @@ pub fn rh_to_vp(rh: Dimensionless<f64>, temp: Temperature<f64>) -> Pressure<f64>
 /// # Arguments
 /// * `temp_celsius` - Temperature [°C].
 /// * `amb_pressure` - Ambient barometric pressure [Pa].
-pub fn wvdc(temp: Temperature<f64>, amb_pressure: Pressure<f64>) -> VaporPermeability<f64> {
-    Quantity((1.97e-7 * temp.value_in(kelvin).powf(0.81)) / amb_pressure.value_in(pascals))
+pub fn water_vapor_permeability_coeff(temp: Temperature<f64>, amb_pressure: Pressure<f64>) -> VaporPermeability<f64> {
+    (1.97e-7 * temp.value_in(kelvin).powf(0.81)) / amb_pressure.value_in(pascals) * kg_per_m_s_pa
 }
 
 /// Calculates Relative Humidity from dry-bulb temperature and vapor density.

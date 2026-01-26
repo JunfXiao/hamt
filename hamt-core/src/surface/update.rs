@@ -134,6 +134,9 @@ impl Surface {
                     cell.vtc = vtc;
                     cell.cell_vp = rh * psat;
                 }
+            } else {
+                cell.vtc = VaporTransportCoeff::<f64>::zero();
+                cell.htc = HeatTransferCoeff::<f64>::zero();
             }
         }
         Ok(())
@@ -147,7 +150,7 @@ impl Surface {
         surface_prev: &Surface,
         surface_curr: &Surface,
     ) -> Result<()> {
-        let dt_s = settings.timestep;
+let dt_s = settings.timestep;
         let dt_s_val = dt_s.value_in(units::seconds);
         let nx = self.cells.raw_dim()[0];
         let indices: Vec<usize> = (0..nx).collect();
@@ -156,10 +159,8 @@ impl Surface {
             .map(|&i| {
                 let cell_curr = &surface_curr.cells[[i, 0, 0]];
 
-                if matches!(
-                    cell_curr.cell_type,
-                    CellType::Material(_) | CellType::Boundary(_, _)
-                ) {
+
+                if matches!(cell_curr.cell_type, CellType::Material(_)) {
                     let cell_prev = &surface_prev.cells[[i, 0, 0]];
 
                     // ==========================================
@@ -167,9 +168,9 @@ impl Surface {
                     // ==========================================
                     let mut oorsum: ThermalConductance<f64> = 0.0 * w_per_k;
                     let mut torsum: Power<f64> = 0.0 * watts;
-                    let mut vapor_diffusion: MassFlux<f64> = 0.0 * kilograms / seconds;
+                    let mut vapor_diffusion_net_flux: MassFlux<f64> = 0.0 * kilograms / seconds;
 
-                    // Fix C: Use current iteration vapor pressure for latent heat (Implicit)
+                    
                     let curr_vp_pa = cell_curr.cell_vp;
 
                     for nbr_i in surface_curr.neighbor_indices(i, nx) {
@@ -182,17 +183,20 @@ impl Surface {
                                 bc.pressure_air,
                             );
 
-                        if therm_resistance > 0.0 * k_per_w {
+                       
+                        if therm_resistance > 1e-10 * k_per_w {
                             let nbr_temp_k = neighbor_curr.cell_temp;
                             oorsum += 1.0 / therm_resistance;
                             torsum += nbr_temp_k / therm_resistance;
                         }
-                        if vapor_resistance_coeff > 0.0 * pa_s_per_kg {
-                            // Fix C: Use current iteration vapor pressure
+
+                        
+                        if vapor_resistance_coeff > 1e-10 * pa_s_per_kg {
                             let nbr_vp_pa = neighbor_curr.cell_vp;
-                            vapor_diffusion += (nbr_vp_pa - curr_vp_pa) / vapor_resistance_coeff;
+                            vapor_diffusion_net_flux += (nbr_vp_pa - curr_vp_pa) / vapor_resistance_coeff;
                         }
                     }
+
 
                     let density = cell_curr.density;
                     let spech = cell_curr.spech;
@@ -202,21 +206,18 @@ impl Surface {
                     let tcap_j_per_k =
                         (density * spech + volumetric_water * physics::W_SPECH) * volume;
 
+
                     let mut q_vapor: Power<f64> = 0.0 * watts;
-                    if settings.latent_heat_enabled
-                        && matches!(cell_curr.cell_type, CellType::Material(_))
-                    {
-                        q_vapor = vapor_diffusion * physics::W_HV;
+                    if settings.latent_heat_enabled {
+                        q_vapor = vapor_diffusion_net_flux * physics::W_HV;
+
                         if q_vapor.abs() > settings.max_latent_heat {
-                            q_vapor = Quantity(0.0);
+                             q_vapor = q_vapor.value_in(watts).signum() * settings.max_latent_heat;
                         }
                     }
 
-                    let q_adds = match cell_curr.cell_type {
-                        CellType::Virtual(BoundaryLocation::Exterior) => bc.additional_energy_ext,
-                        CellType::Virtual(BoundaryLocation::Interior) => bc.additional_energy_int,
-                        CellType::Material(_) => {
-                            if surface_curr
+
+                    let q_adds = if surface_curr
                                 .user_defined_cell_idx
                                 .map(|idx| idx[0] == i)
                                 .unwrap_or(false)
@@ -224,16 +225,15 @@ impl Surface {
                                 bc.q_addition_userdef
                             } else {
                                 0.0 * watts
-                            }
-                        }
-                        _ => 0.0 * watts,
-                    };
+                            };
 
                     let denom_t = oorsum + (tcap_j_per_k / dt_s);
-                    let t_next = if denom_t > Quantity(ECLIPSE) {
+                    
+
+                    let t_next = if denom_t > 1e-10 * w_per_k {
                         let prev_temp_k = cell_prev.cell_temp;
-                        let other: Power<f64> = tcap_j_per_k * prev_temp_k / dt_s;
-                        let numer = torsum + q_vapor + q_adds + other;
+                        let inertial_term: Power<f64> = tcap_j_per_k * prev_temp_k / dt_s;
+                        let numer = torsum + q_vapor + q_adds + inertial_term;
                         numer / denom_t
                     } else {
                         cell_curr.cell_temp
@@ -243,111 +243,110 @@ impl Surface {
                     // 2. Moisture Calculation (Calculate RH_next)
                     // ==========================================
 
-                    let mut phioosum = 0.0;
-                    let mut phiorsum = 0.0;
-                    let mut vpoosum = 0.0;
-                    let mut vporsum = 0.0;
+                    let mut phioosum = 0.0; // sum(1/R_liquid)
+                    let mut phiorsum = 0.0; // sum(phi_nb/R_liquid)
+                    let mut vpoosum = 0.0;  // sum(1/R_vapor)
+                    let mut vporsum = 0.0;  // sum(P_v_nb/R_vapor)
 
-                    // Fix B: Use the NEW temperature for Psat calculation (Tight Coupling)
-                    let vpsat_pa = physics::psy_psat_fn_temp(t_next).value_in(units::pascals);
+
+                    let vpsat_pa_val = physics::psy_psat_fn_temp(t_next).value_in(units::pascals);
 
                     for nbr_i in surface_curr.neighbor_indices(i, nx) {
                         let nbr_curr = &surface_curr.cells[[nbr_i, 0, 0]];
-
-                        // Re-calculate resistances as needed by physics (simplification: reuse same state as heat step)
                         let (_, vaporr) =
                             Self::calculate_resistance_pair(cell_curr, nbr_curr, bc.pressure_air);
-                        let vaporr_ps_per_kg = vaporr.value_in(crate::uom::units::pa_s_per_kg);
+                        let vaporr_val = vaporr.value_in(crate::uom::units::pa_s_per_kg);
 
-                        if vaporr_ps_per_kg > 0.0 {
-                            vpoosum += 1.0 / vaporr_ps_per_kg;
-                            let nbr_vp_pa = (nbr_curr.cell_rh
-                                * physics::psy_psat_fn_temp(nbr_curr.cell_temp))
-                            .value_in(units::pascals);
-                            vporsum += nbr_vp_pa / vaporr_ps_per_kg;
+
+                        if vaporr_val > 1e-13 {
+                            let inv_r = 1.0 / vaporr_val;
+                            vpoosum += inv_r;
+
+                            let nbr_vp_pa = nbr_curr.cell_vp.value_in(units::pascals);
+                            vporsum += nbr_vp_pa * inv_r;
                         }
 
-                        let overlap: Area<f64> = Quantity(
-                            cell_curr
-                                .size
-                                .area_along(0)
-                                .value_in(units::square_meter)
-                                .min(nbr_curr.size.area_along(0).value_in(units::square_meter)),
-                        );
-                        let dist1 = cell_curr.size.x().abs() * 0.5;
-                        let dist2 = nbr_curr.size.x().abs() * 0.5;
 
-                        let overlap_m2 = overlap.value_in(crate::uom::units::square_meter);
-                        let dist1_m = dist1.value_in(crate::uom::units::meter);
-                        let dist2_m = dist2.value_in(crate::uom::units::meter);
+                        let overlap_m2 = cell_curr.size.area_along(0)
+                            .min(nbr_curr.size.area_along(0))
+                            .value_in(crate::uom::units::square_meter);
+                        
+
 
                         let dw1 = cell_curr.dw.value_in(crate::uom::units::m2_per_s);
                         let dwd_phi1 = cell_curr.dwd_phi.value_in(crate::uom::units::kg_per_m3);
-
-                        let rhr1 = if dw1 > 0.0 && dwd_phi1 > 0.0 {
-                            dist1_m / (overlap_m2 * dw1 * dwd_phi1)
-                        } else {
-                            0.0
-                        };
-
                         let dw2 = nbr_curr.dw.value_in(crate::uom::units::m2_per_s);
                         let dwd_phi2 = nbr_curr.dwd_phi.value_in(crate::uom::units::kg_per_m3);
-                        let rhr2 = if dw2 > 0.0 && dwd_phi2 > 0.0 {
-                            dist2_m / (overlap_m2 * dw2 * dwd_phi2)
-                        } else {
-                            0.0
-                        };
 
-                        if rhr1 > 0.0 && rhr2 > 0.0 {
-                            phioosum += 1.0 / (rhr1 + rhr2);
-                            phiorsum += nbr_curr.cell_rh.value() / (rhr1 + rhr2);
+                        // 计算液态导通量 (Conductance = Area * K / dist)
+                        // K_eff = Harmonic Mean or Geometric Mean (这里简化使用算术平均或各自分摊)
+                        // 标准电阻串联公式: R_total = R1 + R2 = (d1/k1A) + (d2/k2A)
+                        
+                        let r1 = if dw1 > 1e-20 && dwd_phi1 > 1e-20 {
+                            (cell_curr.size.x().abs().value_in(units::meter) * 0.5) / (overlap_m2 * dw1 * dwd_phi1)
+                        } else { f64::MAX };
+
+                        let r2 = if dw2 > 1e-20 && dwd_phi2 > 1e-20 {
+                            (nbr_curr.size.x().abs().value_in(units::meter) * 0.5) / (overlap_m2 * dw2 * dwd_phi2)
+                        } else { f64::MAX };
+                        
+                        let r_total = r1 + r2;
+
+                        if r_total < f64::MAX && r_total > 1e-13 {
+                            let conductance = 1.0 / r_total;
+                            phioosum += conductance;
+                            phiorsum += nbr_curr.cell_rh.value() * conductance;
                         }
                     }
 
-                    let dwd_phi = cell_curr.dwd_phi.value_in(crate::uom::units::kg_per_m3);
+                    // Moisture Capacity
+                    let dwd_phi_val = cell_curr.dwd_phi.value_in(crate::uom::units::kg_per_m3);
                     let volume_m3 = cell_curr.volume.value_in(crate::uom::units::cubic_meter);
-                    let wcap = if dwd_phi > 0.0 {
-                        dwd_phi * volume_m3
+                    let wcap = if dwd_phi_val > 1e-10 {
+                        dwd_phi_val * volume_m3
                     } else {
-                        0.0
+                        1e-10 // 防止除零
                     };
 
-                    let denom_rh = phioosum + vpoosum * vpsat_pa + wcap / dt_s_val;
+                    // RH_next
+                    // P_v_next = P_sat(T_next) * RH_next
+                    // Eq: (phioosum + vpoosum * Psat) * RH_next = phiorsum + vporsum + (wcap/dt)*RH_prev
+                    
+                    let inertia_term = (wcap * cell_prev.cell_rh.value()) / dt_s_val;
+                    let denom_rh = phioosum + (vpoosum * vpsat_pa_val) + (wcap / dt_s_val);
 
-                    let rh_next = if denom_rh > 0.0 {
-                        Quantity(
-                            (phiorsum + vporsum + (wcap * cell_prev.cell_rh.value()) / dt_s_val)
-                                / denom_rh,
-                        )
+                    let rh_next = if denom_rh > 1e-20 {
+                        Quantity((phiorsum + vporsum + inertia_term) / denom_rh)
                     } else {
                         cell_curr.cell_rh
                     };
 
                     (t_next, rh_next)
                 } else {
-                    // Boundary Logic
+
                     if cell_curr.is_exterior() {
                         let t = bc.temp_outside_air;
-                        let rho = physics::vd_from_t_rh(t, bc.rh_outside_air);
-                        (t, physics::rh_from_t_vd(t, rho))
+                        (t, bc.rh_outside_air)
                     } else {
                         let t = bc.temp_inside_air;
-                        let rho = physics::vd_from_t_rh(t, bc.rh_inside_air);
-                        (t, physics::rh_from_t_vd(t, rho))
+                        (t, bc.rh_inside_air)
                     }
                 }
             })
             .collect();
 
+
         if let Some(cells) = self.cells.as_slice_mut() {
             par_or_seq_mut(cells).enumerate().for_each(|(i, cell)| {
                 cell.cell_temp = results[i].0;
                 cell.cell_rh = results[i].1.clamp(Quantity(0.0), Quantity(1.01));
+                cell.calc_dependent_state(bc, settings);
             });
         } else {
             for i in 0..nx {
                 self.cells[[i, 0, 0]].cell_temp = results[i].0;
                 self.cells[[i, 0, 0]].cell_rh = results[i].1.clamp(Quantity(0.0), Quantity(1.01));
+                self.cells[[i, 0, 0]].calc_dependent_state(bc, settings);
             }
         }
         Ok(())

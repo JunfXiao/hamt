@@ -1,10 +1,13 @@
 //! Defines the core `Cell` struct, representing a finite volume element in the 1D HAMT model.
 
+use tracing::warn;
+
 use crate::boundary::celsius_to_kelvin;
 use crate::uom::dimensions::{
     Density, Dimensionless, HeatTransferCoeff, LiquidTransportCoeff, Power, Pressure,
     SpecificHeatCapacity, Temperature, ThermalConductivity, VaporTransportCoeff, Volume,
 };
+use crate::uom::units::{kelvin, kg_per_m3, pascals};
 use crate::{
     boundary::BoundaryCondition,
     hamt_manager::HamtSettings,
@@ -13,6 +16,7 @@ use crate::{
 };
 
 use super::material::Material;
+use std::ffi::os_str::Display;
 use std::sync::Arc;
 
 /// Maximum number of adjacent cells a single cell can have.
@@ -84,7 +88,7 @@ pub struct Cell {
     /// Specific heat capacity of the dry material [J/kg·K].
     pub spech: SpecificHeatCapacity<f64>,
 
-    /// Water vapor diffusion resistance factor [-].
+    /// Water vapor diffusion resistance factor [-]. It's used to calculate
     ///
     /// Updated by [Cell::calc_dependent_state]
     pub mu: Dimensionless<f64>,
@@ -138,7 +142,7 @@ pub struct Cell {
     /// Updated by [Cell::calc_dependent_state]
     pub vp_sat: Pressure<f64>,
 
-    /// Volumetric water content [kg/m³]. Updated each iteration.
+    /// Volumetric water content [kg/m³ Material]. Updated each iteration.
     ///
     /// Updated by [Cell::calc_dependent_state]
     pub volumetric_water: Density<f64>,
@@ -206,7 +210,7 @@ impl Cell {
 
         if let CellType::Material(mat) = &self.cell_type {
             let (water, dwdphi) = mat.sorption_isotherm.interpolate(rh_self);
-
+            
             self.volumetric_water = water;
 
             self.dwd_phi = dwdphi;
@@ -218,6 +222,7 @@ impl Cell {
             };
 
             self.dw = dw;
+
 
             let (mu, _) = mat.vapor_diffusion_resistance.interpolate(rh_self);
 

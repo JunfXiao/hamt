@@ -189,8 +189,8 @@ pub struct Material {
 
     /// Vapor Diffusion Resistance curve (mu vs. RH).
     ///
-    /// - X: The moisture content ratio $$\frac{w}{w_{sat}}$$ [-]
-    /// - Y: Vapor Diffusion Resistance [-]
+    /// - X: RH [-]
+    /// - Y: Vapor Diffusion Resistance $\mu$ [-]
     pub vapor_diffusion_resistance: Curve<DIM_DIMENSIONLESS, DIM_DIMENSIONLESS>,
 
     /// Thermal Conductivity curve (Conductivity vs. Water Content).
@@ -202,6 +202,9 @@ pub struct Material {
     // Discretization parameters
     /// Initial temperature for cells of this material [°C].
     pub initial_temp: Temperature<f64>,
+
+    // Division Parameters
+    pub num_div: Option<usize>,
 }
 
 impl PartialEq for Material {
@@ -233,6 +236,7 @@ impl Default for Material {
             vapor_diffusion_resistance: Curve::default(),
             thermal_conductivity: Curve::default(),
             initial_temp: celsius_to_kelvin(20.0),
+            num_div: None,
         }
     }
 }

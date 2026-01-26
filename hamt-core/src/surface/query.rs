@@ -7,7 +7,9 @@ use crate::{
             Density, HeatTransferCoeff, Pressure, ThermalConductivity, ThermalResistance,
             VaporResistance,
         },
-        units::{dimensionless, kg_per_m2_s, kg_per_m2_s_pa, m_per_s, meter, square_meter, w_per_m2_k},
+        units::{
+            dimensionless, kg_per_m2_s, kg_per_m2_s_pa, m_per_s, meter, square_meter, w_per_m2_k,
+        },
     },
 };
 
@@ -117,7 +119,7 @@ impl Surface {
                 sum_area += area;
             }
         }
-        if sum_area > ECLIPSE{
+        if sum_area > ECLIPSE {
             Ok(sum / sum_area)
         } else {
             Ok(Quantity(0.0))
@@ -324,8 +326,8 @@ impl Surface {
     ///
     /// # Returns
     /// A tuple containing the thermal and vapor resistances.
-    /// - Thermal resistance [m²K/W] // TODO Check Unit
-    /// - Vapor resistance [m²Pa/W] // TODO Check Unit
+    /// - Thermal resistance [K/W] (Absolute)
+    /// - Vapor resistance [Pa·s/kg] (Absolute)
     pub fn calculate_resistance_pair(
         cell1: &Cell,
         cell2: &Cell,
@@ -341,8 +343,17 @@ impl Surface {
         let dist1 = cell1.size.x().abs() * 0.5;
         let dist2 = cell2.size.x().abs() * 0.5;
 
-        if overlap <= ECLIPSE * square_meter || dist1 <= ECLIPSE * meter || dist2 <= ECLIPSE * meter
-        {
+        if overlap <= ECLIPSE * square_meter {
+            tracing::warn!(
+                "calc_resistance_pair: degenerate geometry no overlap={:?}, cell1={:?}, cell2={:?}",
+                overlap,
+                cell1.cell_type,
+                cell2.cell_type
+            );
+            return (Quantity(1e100), Quantity(1e100));
+        }
+
+        if dist1 <= ECLIPSE * meter || dist2 <= ECLIPSE * meter {
             tracing::warn!(
                 "calc_resistance_pair: degenerate geometry overlap={:?}, dist1={:?}, dist2={:?}, cell1={:?}, cell2={:?}",
                 overlap,
@@ -366,8 +377,10 @@ impl Surface {
         let htc2 = cell2.htc;
         let k2 = cell2.w_thermal_c;
         let thermr2: ThermalResistance<f64> = if htc2 > HeatTransferCoeff::<f64>::zero() {
+            // Convection resistance
             1.0 / (htc2 * overlap)
         } else if k2 > ThermalConductivity::<f64>::zero() {
+            // Conduction resistance
             dist2 / (k2 * overlap)
         } else {
             Quantity(0.0)
@@ -375,9 +388,11 @@ impl Surface {
 
         let vtc1 = cell1.vtc;
         let vaporr1: VaporResistance<f64> = if vtc1 > VaporTransportCoeff::<f64>::zero() {
+            // Vapor Convection resistance
             1.0 / (overlap * vtc1)
         } else if cell1.mu > ECLIPSE * dimensionless {
-            (dist1 * cell1.mu) / (overlap * physics::wvdc(cell1.cell_temp, pressure_air))
+            (dist1 * cell1.mu)
+                / (overlap * physics::water_vapor_permeability_coeff(cell1.cell_temp, pressure_air))
         } else {
             Quantity(0.0)
         };
@@ -385,7 +400,8 @@ impl Surface {
         let vaporr2: VaporResistance<f64> = if vtc2 > VaporTransportCoeff::<f64>::zero() {
             1.0 / (overlap * vtc2)
         } else if cell2.mu > ECLIPSE * dimensionless {
-            (dist2 * cell2.mu) / (overlap * physics::wvdc(cell2.cell_temp, pressure_air))
+            (dist2 * cell2.mu)
+                / (overlap * physics::water_vapor_permeability_coeff(cell2.cell_temp, pressure_air))
         } else {
             Quantity(0.0)
         };

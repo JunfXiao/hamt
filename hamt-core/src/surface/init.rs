@@ -98,9 +98,9 @@ impl Surface {
             let mat_thickness_m = mat_arc.thickness;
             let div_len_m = settings.div_length;
 
-            let mut divs = ((mat_thickness_m / div_len_m).value().ceil() as i32)
+            let mut divs = mat_arc.num_div.unwrap_or(((mat_thickness_m / div_len_m).value().ceil() as i32)
                 .max(settings.min_div)
-                .min(settings.max_div);
+                .min(settings.max_div) as usize);
 
             // Ensure cell length is not too small
             let sin_neg_pi_ovr_2 = (PI * -0.5).sin();

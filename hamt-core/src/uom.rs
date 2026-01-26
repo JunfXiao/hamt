@@ -101,7 +101,7 @@ unit_system!(
     constant WATER_DENSITY = 1000.0f64 * kg_per_m3;
     constant WATER_SPECIFIC_HEAT = 4180.0f64 * j_per_kg_k;
     constant WATER_LATENT_HEAT = 2_489_000.0f64 * j_per_kg;
-    constant VAPOR_GAS_CONSTANT = 461.52f64 * j_per_kg_k;
+    constant VAPOR_GAS_CONSTANT = 461.524f64 * j_per_kg_k;
 );
 
 // Convenience type aliases for external modules
