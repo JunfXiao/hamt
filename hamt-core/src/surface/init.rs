@@ -93,36 +93,72 @@ impl Surface {
         base_pt.0 += boundary_cell_thickness;
 
         // --- Material Cells ---
+        let dist_factor = settings.div_distribution_factor;
+        if dist_factor > 1.0 || dist_factor < 0.0 {
+            return Err(crate::error::Error::InvalidInput(
+                "DivDistributionFactor".to_string(),
+                dist_factor.to_string(),
+                crate::error::InvalidInputReason::OutOfRange,
+            )
+            .into());
+        }
         for mat_arc in construction.layers.iter() {
-            // Simplified division calculation
             let mat_thickness_m = mat_arc.thickness;
             let div_len_m = settings.div_length;
 
-            let mut divs = mat_arc.num_div.unwrap_or(((mat_thickness_m / div_len_m).value().ceil() as i32)
-                .max(settings.min_div)
-                .min(settings.max_div) as usize);
+            // 1. Initial guess for divisions
+            let mut divs = mat_arc.num_div.unwrap_or(
+                ((mat_thickness_m / div_len_m).value().ceil() as i32)
+                    .max(settings.min_div)
+                    .min(settings.max_div) as usize,
+            );
 
-            // Ensure cell length is not too small
-            let sin_neg_pi_ovr_2 = (PI * -0.5).sin();
+            // Helper closure to calculate the position of the i-th boundary (0..=divs)
+            // proportional to thickness (range 0.0 to 1.0)
+            let get_norm_pos = |i: usize, n: usize, factor: f64| -> f64 {
+                let frac = i as f64 / n as f64;
+                if factor <= 1e-6 {
+                    return frac; // Pure Uniform
+                }
 
+                // Sine distribution formula (clusters points at 0.0 and 1.0)
+                // Range of inside term: -pi/2 to -3pi/2
+                // sin map: -1.0 to 1.0
+                // result map: 0.0 to 1.0
+                let sin_pos = ((std::f64::consts::PI * (-frac) - std::f64::consts::PI / 2.0).sin()
+                    / 2.0)
+                    - (-1.0 / 2.0); // sin(-pi/2) is -1
+
+                // Linear interpolation between Uniform and Sine
+                frac * (1.0 - factor) + sin_pos * factor
+            };
+
+            // 2. Safety Check: Ensure the smallest cell is not too small
+            // The smallest cell in Sine distribution is at the boundary (i=1)
             while divs > 1 {
-                let test_len = mat_thickness_m
-                    * (((PI * (-1.0 / divs as f64) - PI / 2.0).sin() / 2.0)
-                        - (sin_neg_pi_ovr_2 / 2.0));
+                // Calculate the normalized length of the first cell (usually the smallest)
+                let norm_len_first =
+                    get_norm_pos(1, divs, dist_factor) - get_norm_pos(0, divs, dist_factor);
+                let test_len = mat_thickness_m * norm_len_first;
+
                 if test_len > settings.adj_length {
                     break;
                 }
                 divs -= 1;
             }
 
+            // 3. Generate Cells
+            let mut prev_pos_m = 0.0 * meter; // Start at 0 relative to material layer
+
             for did in 1..=divs {
-                let did_f64 = did as f64;
-                let divs_f64 = divs as f64;
-                // Make cells smaller near the surface using sine distribution
-                // let length = mat_thickness_m
-                //     * (((PI * (-did_f64 / divs_f64) - PI / 2.0).sin() / 2.0)
-                //         - ((PI * (-(did_f64 - 1.0) / divs_f64) - PI / 2.0).sin() / 2.0));
-                let length = mat_thickness_m / divs_f64; // uniform division
+                // Calculate current boundary position
+                let norm_pos = get_norm_pos(did, divs, dist_factor);
+                let curr_pos_m = mat_thickness_m * norm_pos;
+
+                // Length is difference between current boundary and previous boundary
+                let length = curr_pos_m - prev_pos_m;
+                prev_pos_m = curr_pos_m;
+
                 let size = get_size(length);
 
                 let cell = Cell::new(
@@ -132,6 +168,8 @@ impl Surface {
                 );
 
                 cells.push(cell);
+
+                // Update base pointer for the NEXT cell
                 base_pt.0 += length;
             }
         }

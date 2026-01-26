@@ -347,6 +347,11 @@ pub struct HamtSettings {
     pub max_div: i32,
     /// Allowed length for adjacent check [m]
     pub adj_length: Length<f64>,
+    /// Cell division distribution factor.
+    ///
+    /// When set to 1.0, the cells are divided by sine distribution.
+    /// When set to 0.0, the cells are divided by linear distribution.
+    pub div_distribution_factor: f64,
     /// user defined depth [m]
     pub user_defined_depth: Option<Length<f64>>,
 }
@@ -366,6 +371,7 @@ impl Default for HamtSettings {
             min_div: 3,
             max_div: 20,
             adj_length: 0.00005 * units::meter,
+            div_distribution_factor: 0.5,
             user_defined_depth: None,
         }
     }

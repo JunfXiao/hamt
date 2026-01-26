@@ -315,6 +315,7 @@ fn create_library(
         vapor_diffusion_resistance: get_vapor_diffusion_curve(),
         initial_temp: celsius_to_kelvin(init_temp_celsius),
         num_div: None,
+        div_distribution_factor: 0.3,
     };
 
     let lib = MaterialLibrary::new();
@@ -898,7 +899,6 @@ pub struct Ui {
     status_style: StatusStyle,
     last_render: Instant,
     min_frame_time: Duration,
-    // 记录上一次渲染的行数，用于优化清除操作
     last_render_height: usize,
 }
 

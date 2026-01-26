@@ -92,6 +92,12 @@ pub struct Material {
 
     // Division Parameters
     pub num_div: Option<usize>,
+
+    /// Cell division distribution factor.
+    ///
+    /// When set to 1.0, the cells are divided by sine distribution.
+    /// When set to 0.0, the cells are divided by linear distribution.
+    pub div_distribution_factor: f64,
 }
 
 impl PartialEq for Material {
@@ -124,6 +130,7 @@ impl Default for Material {
             thermal_conductivity: Curve::default(),
             initial_temp: celsius_to_kelvin(20.0),
             num_div: None,
+            div_distribution_factor: 0.7,
         }
     }
 }
@@ -325,4 +332,3 @@ impl MaterialLibrary {
         })?)
     }
 }
-
