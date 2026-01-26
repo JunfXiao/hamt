@@ -5,8 +5,10 @@ use crate::uom::dimensions::{
     Density, Dimensionless, Pressure, SpecificEnergy, SpecificHeatCapacity, Temperature,
     VaporPermeability,
 };
-use crate::uom::units::{self, kelvin, kg_per_m_s_pa, kg_per_m3, m2_per_s, pascals};
+use crate::uom::units::{self, kelvin, kg_per_m_s_pa, kg_per_m3, pascals};
+mod curve;
 pub mod geometry;
+pub use curve::*;
 
 /// Universal gas constant for water vapor [J/kg·K].
 pub const R_V: SpecificHeatCapacity<f64> = Quantity(461.52);
@@ -81,7 +83,10 @@ pub fn rh_to_vp(rh: Dimensionless<f64>, temp: Temperature<f64>) -> Pressure<f64>
 /// # Arguments
 /// * `temp_celsius` - Temperature [°C].
 /// * `amb_pressure` - Ambient barometric pressure [Pa].
-pub fn water_vapor_permeability_coeff(temp: Temperature<f64>, amb_pressure: Pressure<f64>) -> VaporPermeability<f64> {
+pub fn water_vapor_permeability_coeff(
+    temp: Temperature<f64>,
+    amb_pressure: Pressure<f64>,
+) -> VaporPermeability<f64> {
     (1.97e-7 * temp.value_in(kelvin).powf(0.81)) / amb_pressure.value_in(pascals) * kg_per_m_s_pa
 }
 

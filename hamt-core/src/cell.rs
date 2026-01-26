@@ -1,13 +1,12 @@
 //! Defines the core `Cell` struct, representing a finite volume element in the 1D HAMT model.
 
-use tracing::warn;
+
 
 use crate::boundary::celsius_to_kelvin;
 use crate::uom::dimensions::{
     Density, Dimensionless, HeatTransferCoeff, LiquidTransportCoeff, Power, Pressure,
     SpecificHeatCapacity, Temperature, ThermalConductivity, VaporTransportCoeff, Volume,
 };
-use crate::uom::units::{kelvin, kg_per_m3, pascals};
 use crate::{
     boundary::BoundaryCondition,
     hamt_manager::HamtSettings,
@@ -16,7 +15,6 @@ use crate::{
 };
 
 use super::material::Material;
-use std::ffi::os_str::Display;
 use std::sync::Arc;
 
 /// Maximum number of adjacent cells a single cell can have.

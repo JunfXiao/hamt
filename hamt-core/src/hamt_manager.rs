@@ -8,11 +8,11 @@ use crate::physics::geometry::{Pt3D, Size3D};
 use crate::surface::Surface;
 use crate::uom::dimensions::{Power, Temperature, Time};
 use crate::uom::units::{hours, kelvin};
-use crate::{error, physics, uom};
+use crate::{error, uom};
 use anyhow::{Context, Ok, Result};
 use std::mem;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::debug;
 use uom::dimensions::Area;
 use uom::dimensions::Length;
 use uom::units;
@@ -103,7 +103,7 @@ impl HamtManager {
         }
         // Previous stats for adaptive time stepping
 
-        let mut stats = ConvergenceStats::default();
+        let mut stats: ConvergenceStats;
 
         for _ in 0..self.settings.max_iterations {
             self.surface_next.calculate_iteration(

@@ -4,7 +4,8 @@ use strum::EnumString;
 use tracing::warn;
 
 use crate::error::{self, Error, InvalidInputReason};
-use crate::material::{Curve, Material, MaterialLibrary, SurfaceVaporCoef};
+use crate::material::{Material, MaterialLibrary, SurfaceVaporCoef};
+use crate::physics::Curve;
 use crate::uom::{Dimension, Quantity};
 use anyhow::{Context, Result};
 use std::any;
@@ -239,7 +240,10 @@ fn parse_number<T: FromStr>(input: &str, field_name: &str) -> Result<T, Error> {
 fn parse_curve<const DX: Dimension, const DY: Dimension>(
     params: &[String],
     name: &str,
-) -> Result<Curve<DX, DY>, Error> {
+) -> Result<Curve<DX, DY>, Error>
+where
+    Quantity<f64, { DY.sub(DX) }>: Sized,
+{
     if params.is_empty() {
         return Ok(Curve::<DX, DY>::new(Vec::new(), Vec::new()));
     }

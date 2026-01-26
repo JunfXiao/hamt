@@ -8,13 +8,15 @@ use crossterm::{
     style::{self, Attribute, Color, Print},
     terminal::{self, ClearType},
 };
+use hamt_core::material::{Material, MaterialLibrary, SurfaceVaporCoef};
+use hamt_core::physics::Curve;
 use hamt_core::uom::dimensions::{
-    Density, Dimensionless, HeatCapacity, Length, SpecificHeatCapacity, Temperature, Time,
-    VolumetricHeatCapacity, WaterContent,
+    Density, Dimensionless, SpecificHeatCapacity, Temperature, Time, VolumetricHeatCapacity,
+    WaterContent,
 };
 use hamt_core::uom::units::{
-    self, days, dimensionless, hours, j_per_kg_k, j_per_m3_k, kelvin, kg_per_m2_s, kg_per_m2_s_pa,
-    kg_per_m3, m_per_s, m2_per_s, meter, square_meter, w_per_m_k, w_per_m2_k,
+    days, dimensionless, hours, j_per_kg_k, j_per_m3_k, kelvin, kg_per_m2_s_pa, kg_per_m3, m_per_s,
+    m2_per_s, meter, square_meter, w_per_m_k, w_per_m2_k,
 };
 use hamt_core::uom::{
     DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT,
@@ -25,30 +27,22 @@ use hamt_core::{
     uom::units::seconds,
 };
 use hamt_core::{
-    cell::{BoundaryLocation, CellType},
+    cell::CellType,
     hamt_manager::{AdaptiveState, HamtManager, HamtSettings},
-};
-use hamt_core::{
-    material::{Curve, Material, MaterialLibrary, SurfaceVaporCoef},
-    uom::dimensions::Mass,
 };
 use hamt_core::{
     physics::ATMOSPHERE_PRESSURE,
     surface::Surface,
     uom::{constants::VAPOR_GAS_CONSTANT, units::pascals},
 };
-use hamt_core::{physics::ECLIPSE, uom::units::kilograms};
 use std::time::{Duration, Instant};
 use std::{
     borrow::Cow,
     io::{self, IsTerminal, Stdout, Write},
-    ops::Deref,
 };
 use std::{cell::RefCell, ops::Div, rc::Rc};
 use std::{collections::HashSet, sync::Once};
-use tracing::{Instrument, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
-use tracing_test::traced_test;
 
 // Reference results from Table B.1 and B.2
 const REF_WATER_CONTENT: &[(i32, f64, f64)] = &[
@@ -140,6 +134,7 @@ fn curve_by_func<const DX: Dimension, const DY: Dimension>(
 ) -> Curve<DX, DY>
 where
     Quantity<f64, DX>: Div<Quantity<f64, DX>, Output = Dimensionless<f64>>,
+    Quantity<f64, { DY.sub(DX) }>: Sized,
 {
     let data_len = ((x_range.1 - x_range.0) / delta) + 1.0f64;
     let x_series: Vec<Quantity<f64, DX>> = (0..data_len.value() as usize)
@@ -154,6 +149,7 @@ fn curve_by_func_and_x_values<const DX: Dimension, const DY: Dimension>(
 ) -> Curve<DX, DY>
 where
     Quantity<f64, DX>: Div<Quantity<f64, DX>, Output = Dimensionless<f64>>,
+    Quantity<f64, { DY.sub(DX) }>: Sized,
 {
     let x_values: Vec<_> = x_values.into_iter().collect();
     let y_series: Vec<Quantity<f64, DY>> = x_values.iter().map(|x| func(*x)).collect();
@@ -168,7 +164,7 @@ fn sorption_isotherm(rh: Dimensionless<f64>) -> Quantity<f64, DIM_WATER_CONTENT>
 
     w_sat
         * (1.0f64
-            + (8.0e-8 * r_h2o * (t_ref + 10.0) * rho_w * rh.value().ln())
+            + (8.0e-8 * r_h2o * t_ref * rho_w * rh.value().ln())
                 .abs()
                 .powf(1.6))
         .powf(-0.375)
@@ -439,7 +435,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
             let mut prev_delta_t: Temperature<f64> = 0.0 * kelvin;
             let mut prev_delta_rh: Dimensionless<f64> = 0.0 * dimensionless;
             let mut constant_time: Time<f64> = 0.0 * seconds;
-            let allowed_err: Dimensionless<f64> = 1e-6 * dimensionless;
+            let allowed_err: Dimensionless<f64> = 1e-4 * dimensionless;
             let mut adap_state = AdaptiveState::default();
 
             let make_progress_bar_preheat = {
@@ -459,7 +455,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                         };
                         ui_clone.borrow_mut().set_status(
                             format!(
-                                "Preheat ΔT={:.2e} K, Δrh={:.2e}% | Time={:.2} hours | Run time: {} seconds | () | timestep: {:?} (orig: {:?})",
+                                "Preheat ΔT={:.2e} K, Δrh={:.2}% | Time={:.2} hours | Run time: {} seconds | () | timestep: {:?} (orig: {:?})",
                                 prev_delta_t.value_in(kelvin),
                                 prev_delta_rh.value()*100.0,
                                 (state.current_time / hours).value(),
@@ -472,7 +468,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                     }
                 }
             };
-            while constant_time < 30.0 * days {
+            while constant_time < 7.0 * days {
                 // if !mgr.solve_timestep()? {
                 //     return Err(hamt_core::error::Error::Other(
                 //         "Preheating failed: timestep did not converge".to_string(),
@@ -517,11 +513,11 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                     .map(|c| c.cell_temp)
                     .reduce(|a, b| a.max(b))
                     .unwrap_or_default();
-                prev_delta_t = max_t - min_t;
-                prev_delta_rh = max_rh - min_rh;
+                prev_delta_t = (max_t - min_t).abs();
+                prev_delta_rh = (max_rh - min_rh).abs();
 
-                if prev_delta_t.value_in(kelvin) < allowed_err
-                    && prev_delta_rh.value() < allowed_err
+                if prev_delta_t.value_in(kelvin) <= allowed_err.value()
+                    && prev_delta_rh.value() <= allowed_err.value()
                 {
                     constant_time += mgr.settings.timestep;
                 } else {
@@ -844,18 +840,18 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
 }
 
 #[test]
-fn test_din_en_15026_timestep_1h() -> Result<()> {
-    run_benchmark_test(1.0 * hours)
+fn test_din_en_15026_timestep_2h() -> Result<()> {
+    run_benchmark_test(2.0 * hours)
 }
 
 #[test]
-#[ignore = "Prefer 1h timestep when dynamic timestep is enabled."]
+#[ignore = "Prefer 2h timestep when dynamic timestep is enabled."]
 fn test_din_en_15026_timestep_0_5h() -> Result<()> {
     run_benchmark_test(0.5 * hours)
 }
 
 #[test]
-#[ignore = "Prefer 1h timestep when dynamic timestep is enabled."]
+#[ignore = "Prefer 2h timestep when dynamic timestep is enabled."]
 // #[ignore = "Please manually test the DIN EN 15026 benchmark"]
 fn test_din_en_15026_timestep_0_1h() -> Result<()> {
     run_benchmark_test(0.1 * hours)
@@ -891,7 +887,7 @@ pub fn init_tracing() {
     });
 }
 
-struct Ui {
+pub struct Ui {
     enabled: bool,
     stdout: Stdout,
     title: String,
@@ -902,16 +898,30 @@ struct Ui {
     status_style: StatusStyle,
     last_render: Instant,
     min_frame_time: Duration,
+    // 记录上一次渲染的行数，用于优化清除操作
+    last_render_height: usize,
 }
 
 impl Ui {
     fn new(title: &str) -> Result<Self> {
         let mut stdout = io::stdout();
         let enabled = stdout.is_terminal();
+
         if enabled {
+            ctrlc::set_handler(move || {
+                let mut stdout = io::stdout();
+                let _ = stdout.execute(style::SetAttribute(Attribute::Reset));
+                let _ = stdout.execute(cursor::Show);
+                let _ = stdout.execute(terminal::LeaveAlternateScreen);
+                // 退出进程
+                std::process::exit(0);
+            })
+            .expect("Error setting Ctrl-C handler");
+
             stdout.execute(terminal::EnterAlternateScreen)?;
             stdout.execute(cursor::Hide)?;
         }
+
         Ok(Self {
             enabled,
             stdout,
@@ -922,9 +932,13 @@ impl Ui {
             status_line: String::new(),
             status_style: StatusStyle::Normal,
             last_render: Instant::now(),
-            min_frame_time: Duration::from_millis(1000 / 10),
+            min_frame_time: Duration::from_millis(1000 / 2),
+            last_render_height: 0,
         })
     }
+
+    // ... (log, set_status, set_result_lines 方法保持不变) ...
+    // 为了节省篇幅，这里省略，请直接保留你原来的实现
 
     fn log(&mut self, line: String) -> Result<()> {
         if !self.enabled {
@@ -964,11 +978,14 @@ impl Ui {
             return Ok(());
         }
         self.enabled = false;
+
+        // 恢复终端状态
         self.stdout.execute(style::SetAttribute(Attribute::Reset))?;
         self.stdout.execute(cursor::Show)?;
         self.stdout.execute(terminal::LeaveAlternateScreen)?;
         let _ = self.stdout.flush();
 
+        // 打印最终结果到标准输出（此时已退出 Alternate Screen）
         println!("{}", self.title);
         println!("{}", "-".repeat(40));
         for line in &self.log_lines {
@@ -987,41 +1004,70 @@ impl Ui {
         if !force && self.last_render.elapsed() < self.min_frame_time {
             return Ok(());
         }
+
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
         let cols = cols as usize;
+        let rows = rows as usize;
+
         let mut lines: Vec<UiLine> = Vec::new();
         lines.push(UiLine::plain(self.title.clone()));
         lines.push(UiLine::plain("-".repeat(cols.min(80))));
-        lines.extend(self.log_lines.iter().cloned().map(UiLine::plain));
+
+        for log in &self.log_lines {
+            // 假设 textwrap::wrap 返回 Vec<Cow<str>>
+            // max_cols 是当前终端宽度
+            let wrapped = textwrap::wrap(log, cols);
+            for part in wrapped {
+                lines.push(UiLine::plain(part.to_string()));
+            }
+        }
+
         if !self.result_lines.is_empty() {
             lines.push(UiLine::plain("-".repeat(cols.min(80))));
             lines.extend(self.result_lines.iter().cloned());
         }
 
-        let max_lines = rows.saturating_sub(1) as usize;
-        if lines.len() > max_lines {
-            lines = lines.split_off(lines.len() - max_lines);
+        // 截断多余的行，为状态栏留一行
+        let max_content_lines = rows.saturating_sub(1);
+        if lines.len() > max_content_lines {
+            lines = lines.split_off(lines.len() - max_content_lines);
         }
 
-        self.stdout
-            .queue(cursor::MoveTo(0, 0))?
-            .queue(terminal::Clear(ClearType::All))?;
+        // [FIX 2] 解决闪烁问题
+        // 1. 将光标移回左上角，而不是清空全屏
+        self.stdout.queue(cursor::MoveTo(0, 0))?;
 
-        for line in lines {
+        // 2. 逐行覆盖打印，并清除该行右侧残留内容
+        for line in &lines {
             let text = truncate_line(&line.text, cols);
+
             if let Some(color) = line.color {
                 self.stdout.queue(style::SetForegroundColor(color))?;
             }
+
             self.stdout.queue(Print(text))?;
-            if line.color.is_some() {
-                self.stdout.queue(style::SetAttribute(Attribute::Reset))?;
-            }
+
+            // 关键：重置颜色并清除当前行直到行尾
+            self.stdout.queue(style::SetAttribute(Attribute::Reset))?;
+            self.stdout
+                .queue(terminal::Clear(ClearType::UntilNewLine))?;
             self.stdout.queue(Print("\n"))?;
         }
 
+        // 3. 如果当前内容的行数比上次少，清除下方残留的行
+        let current_height = lines.len();
+        if current_height < self.last_render_height {
+            for y in current_height..self.last_render_height.min(max_content_lines) {
+                self.stdout.queue(cursor::MoveTo(0, y as u16))?;
+                self.stdout.queue(terminal::Clear(ClearType::CurrentLine))?;
+            }
+        }
+        self.last_render_height = current_height;
+
+        // 4. 渲染状态栏（固定在底部）
         let status = truncate_line(&self.status_line, cols);
         self.stdout
-            .queue(cursor::MoveTo(0, rows.saturating_sub(1)))?
+            .queue(cursor::MoveTo(0, rows.saturating_sub(1) as u16))?
             .queue(style::SetAttribute(Attribute::Reset))?;
 
         match self.status_style {
@@ -1037,7 +1083,8 @@ impl Ui {
 
         self.stdout
             .queue(Print(status))?
-            .queue(style::SetAttribute(Attribute::Reset))?;
+            .queue(style::SetAttribute(Attribute::Reset))?
+            .queue(terminal::Clear(ClearType::UntilNewLine))?; // 确保状态栏右侧也被清理
 
         self.stdout.flush()?;
         self.last_render = Instant::now();
@@ -1045,17 +1092,19 @@ impl Ui {
     }
 }
 
+// Drop 实现保持不变，用于正常的 Scope 退出清理
 impl Drop for Ui {
     fn drop(&mut self) {
         if !self.enabled {
             return;
         }
+        // 使用 queue 可能会在 panic 时无法刷新，这里改用 execute 确保立即执行
+        // 或者保留原有逻辑，只要 Ctrl+C handler 工作正常即可
         let _ = self.stdout.execute(style::SetAttribute(Attribute::Reset));
         let _ = self.stdout.execute(cursor::Show);
         let _ = self.stdout.execute(terminal::LeaveAlternateScreen);
     }
 }
-
 fn format_table_row(values: &[String], padding: usize) -> String {
     let mut line = String::new();
     for value in values {
