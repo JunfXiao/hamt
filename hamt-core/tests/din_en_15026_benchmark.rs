@@ -1202,7 +1202,7 @@ fn test_isotherm() {
         .value_in(kg_per_m3);
 
     assert!(
-        (calculated - 108.8).abs() / target < 0.005,
+        (calculated - target).abs() / target < 0.005,
         "Calculated value: {}",
         calculated
     );
