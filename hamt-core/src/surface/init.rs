@@ -1,4 +1,3 @@
-use std::f64::consts::PI;
 
 use super::*;
 use crate::uom::dimensions::Length;

@@ -8,7 +8,7 @@ use crate::{
             VaporResistance,
         },
         units::{
-            dimensionless, kg_per_m2_s, kg_per_m2_s_pa, m_per_s, meter, square_meter, w_per_m2_k,
+            dimensionless, kg_per_m2_s_pa, meter, square_meter, w_per_m2_k,
         },
     },
 };

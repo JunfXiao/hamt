@@ -1,21 +1,20 @@
 use crate::{
     parallel::{par_or_seq, par_or_seq_mut},
-    physics::ECLIPSE,
     uom::{
-        self, DIM_POWER, Quantity,
+        Quantity,
         dimensions::{
-            Area, HeatTransferCoeff, LiquidTransportCoeff, MassFlux, MassResistance, Power, Pressure, ThermalConductance, ThermalConductivity, ThermalResistance, VaporConductance, VaporResistance, VaporTransportCoeff
+            HeatTransferCoeff, LiquidTransportCoeff, MassFlux, MassResistance, Power, ThermalConductance, VaporConductance, VaporTransportCoeff
         },
         units::{
-            dimensionless, joules, k_per_w, kelvin, kg_per_m2_s_pa, kg_per_m3, kg_per_s, kilograms, m2_per_s, pa_s_per_kg, pascals, s_per_kg, seconds, square_meter, w_per_k, watts
+            dimensionless, k_per_w, kg_per_m2_s_pa, kg_per_m3, kg_per_s, kilograms, m2_per_s, pa_s_per_kg, pascals, s_per_kg, seconds, w_per_k, watts
         },
     },
 };
 
 use super::*;
-use crate::uom::units;
+
 use anyhow::Result;
-use diman::si::units::watt;
+
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 

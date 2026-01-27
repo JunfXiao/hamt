@@ -351,7 +351,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
 
     init_tracing();
 
-    let mut ui = Rc::new(RefCell::new(Ui::new("DIN EN 15026 Benchmark")?));
+    let ui = Rc::new(RefCell::new(Ui::new("DIN EN 15026 Benchmark")?));
 
     let result = (|| -> Result<()> {
         // Use 3 layers to optimize grid:
@@ -864,7 +864,7 @@ fn test_interpolation() {
     let start = 0.0;
     let end = 1.0;
     let d_point_len = 15;
-    let mut x_values: Vec<_> = interpolate_data_points(start, end, d_point_len, 0.4).collect();
+    let x_values: Vec<_> = interpolate_data_points(start, end, d_point_len, 0.4).collect();
 
     println!("X: {:?}", x_values);
     assert_eq!(x_values.len(), d_point_len, "Length mismatch");
@@ -879,12 +879,9 @@ pub fn init_tracing() {
         fmt()
             .with_env_filter(
                 EnvFilter::try_from_default_env()
-                    // 如果没有环境变量，使用这个默认值：
-                    // "info" -> 显示所有 info 级别
-                    // "my_cool_app=debug" -> 特别将你的包开启到 debug 级别
                     .unwrap_or_else(|_| EnvFilter::new("info,hamt_core=info")),
             )
-            .with_test_writer() // 关键：使用 TestWriter 以便 cargo test 正确捕获输出
+            .with_test_writer() 
             .init();
     });
 }
