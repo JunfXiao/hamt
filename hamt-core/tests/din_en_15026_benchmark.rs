@@ -447,7 +447,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                     let ui_clone = ui_clone.clone();
                     let start_time_for_ui = start_time_for_ui.clone();
                     let orig_timestep_for_ui = orig_timestep_for_ui.clone();
-                    move |state: &AdaptiveState| -> Result<()> {
+                    move |state: &AdaptiveState<Vec<(Time<f64>, u32)>>| -> Result<()> {
                         let orig_timestep = (*orig_timestep_for_ui).clone();
                         let current_step = if state.split_factor > 0 {
                             orig_timestep / 2.0_f64.powi(state.split_factor - 1)
@@ -479,6 +479,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
 
                 let set_progress_bar = make_progress_bar_preheat();
                 mgr.solve_timestep_adaptive(&mut adap_state, Some(Box::new(set_progress_bar)))?;
+                mgr.tick_timestep()?;
                 // adaptive_state.current_time += mgr.settings.timestep;
 
                 let min_rh = mgr
@@ -562,7 +563,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                     let start_time_for_ui = start_time_for_ui.clone();
                     let simulation_durations_for_ui = simulation_durations_for_ui.clone();
                     let orig_timestep_for_ui = orig_timestep_for_ui.clone();
-                    move |state: &AdaptiveState| -> Result<()> {
+                    move |state: &AdaptiveState<Vec<(Time<f64>, u32)>>| -> Result<()> {
                         let orig_timestep = (*orig_timestep_for_ui).clone();
                         let current_step = if state.split_factor > 0 {
                             orig_timestep / 2.0_f64.powi(state.split_factor - 1)
@@ -605,7 +606,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
             while current_time <= end_time {
                 let set_progress_bar = make_progress_bar();
                 mgr.solve_timestep_adaptive(&mut adap_state, Some(Box::new(set_progress_bar)))?;
-
+                mgr.tick_timestep()?;
                 current_time = adap_state.current_time;
 
                 if let Some(sim_day) = simulation_durations_days

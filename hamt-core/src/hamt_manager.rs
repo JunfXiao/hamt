@@ -134,10 +134,14 @@ impl HamtManager {
         Ok(false) // Not converged
     }
 
-    pub fn solve_timestep_adaptive(
+
+    /// Solves for the current timestep using adaptive substepping.
+    /// 
+    /// Warning: This function won't tick timestep after solving.
+    pub fn solve_timestep_adaptive<T>(
         &mut self,
-        adaptive_state: &mut AdaptiveState,
-        mut callback_state_change: Option<Box<dyn FnMut(&AdaptiveState) -> Result<()>>>,
+        adaptive_state: &mut AdaptiveState<T>,
+        mut callback_state_change: Option<Box<dyn FnMut(&AdaptiveState<T>) -> Result<()>>>,
     ) -> Result<()> {
         adaptive_state.substep_time = 0.0 * hours;
         let orig_timestep = self.settings.timestep;
@@ -154,6 +158,12 @@ impl HamtManager {
         // Track remaining substeps as integer rounds so the sum lands exactly on orig_timestep.
         let mut rounds_remaining = 1_i32 << (adaptive_state.split_factor - 1);
         self.settings.timestep = timestep_for_split(adaptive_state.split_factor);
+        
+        if let Some(ref mut prev_surface_state) = adaptive_state.prev_surface_state {
+            prev_surface_state.sync_state_from(&self.surface_prev)?;
+        } else {
+            adaptive_state.prev_surface_state = Some(self.surface_prev.clone());
+        }
 
         while rounds_remaining > 0 {
             if adaptive_state.retry_wait_time > 0 {
@@ -203,6 +213,7 @@ impl HamtManager {
             adaptive_state.current_time += actual_step;
             rounds_remaining -= 1;
             self.tick_timestep()?;
+            
 
             if adaptive_state.reset_time_in_contineous {
                 adaptive_state.time_in_contineous_split = 0;
@@ -225,6 +236,12 @@ impl HamtManager {
             }
         }
 
+        // Pretend we never substepped by "rewinding" the ticking and substepping.
+        // First, swap back the surface_curr and surface_prev
+        mem::swap(&mut self.surface_prev, &mut self.surface_curr);
+        // Then, restore the previous state from before substepping
+        self.surface_prev
+            .sync_state_from(adaptive_state.prev_surface_state.as_ref().unwrap())?;
         self.settings.timestep = orig_timestep;
         adaptive_state.substep_time = orig_timestep;
         Ok(())
@@ -377,28 +394,33 @@ impl Default for HamtSettings {
     }
 }
 
-pub struct AdaptiveState {
+pub struct AdaptiveState<T> 
+{
     pub substep_time: Time<f64>,
     pub current_time: Time<f64>,
     pub split_factor: i32,
     pub max_split_factor: i32,
-    pub fail_details: Vec<(Time<f64>, u32)>,
+    pub data: T,
     pub retry_wait_time: i32,
     pub time_in_contineous_split: i32,
     pub reset_time_in_contineous: bool,
+    pub prev_surface_state: Option<Surface>,
 }
 
-impl Default for AdaptiveState {
+impl<T> Default for AdaptiveState<T>
+where T:Default
+{
     fn default() -> Self {
         Self {
             substep_time: 0.0 * units::seconds,
             current_time: 0.0 * units::seconds,
             split_factor: 1,
             max_split_factor: 12,
-            fail_details: Vec::new(),
+            data: T::default(),
             retry_wait_time: 0,
             time_in_contineous_split: 0,
             reset_time_in_contineous: false,
+            prev_surface_state: None,
         }
     }
 }

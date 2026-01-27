@@ -298,7 +298,7 @@ impl TrnSysType {
                 manager.boundary_condition
             );
 
-            manager.solve_timestep().with_context(|| {
+            manager.solve_timestep_adaptive(&mut state.adaptive_state, None).with_context(|| {
                 format!(
                     "Solving time step {}, iteration {}",
                     get_simulation_time(),

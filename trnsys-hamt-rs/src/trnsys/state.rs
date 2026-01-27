@@ -31,6 +31,8 @@ pub(crate) struct TrnSysState {
     pub hamt_manager: Option<HamtManager>,
     pub csv_writer: Option<Writer<File>>,
 
+    pub adaptive_state: hamt_core::hamt_manager::AdaptiveState<()>,
+
     pub write_report: bool,
     pub write_report_interval: Time<f64>,
     pub last_report_time: Time<f64>,
@@ -60,6 +62,8 @@ impl TrnSysState {
 
             hamt_manager: None,
             csv_writer: None,
+
+            adaptive_state: hamt_core::hamt_manager::AdaptiveState::default(),
 
             write_report: false,
             write_report_interval: 1.0 * hours,
