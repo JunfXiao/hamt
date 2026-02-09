@@ -143,6 +143,8 @@ where
 
         if x_data.is_empty() {
             return (zero_y, zero_grad);
+        } else if x_data.len() == 1 {
+            return (y_data[0], zero_grad);
         }
 
         let n = x_data.len();
