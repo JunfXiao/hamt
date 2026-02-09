@@ -1,14 +1,13 @@
 use crate::{
-    parallel::{par_or_seq, par_or_seq_mut},
-    uom::{
+    boundary::kelvin_to_celsius, parallel::{par_or_seq, par_or_seq_mut}, physics::ECLIPSE, uom::{
         Quantity,
         dimensions::{
             HeatTransferCoeff, LiquidTransportCoeff, MassFlux, MassResistance, Power, ThermalConductance, VaporConductance, VaporTransportCoeff
         },
         units::{
-            dimensionless, k_per_w, kg_per_m2_s_pa, kg_per_m3, kg_per_s, kilograms, m2_per_s, pa_s_per_kg, pascals, s_per_kg, seconds, w_per_k, watts
+            dimensionless, k_per_w, kelvin, kg_per_m2_s_pa, kg_per_m3, kg_per_s, kilograms, m2_per_s, pa_s_per_kg, pascals, s_per_kg, seconds, w_per_k, watts
         },
-    },
+    }
 };
 
 use super::*;
@@ -238,7 +237,31 @@ impl Surface {
                     let mut vpoosum: VaporConductance<f64> = 0.0 * kg_per_s / pascals; // sum(1/R_vapor)
                     let mut vporsum: MassFlux<f64> = 0.0 * kg_per_s; // sum(P_v_nb/R_vapor)
 
-                    let vpsat_pa_val = physics::psy_psat_fn_temp(t_next);
+
+                    // Taylor Series Linearization for Vapor Pressure:
+                    // P_v^{n+1} \approx P_v^n + \left. \frac{\partial P_v}{\partial \phi} \right|^n (\phi^{n+1} - \phi^n) + \left. \frac{\partial P_v}{\partial T} \right|^n (T^{n+1} - T^n)
+                    // gives:
+                    // P_v^{n+1} \approx P_{sat}(T^n) \cdot \phi^{n+1} + \phi^n \cdot \frac{d P_{sat}}{d T}(T^n) \cdot (T^{n+1} - T^n)
+
+                    let t_curr = cell_curr.cell_temp;
+                    let t_curr_c = kelvin_to_celsius(t_curr);
+                    let vpsat_curr = physics::psy_psat_fn_temp(t_curr);
+                    // Approximate derivative using Magnus formula: dP_sat/dT ≈ P_sat * 17.27 * 237.3 / (T + 237.3)^2
+                    let denom_magnus = t_curr_c + 237.3;
+                    let d_psat_d_t = if denom_magnus > ECLIPSE {
+                        vpsat_curr * 17.27 * 237.3 / (denom_magnus * denom_magnus)
+                    } else {
+                        0.0 * pascals
+                    };
+
+                    let delta_t_val = (t_next - t_curr).value_in(kelvin);
+
+                    // Correction term for P_v due to temperature change: phi_curr * dPsat/dT * dt
+                    let p_sat_thermal_correction = cell_curr.cell_rh.value() * d_psat_d_t * delta_t_val;
+
+                    const RELAXATION_FACTOR: f64 = 0.6; // Empirical factor to prevent overshooting in RH update
+                    let vpsat_old = physics::psy_psat_fn_temp(cell_prev.cell_temp);
+                    let vpsat_pa_val = vpsat_curr * RELAXATION_FACTOR + vpsat_old * (1.0 - RELAXATION_FACTOR);
 
                     for nbr_i in surface_curr.neighbor_indices(i, nx) {
                         let nbr_curr = &surface_curr.cells[[nbr_i, 0, 0]];
@@ -297,10 +320,12 @@ impl Surface {
                     // Eq: (phioosum + vpoosum * Psat) * RH_next = phiorsum + vporsum + (wcap/dt)*RH_prev
 
                     let inertia_term = (wcap * cell_prev.cell_rh.value()) / dt_s;
+                    // subtract the thermal correction term from LHS P_v expansion
+                    let thermal_source_term = vpoosum * p_sat_thermal_correction;
                     let denom_rh:MassFlux<f64> = phioosum + (vpoosum * vpsat_pa_val) + (wcap / dt_s);
 
                     let rh_next = if denom_rh > 1e-20 * kg_per_s {
-                        (phiorsum + vporsum + inertia_term) / denom_rh
+                        (phiorsum + vporsum + inertia_term - thermal_source_term) / denom_rh
                     } else {
                         cell_curr.cell_rh
                     };
