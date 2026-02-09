@@ -2,6 +2,8 @@
 
 
 
+use strum::Display;
+
 use crate::boundary::celsius_to_kelvin;
 use crate::uom::dimensions::{
     Density, Dimensionless, HeatTransferCoeff, LiquidTransportCoeff, Power, Pressure,
@@ -15,6 +17,7 @@ use crate::{
 };
 
 use super::material::Material;
+use std::fmt::Display;
 use std::sync::Arc;
 
 /// Maximum number of adjacent cells a single cell can have.
@@ -27,13 +30,23 @@ pub enum CellType {
     Virtual(BoundaryLocation),
 }
 
+impl Display for CellType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CellType::Material(material) => write!(f, "Material({})", material.name),
+            CellType::Boundary(boundary, location) => write!(f, "Boundary({:?}, {:?})", boundary, location),
+            CellType::Virtual(location) => write!(f, "Virtual({:?})", location),
+        }
+    }
+}
+
 impl Default for CellType {
     fn default() -> Self {
         CellType::Boundary(Boundary::Convection, BoundaryLocation::Interior)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Display)]
 pub enum Boundary {
     Convection,
     Radiation,
@@ -42,7 +55,7 @@ pub enum Boundary {
     Virtual,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Display)]
 pub enum BoundaryLocation {
     Interior,
     Exterior,

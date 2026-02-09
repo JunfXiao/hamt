@@ -89,7 +89,7 @@ pub fn load_hamt_by_file(mut file: File) -> Result<MaterialLibrary> {
 /// ending with ';'.
 pub fn load_hamt_by_content(content: &str) -> Result<MaterialLibrary> {
     // 1. Parse content into a raw HashMap representation
-    let raw_data = parse_idf_content(content).with_context(|| "Parsing file content")?;
+    let raw_data = parse_idf_content(content).context("Parsing IDF file content")?;
 
     // 2. Initialize Material Library
     let library = MaterialLibrary::new();
@@ -197,7 +197,8 @@ pub fn load_hamt_by_content(content: &str) -> Result<MaterialLibrary> {
             };
 
             for p in &params[start_idx..] {
-                layer_names.push(p.clone());
+                // Compatibility: TRNSYS HAMT type is from **inside to outside**. However, the `hamt-core` library expects layers from **outside to inside**. So we reverse the order here. 
+                layer_names.insert(0, p.clone());
             }
 
             // Make sure surface vapor coefficients exist for this construction

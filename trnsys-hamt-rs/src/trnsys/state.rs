@@ -29,7 +29,11 @@ pub(crate) struct TrnSysState {
     pub(crate) iteration_mode: IterationMode,
 
     pub hamt_manager: Option<HamtManager>,
-    pub csv_writer: Option<Writer<File>>,
+
+    pub t_csv_writer: Option<Writer<File>>,
+    pub rh_csv_writer: Option<Writer<File>>,
+    pub water_csv_writer: Option<Writer<File>>,
+    pub output_csv_writer: Option<Writer<File>>,
 
     pub adaptive_state: hamt_core::hamt_manager::AdaptiveState<()>,
 
@@ -61,7 +65,11 @@ impl TrnSysState {
             default_output_values: vec![],
 
             hamt_manager: None,
-            csv_writer: None,
+
+            t_csv_writer: None,
+            rh_csv_writer: None,
+            water_csv_writer: None,
+            output_csv_writer: None,
 
             adaptive_state: hamt_core::hamt_manager::AdaptiveState::default(),
 

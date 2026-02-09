@@ -90,7 +90,7 @@ impl HamtManager {
 
     /// Solves for the current timestep by iterating until convergence.
     pub fn solve_timestep(&mut self) -> Result<bool> {
-        // Reapply surface vapor coefficients if not using constnat value
+        // Reapply surface vapor coefficients if not using constant value
         if !self.construction.surface_vapor_coef.is_external_const {
             self.boundary_condition.vapor_transport_coeff_ext =
                 self.boundary_condition.mass_convection_coeff_ext

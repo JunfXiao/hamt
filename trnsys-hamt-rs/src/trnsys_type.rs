@@ -12,8 +12,9 @@ use hamt_core::uom::units::{
     dimensionless, hours, kg_per_m2_s, kg_per_m2_s_pa, kg_per_m3, kj_per_hr, kj_per_hr_m2_k,
     m_per_s, meter, pascals, square_meter, w_per_m2,
 };
-use std::iter;
+use std::fmt::format;
 use std::path::Path;
+use std::{cell, iter};
 use tracing::{debug, info, warn};
 
 pub(crate) struct TrnSysType {}
@@ -90,35 +91,6 @@ impl TrnSysType {
 
         state.write_report_interval = (&state.params[6]).value * hours;
 
-        let output_file_id: i32 =
-            (&state.params[7])
-                .try_into()
-                .map_err(|_| InputError::BadParameter {
-                    index: 8,
-                    message: "Output File ID must be an integer".to_string(),
-                })?;
-
-        let output_path = format!("Type395_0{}_rh.out", output_file_id);
-        state.csv_writer = Some(Writer::from_path(output_path)?);
-
-        // Write title columns
-        if let Some(writer) = &mut state.csv_writer {
-            writer.write_record([
-                "Time",
-                "T_out",
-                "T_in",
-                "RH_out",
-                "RH_in",
-                "T_userdef",
-                "RH_userdef",
-                "Water_userdef",
-                "HeatFlux_out",
-                "HeatFlux_in",
-                "Water_out",
-                "Water_in",
-            ])?;
-        }
-
         let settings = HamtSettings {
             timestep: get_simulation_time_step() * hours,
             user_defined_depth: Some(user_defined_depth * meter),
@@ -138,6 +110,119 @@ impl TrnSysType {
             "Report after initialization:\n{:#?}",
             self.update_output(state, true)
         );
+
+        // Output Files
+
+        let output_file_id: i32 =
+            (&state.params[7])
+                .try_into()
+                .map_err(|_| InputError::BadParameter {
+                    index: 8,
+                    message: "Output File ID must be an integer".to_string(),
+                })?;
+
+        let t_output_path = format!("Type395_0{}_t.out", output_file_id);
+        state.t_csv_writer = Some(Writer::from_path(t_output_path)?);
+
+        let rh_output_path = format!("Type395_0{}_rh.out", output_file_id);
+        state.rh_csv_writer = Some(Writer::from_path(rh_output_path)?);
+
+        let general_output_path = format!("Type395_0{}.out", output_file_id);
+        state.output_csv_writer = Some(Writer::from_path(general_output_path)?);
+
+        let water_output_path = format!("Type395_0{}_water.out", output_file_id);
+        state.water_csv_writer = Some(Writer::from_path(water_output_path)?);
+
+        // Write t title columns
+        let cell_table_titles = vec!["time [h]".to_string()].into_iter().chain(
+            (0..state
+                .hamt_manager
+                .as_ref()
+                .unwrap()
+                .surface_curr
+                .cells
+                .len())
+                .map(|i| i.to_string()),
+        );
+
+        // cell depth information
+        let cells_ref = state
+            .hamt_manager
+            .as_ref()
+            .unwrap()
+            .surface_curr
+            .cells
+            .clone();
+        let cell_depth_titles = vec!["depth [m]".to_string()].into_iter().chain(
+            (0..state
+                .hamt_manager
+                .as_ref()
+                .unwrap()
+                .surface_curr
+                .cells
+                .len())
+                .map(|i| format!("{:.3e}", cells_ref[[i, 0, 0]].origin.x().value_in(meter))),
+        );
+        let cell_thickness_titles = vec!["thickness [m]".to_string()].into_iter().chain(
+            (0..state
+                .hamt_manager
+                .as_ref()
+                .unwrap()
+                .surface_curr
+                .cells
+                .len())
+                .map(|i| format!("{:.3e}", cells_ref[[i, 0, 0]].size.x().value_in(meter))),
+        );
+        let cell_material_titles = vec!["material".to_string()].into_iter().chain(
+            (0..state
+                .hamt_manager
+                .as_ref()
+                .unwrap()
+                .surface_curr
+                .cells
+                .len())
+                .map(|i| format!("{}", cells_ref[[i, 0, 0]].cell_type)),
+        );
+
+        if let Some(writer) = &mut state.t_csv_writer {
+            writer.write_record(cell_table_titles.clone())?;
+            writer.write_record(cell_depth_titles.clone())?;
+            writer.write_record(cell_thickness_titles.clone())?;
+            writer.write_record(cell_material_titles.clone())?;
+        }
+
+        if let Some(writer) = &mut state.rh_csv_writer {
+            writer.write_record(cell_table_titles.clone())?;
+            writer.write_record(cell_depth_titles.clone())?;
+            writer.write_record(cell_thickness_titles.clone())?;
+            writer.write_record(cell_material_titles.clone())?;
+        }
+
+        if let Some(writer) = &mut state.water_csv_writer {
+            writer.write_record(cell_table_titles)?;
+            writer.write_record(cell_depth_titles)?;
+            writer.write_record(cell_thickness_titles)?;
+            writer.write_record(cell_material_titles)?;
+        }
+
+        // Write output title columns
+        if let Some(writer) = &mut state.output_csv_writer {
+            writer.write_record([
+                "Time [h]",
+                "T_in [C]",
+                "T_out [C]",
+                "RH_in [-]",
+                "RH_out [-]",
+                "T_userdef [C]",
+                "RH_userdef [-]",
+                "Water_userdef [kg/m3]",
+                "HeatFlux_in [W/m2]",
+                "HeatFlux_out [W/m2]",
+                "Water_in [kg/m2s]",
+                "Water_out [kg/m2s]",
+            ])?;
+        }
+
         Ok(())
     }
 
@@ -157,51 +242,53 @@ impl TrnSysType {
     /// Report simulation data.
     ///
     /// Values:
+    /// T_in
     /// - T_out
-    /// - T_in
-    /// - RH_out
     /// - RH_in
+    /// - RH_out
     /// - T_userdef
     /// - RH_userdef
     /// - MassFlux_userdef
-    /// - HeatFlux_out
     /// - HeatFlux_in
-    /// - MassFlux_out
+    /// - HeatFlux_out
     /// - MassFlux_in
+    /// - MassFlux_out
+
     pub fn update_output(&self, state: &mut TrnSysState, write_file: bool) -> Result<()> {
         let report_row = if let Some(manager) = &mut state.hamt_manager {
             // Map outputs
             let report = manager.surface_next.report(&manager.boundary_condition)?;
             let outputs = [
+                kelvin_to_celsius(report.temp_surf_int),
                 kelvin_to_celsius(report.temp_surf_out),
-                kelvin_to_celsius(report.temp_surf_in),
+                report.rh_surf_int.value(),
                 report.rh_surf_out.value(),
-                report.rh_surf_in.value(),
                 kelvin_to_celsius(report.temp_surf_user_def),
                 report.rh_surf_user_def.value(),
                 report.water_surf_user_def.value_in(kg_per_m3),
-                report.q_surf_ext.value_in(w_per_m2),
                 report.q_surf_int.value_in(w_per_m2),
-                report.m_surf_ext.value_in(kg_per_m2_s),
+                report.q_surf_ext.value_in(w_per_m2),
                 report.m_surf_int.value_in(kg_per_m2_s),
+                report.m_surf_ext.value_in(kg_per_m2_s),
             ];
             outputs
         } else {
             [
-                20.0, // Outside Surface Temperature
                 20.0, // Inside Surface Temperature
-                0.1,  // Outside Relative Humidity
+                20.0, // Outside Surface Temperature
                 0.1,  // Inside Relative Humidity
-                20.0, 0.0, // Outside Water Vapor Density
-                0.0, // Inside Water Vapor Density
-                0.0, // Outside Heat Flux
-                0.0, // Inside Heat Flux
-                0.0, // Outside Mass Flux
-                0.0, // Inside Mass Flux
+                0.1,  // Outside Relative Humidity
+                20.0, // User-defined Surface Temperature
+                0.0,  // Inside Water Vapor Density
+                0.0,  // Outside Water Vapor Density
+                0.0,  // Inside Heat Flux
+                0.0,  // Outside Heat Flux
+                0.0,  // Inside Mass Flux
+                0.0,  // Outside Mass Flux
             ]
         };
 
-        if write_file && let Some(writer) = &mut state.csv_writer {
+        if write_file && let Some(writer) = &mut state.output_csv_writer {
             let time = get_simulation_time();
             let report_rows = iter::once(time)
                 .chain(report_row.clone().into_iter())
@@ -213,6 +300,7 @@ impl TrnSysType {
                 )
             })?;
             writer.flush()?;
+            self.output_cell_states(state)?
         }
 
         for (i, v) in report_row.into_iter().enumerate() {
@@ -223,74 +311,94 @@ impl TrnSysType {
         Ok(())
     }
 
+    pub fn output_cell_states(&self, state: &mut TrnSysState) -> Result<()> {
+        // Output cell RH
+        if let Some(writer) = &mut state.rh_csv_writer {
+            let time = get_simulation_time();
+            let cell_rh_rows = iter::once(time.to_string()).chain(
+                state
+                    .hamt_manager
+                    .as_ref()
+                    .unwrap()
+                    .surface_next
+                    .cells
+                    .iter()
+                    .map(|c| format!("{:.3e}", c.cell_rh.value())),
+            );
+            writer
+                .write_record(cell_rh_rows)
+                .context("Error writing cell RH row")?;
+            writer.flush()?;
+        }
+
+        // Output cell temperature
+        if let Some(writer) = &mut state.t_csv_writer {
+            let time = get_simulation_time();
+            let cell_temp_rows = iter::once(time.to_string()).chain(
+                state
+                    .hamt_manager
+                    .as_ref()
+                    .unwrap()
+                    .surface_next
+                    .cells
+                    .iter()
+                    .map(|c| format!("{:.3e}", kelvin_to_celsius(c.cell_temp))),
+            );
+            writer
+                .write_record(cell_temp_rows)
+                .context("Error writing cell temperature row")?;
+            writer.flush()?;
+        }
+
+        // Output cell water content
+        if let Some(writer) = &mut state.water_csv_writer {
+            let time = get_simulation_time();
+            let cell_water_rows = iter::once(time.to_string()).chain(
+                state
+                    .hamt_manager
+                    .as_ref()
+                    .unwrap()
+                    .surface_next
+                    .cells
+                    .iter()
+                    .map(|c| format!("{:.3e}", c.volumetric_water.value_in(kg_per_m3))),
+            );
+            writer
+                .write_record(cell_water_rows)
+                .context("Error writing cell water content row")?;
+            writer.flush()?;
+        }
+
+        Ok(())
+    }
+
     /// Called at each TRNSYS call within a timestep.
     pub fn iterate(&self, state: &mut TrnSysState) -> Result<()> {
         // Read Input
-        let t_out = state.inputs[0].value;
-        let t_in = state.inputs[1].value;
-        let rh_out = state.inputs[2].value;
-        let rh_in = state.inputs[3].value;
-        let hconv_out = state.inputs[4].value;
-        let hconv_in = state.inputs[5].value;
-        let q_out = state.inputs[6].value;
-        let q_in = state.inputs[7].value;
-        let hmass_conv_out = state.inputs[8].value;
-        let hmass_conv_in = state.inputs[9].value;
+        let t_int = state.inputs[0].value;
+        let t_out = state.inputs[1].value;
+        let rh_int = state.inputs[2].value;
+        let rh_out = state.inputs[3].value;
+        let hconv_int = state.inputs[4].value;
+        let hconv_out = state.inputs[5].value;
+        let q_int = state.inputs[6].value;
+        let q_out = state.inputs[7].value;
+        let hmass_conv_int = state.inputs[8].value;
+        let hmass_conv_out = state.inputs[9].value;
         let q_additional_userdef = state.inputs[10].value;
 
         if let Some(manager) = &mut state.hamt_manager {
-            manager.boundary_condition.temp_inside_air = celsius_to_kelvin(t_in);
+            manager.boundary_condition.temp_inside_air = celsius_to_kelvin(t_int);
             manager.boundary_condition.temp_outside_air = celsius_to_kelvin(t_out);
             manager.boundary_condition.rh_outside_air = rh_out / 100.0 * dimensionless;
-            manager.boundary_condition.rh_inside_air = rh_in / 100.0 * dimensionless;
+            manager.boundary_condition.rh_inside_air = rh_int / 100.0 * dimensionless;
             manager.boundary_condition.heat_transfer_coeff_ext = hconv_out * kj_per_hr_m2_k;
-            manager.boundary_condition.heat_transfer_coeff_int = hconv_in * kj_per_hr_m2_k;
+            manager.boundary_condition.heat_transfer_coeff_int = hconv_int * kj_per_hr_m2_k;
             manager.boundary_condition.additional_energy_ext = q_out * kj_per_hr;
-            manager.boundary_condition.additional_energy_int = q_in * kj_per_hr;
+            manager.boundary_condition.additional_energy_int = q_int * kj_per_hr;
             manager.boundary_condition.mass_convection_coeff_ext = hmass_conv_out * m_per_s;
-            manager.boundary_condition.mass_convection_coeff_int = hmass_conv_in * m_per_s;
+            manager.boundary_condition.mass_convection_coeff_int = hmass_conv_int * m_per_s;
             manager.boundary_condition.q_addition_userdef = q_additional_userdef * kj_per_hr;
-
-            if !manager.construction.surface_vapor_coef.is_external_const {
-                let rh = manager.boundary_condition.rh_outside_air;
-                if rh > 0.0 * dimensionless {
-                    let rho_v =
-                        physics::vd_from_t_rh(manager.boundary_condition.temp_outside_air, rh);
-                    let psat =
-                        physics::psy_psat_fn_temp(manager.boundary_condition.temp_outside_air);
-                    let denom = psat * rh;
-                    if denom > ECLIPSE * pascals {
-                        manager.boundary_condition.vapor_transport_coeff_ext =
-                            manager.boundary_condition.mass_convection_coeff_ext * rho_v / denom;
-                    } else {
-                        manager.boundary_condition.vapor_transport_coeff_ext = 0.0 * kg_per_m2_s_pa;
-                        debug!("vtc_ext zeroed: denom<=0, rh={:?}, psat={:?}", rh, psat);
-                    }
-                } else {
-                    manager.boundary_condition.vapor_transport_coeff_ext = 0.0 * kg_per_m2_s_pa;
-                    debug!("vtc_ext zeroed: rh_out<=0");
-                }
-            }
-            if !manager.construction.surface_vapor_coef.is_internal_const {
-                let rh = manager.boundary_condition.rh_inside_air;
-                if rh > 0.0 * dimensionless {
-                    let rho_v =
-                        physics::vd_from_t_rh(manager.boundary_condition.temp_inside_air, rh);
-                    let psat =
-                        physics::psy_psat_fn_temp(manager.boundary_condition.temp_inside_air);
-                    let denom = psat * rh;
-                    if denom > ECLIPSE * pascals {
-                        manager.boundary_condition.vapor_transport_coeff_int =
-                            manager.boundary_condition.mass_convection_coeff_int * rho_v / denom;
-                    } else {
-                        manager.boundary_condition.vapor_transport_coeff_int = 0.0 * kg_per_m2_s_pa;
-                        debug!("vtc_int zeroed: denom<=0, rh={:?}, psat={:?}", rh, psat);
-                    }
-                } else {
-                    manager.boundary_condition.vapor_transport_coeff_int = 0.0 * kg_per_m2_s_pa;
-                    debug!("vtc_int zeroed: rh_in<=0");
-                }
-            }
 
             debug!(
                 "Time = {}, bc: \n{:#?}",
@@ -298,13 +406,15 @@ impl TrnSysType {
                 manager.boundary_condition
             );
 
-            manager.solve_timestep_adaptive(&mut state.adaptive_state, None).with_context(|| {
-                format!(
-                    "Solving time step {}, iteration {}",
-                    get_simulation_time(),
-                    get_timestep_iteration()
-                )
-            })?;
+            manager
+                .solve_timestep_adaptive(&mut state.adaptive_state, None)
+                .with_context(|| {
+                    format!(
+                        "Solving time step {}, iteration {}",
+                        get_simulation_time(),
+                        get_timestep_iteration()
+                    )
+                })?;
 
             // Map outputs
             return self.update_output(state, false);

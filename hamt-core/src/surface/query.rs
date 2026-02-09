@@ -71,9 +71,9 @@ impl Surface {
 
         Ok(SurfaceReport {
             temp_surf_out,
-            temp_surf_in,
+            temp_surf_int: temp_surf_in,
             rh_surf_out,
-            rh_surf_in,
+            rh_surf_int: rh_surf_in,
             temp_surf_user_def,
             rh_surf_user_def,
             water_surf_user_def,

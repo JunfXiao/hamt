@@ -18,9 +18,9 @@ use std::{collections::HashMap, sync::Arc};
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SurfaceReport {
     pub temp_surf_out: Temperature<f64>,
-    pub temp_surf_in: Temperature<f64>,
+    pub temp_surf_int: Temperature<f64>,
     pub rh_surf_out: Dimensionless<f64>,
-    pub rh_surf_in: Dimensionless<f64>,
+    pub rh_surf_int: Dimensionless<f64>,
     pub temp_surf_user_def: Temperature<f64>,
     pub rh_surf_user_def: Dimensionless<f64>,
     pub water_surf_user_def: Density<f64>,
