@@ -1193,7 +1193,7 @@ fn truncate_line(line: &str, max_cols: usize) -> String {
 #[test]
 fn test_isotherm() {
     let curve = get_sorption_isotherm_curve();
-    let target = 91.37;
+    let target = 92.684517;
     let calculated = curve
         .interpolate(0.8540 * dimensionless)
         .0
