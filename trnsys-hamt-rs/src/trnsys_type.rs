@@ -7,14 +7,12 @@ use csv::Writer;
 use hamt_core::boundary::{celsius_to_kelvin, kelvin_to_celsius};
 use hamt_core::hamt_manager::{HamtManager, HamtSettings};
 use hamt_core::io::load_hamt_by_path;
-use hamt_core::physics::{self, ECLIPSE};
 use hamt_core::uom::units::{
-    dimensionless, hours, kg_per_m2_s, kg_per_m2_s_pa, kg_per_m3, kj_per_hr, kj_per_hr_m2_k,
-    m_per_s, meter, pascals, square_meter, w_per_m2,
+    dimensionless, hours, kg_per_m2_s, kg_per_m3, kj_per_hr, kj_per_hr_m2_k,
+    m_per_s, meter, square_meter, w_per_m2,
 };
-use std::fmt::format;
 use std::path::Path;
-use std::{cell, iter};
+use std::iter;
 use tracing::{debug, info, warn};
 
 pub(crate) struct TrnSysType {}
