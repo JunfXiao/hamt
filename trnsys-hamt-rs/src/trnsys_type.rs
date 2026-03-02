@@ -35,10 +35,10 @@ impl TrnSysType {
 
     /// Validate parameters.
     pub fn validate_parameters(&self, state: &mut TrnSysState) -> Result<()> {
-        if state.params.len() != 8 {
+        if state.params.len() < 8 || state.params.len() > 9 {
             return Err(InputError::BadParameter {
                 index: 1,
-                message: "8 parameters are required.".to_string(),
+                message: "8 or 9 parameters are required.".to_string(),
             }
             .into());
         }
@@ -89,11 +89,23 @@ impl TrnSysType {
 
         state.write_report_interval = (&state.params[6]).value * hours;
 
-        let settings = HamtSettings {
+        let mut settings = HamtSettings {
             timestep: get_simulation_time_step() * hours,
             user_defined_depth: Some(user_defined_depth * meter),
             ..Default::default()
         };
+
+        if let Some(depth) = state.params.get(7){
+            let depth_value: f64 = depth.value;
+            if depth_value <= 0.0 {
+                return Err(InputError::BadParameter {
+                    index: 8,
+                    message: "User-defined depth must be positive".to_string(),
+                }
+                .into());
+            }
+            settings.user_defined_depth = Some(depth_value * meter);
+        }
 
         let manager = HamtManager::new(
             Some(settings),
