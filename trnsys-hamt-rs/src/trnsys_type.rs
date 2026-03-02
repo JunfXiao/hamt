@@ -14,7 +14,6 @@ use hamt_core::uom::units::{
 use std::path::Path;
 use std::iter;
 use tracing::{debug, info, warn};
-
 pub(crate) struct TrnSysType {}
 
 impl TrnSysType {
