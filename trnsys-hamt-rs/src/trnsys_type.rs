@@ -8,11 +8,11 @@ use hamt_core::boundary::{celsius_to_kelvin, kelvin_to_celsius};
 use hamt_core::hamt_manager::{HamtManager, HamtSettings};
 use hamt_core::io::load_hamt_by_path;
 use hamt_core::uom::units::{
-    dimensionless, hours, kg_per_m2_s, kg_per_m3, kj_per_hr, kj_per_hr_m2_k,
-    m_per_s, meter, square_meter, w_per_m2,
+    dimensionless, hours, kg_per_m2_s, kg_per_m3, kj_per_hr, kj_per_hr_m2_k, m_per_s, meter,
+    square_meter, w_per_m2,
 };
-use std::path::Path;
 use std::iter;
+use std::path::Path;
 use tracing::{debug, info, warn};
 pub(crate) struct TrnSysType {}
 
@@ -94,7 +94,7 @@ impl TrnSysType {
             ..Default::default()
         };
 
-        if let Some(depth) = state.params.get(7){
+        if let Some(depth) = state.params.get(7) {
             let depth_value: f64 = depth.value;
             if depth_value <= 0.0 {
                 return Err(InputError::BadParameter {
