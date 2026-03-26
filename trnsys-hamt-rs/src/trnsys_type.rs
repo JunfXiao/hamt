@@ -8,8 +8,7 @@ use hamt_core::boundary::{celsius_to_kelvin, kelvin_to_celsius};
 use hamt_core::hamt_manager::{HamtManager, HamtSettings};
 use hamt_core::io::load_hamt_by_path;
 use hamt_core::uom::units::{
-    dimensionless, hours, kg_per_m2_s, kg_per_m3, kj_per_hr, kj_per_hr_m2_k, m_per_s, meter,
-    square_meter, w_per_m2,
+    dimensionless, hours, kg_per_hr, kg_per_m2_s, kg_per_m3, kg_per_s, kj_per_hr, kj_per_hr_m2_k, m_per_s, meter, square_meter, w_per_m2
 };
 use std::iter;
 use std::path::Path;
@@ -225,10 +224,12 @@ impl TrnSysType {
                 "T_userdef [C]",
                 "RH_userdef [-]",
                 "Water_userdef [kg/m3]",
-                "HeatFlux_in [W/m2]",
-                "HeatFlux_out [W/m2]",
-                "Water_in [kg/m2s]",
-                "Water_out [kg/m2s]",
+                "HeatFlux_in [KJ/hr]",
+                "HeatFlux_out [KJ/hr]",
+                "Water_in [kg/h]",
+                "Water_out [kg/h]",
+                "HeatFlux_in [W]",
+                "HeatFlux_out [W]",
             ])?;
         }
 
@@ -267,6 +268,7 @@ impl TrnSysType {
         let report_row = if let Some(manager) = &mut state.hamt_manager {
             // Map outputs
             let report = manager.surface_curr.report(&manager.boundary_condition)?;
+            let surface_area = manager.surface_curr.area;
             let outputs = [
                 kelvin_to_celsius(report.temp_surf_int),
                 kelvin_to_celsius(report.temp_surf_out),
@@ -275,10 +277,10 @@ impl TrnSysType {
                 kelvin_to_celsius(report.temp_surf_user_def),
                 report.rh_surf_user_def.value(),
                 report.water_surf_user_def.value_in(kg_per_m3),
-                report.q_surf_int.value_in(w_per_m2),
-                report.q_surf_ext.value_in(w_per_m2),
-                report.m_surf_int.value_in(kg_per_m2_s),
-                report.m_surf_ext.value_in(kg_per_m2_s),
+                (report.q_surf_int * surface_area).value_in(kj_per_hr),
+                (report.q_surf_ext * surface_area).value_in(kj_per_hr),
+                (report.m_surf_int * surface_area).value_in(kg_per_hr),
+                (report.m_surf_ext * surface_area).value_in(kg_per_hr),
             ];
             outputs
         } else {
@@ -301,6 +303,14 @@ impl TrnSysType {
             let time = get_simulation_time();
             let report_rows = iter::once(time)
                 .chain(report_row.clone().into_iter())
+                // chain with additional heat flux outputs in W
+                .chain(
+                    [
+                        report_row[7] * 1000.0 / 3600.0, // Convert kJ/hr to W
+                        report_row[8] * 1000.0 / 3600.0, // Convert kJ/hr to W
+                    ]
+                    .into_iter(),
+                )
                 .map(|v| v.to_string());
             writer.write_record(report_rows).with_context(|| {
                 format!(

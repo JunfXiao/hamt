@@ -97,16 +97,20 @@ impl Surface {
                     cell.cell_rh = bc.rh_outside_air;
                     let psat = physics::psy_psat_fn_temp(cell.cell_temp);
                     let rh = cell.cell_rh;
-                    let vtc = if bc.vapor_transport_coeff_ext > VaporTransportCoeff::<f64>::zero() {
-                        bc.vapor_transport_coeff_ext
-                    } else {
-                        let rho_v = physics::vd_from_t_rh(cell.cell_temp, rh);
-                        let denom = psat * rh;
-                        if denom > Quantity(1.0e-9) {
-                            bc.mass_convection_coeff_ext * rho_v / denom
+                    let vtc = if matches!(cell.cell_type, CellType::Boundary(crate::cell::Boundary::Convection, _)) {
+                        if bc.vapor_transport_coeff_ext > VaporTransportCoeff::<f64>::zero() {
+                            bc.vapor_transport_coeff_ext
                         } else {
-                            Quantity(0.0)
+                            let rho_v = physics::vd_from_t_rh(cell.cell_temp, rh);
+                            let denom = psat * rh;
+                            if denom > Quantity(1.0e-9) {
+                                bc.mass_convection_coeff_ext * rho_v / denom
+                            } else {
+                                Quantity(0.0)
+                            }
                         }
+                    } else {
+                        Quantity(0.0)
                     };
                     cell.vtc = vtc;
                     cell.cell_vp = rh * psat;
@@ -116,16 +120,20 @@ impl Surface {
                     cell.cell_rh = bc.rh_inside_air;
                     let psat = physics::psy_psat_fn_temp(cell.cell_temp);
                     let rh = cell.cell_rh;
-                    let vtc = if bc.vapor_transport_coeff_int > VaporTransportCoeff::<f64>::zero() {
-                        bc.vapor_transport_coeff_int
-                    } else {
-                        let rho_v = physics::vd_from_t_rh(cell.cell_temp, rh);
-                        let denom = psat * rh;
-                        if denom > Quantity(1.0e-9) {
-                            bc.mass_convection_coeff_int * rho_v / denom
+                    let vtc = if matches!(cell.cell_type, CellType::Boundary(crate::cell::Boundary::Convection, _)) {
+                        if bc.vapor_transport_coeff_int > VaporTransportCoeff::<f64>::zero() {
+                            bc.vapor_transport_coeff_int
                         } else {
-                            0.0 * kg_per_m2_s_pa
+                            let rho_v = physics::vd_from_t_rh(cell.cell_temp, rh);
+                            let denom = psat * rh;
+                            if denom > Quantity(1.0e-9) {
+                                bc.mass_convection_coeff_int * rho_v / denom
+                            } else {
+                                0.0 * kg_per_m2_s_pa
+                            }
                         }
+                    } else {
+                        0.0 * kg_per_m2_s_pa
                     };
                     cell.vtc = vtc;
                     cell.cell_vp = rh * psat;
@@ -155,8 +163,9 @@ impl Surface {
             .map(|&i| {
                 let cell_curr = &surface_curr.cells[[i, 0, 0]];
 
-                if matches!(cell_curr.cell_type, CellType::Material(_)) {
+                if !cell_curr.is_boundary() {
                     let cell_prev = &surface_prev.cells[[i, 0, 0]];
+                    let is_material = matches!(cell_curr.cell_type, CellType::Material(_));
 
                     // ==========================================
                     // 1. Heat Calculation (Calculate T_next)
@@ -199,7 +208,7 @@ impl Surface {
                         (density * spech + volumetric_water * physics::W_SPECH) * volume;
 
                     let mut q_vapor: Power<f64> = 0.0 * watts;
-                    if settings.latent_heat_enabled {
+                    if is_material && settings.latent_heat_enabled {
                         q_vapor = vapor_diffusion_net_flux * physics::W_HV;
 
                         if q_vapor.abs() > settings.max_latent_heat {

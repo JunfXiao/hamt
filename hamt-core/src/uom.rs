@@ -85,6 +85,7 @@ unit_system!(
     unit w_per_m2: EnergyFluxDensity = watts / square_meter;
     unit kg_per_m2_s: MassFluxDensity = kilograms / (square_meter * seconds);
     unit kg_per_s: MassFlux = kilograms / seconds;
+    unit kg_per_hr: MassFlux = kilograms / hours;
     unit w_per_m2_k: HeatTransferCoeff = watts / (square_meter * kelvin);
     unit w_per_k: ThermalConductance = watts / kelvin;
     unit kj_per_hr_m2_k: HeatTransferCoeff = kj_per_hr / (square_meter * kelvin);
