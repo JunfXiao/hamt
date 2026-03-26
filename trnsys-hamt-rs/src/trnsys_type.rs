@@ -266,7 +266,7 @@ impl TrnSysType {
     pub fn update_output(&self, state: &mut TrnSysState, write_file: bool) -> Result<()> {
         let report_row = if let Some(manager) = &mut state.hamt_manager {
             // Map outputs
-            let report = manager.surface_next.report(&manager.boundary_condition)?;
+            let report = manager.surface_curr.report(&manager.boundary_condition)?;
             let outputs = [
                 kelvin_to_celsius(report.temp_surf_int),
                 kelvin_to_celsius(report.temp_surf_out),
@@ -329,7 +329,7 @@ impl TrnSysType {
                     .hamt_manager
                     .as_ref()
                     .unwrap()
-                    .surface_next
+                    .surface_curr
                     .cells
                     .iter()
                     .map(|c| format!("{:.3e}", c.cell_rh.value())),
@@ -348,7 +348,7 @@ impl TrnSysType {
                     .hamt_manager
                     .as_ref()
                     .unwrap()
-                    .surface_next
+                    .surface_curr
                     .cells
                     .iter()
                     .map(|c| format!("{:.3e}", kelvin_to_celsius(c.cell_temp))),
@@ -367,7 +367,7 @@ impl TrnSysType {
                     .hamt_manager
                     .as_ref()
                     .unwrap()
-                    .surface_next
+                    .surface_curr
                     .cells
                     .iter()
                     .map(|c| format!("{:.3e}", c.volumetric_water.value_in(kg_per_m3))),
