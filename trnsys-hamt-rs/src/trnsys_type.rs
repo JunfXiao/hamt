@@ -93,7 +93,7 @@ impl TrnSysType {
             ..Default::default()
         };
 
-        if let Some(depth) = state.params.get(7) {
+        if let Some(depth) = state.params.get(7){
             let depth_value: f64 = depth.value;
             if depth_value <= 0.0 {
                 return Err(InputError::BadParameter {
@@ -103,6 +103,21 @@ impl TrnSysType {
                 .into());
             }
             settings.user_defined_depth = Some(depth_value * meter);
+        }
+
+        if let Some(n_div) = state.params.get(8) {
+            let n_div_value: i32 = n_div.try_into().map_err(|_| InputError::BadParameter {
+                index: 9,
+                message: "Number of divisions must be an integer".to_string(),
+            })?;
+            if n_div_value <= 0 {
+                return Err(InputError::BadParameter {
+                    index: 9,
+                    message: "Number of divisions must be positive".to_string(),
+                }
+                .into());
+            }
+            settings.min_div = n_div_value;
         }
 
         let manager = HamtManager::new(
