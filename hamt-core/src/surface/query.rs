@@ -7,9 +7,7 @@ use crate::{
             Density, HeatTransferCoeff, Pressure, ThermalConductivity, ThermalResistance,
             VaporResistance,
         },
-        units::{
-            dimensionless, kg_per_m2_s_pa, meter, square_meter, w_per_m2_k,
-        },
+        units::{dimensionless, kg_per_m2_s_pa, meter, square_meter, w_per_m2_k},
     },
 };
 
@@ -129,11 +127,13 @@ impl Surface {
     pub fn find_cell_idx_at_depth(&self, target_depth: Length<f64>) -> Option<[usize; 3]> {
         let mut best: Option<([usize; 3], Length<f64>)> = None;
         for ((x, y, z), cell) in self.cells.indexed_iter() {
-            let length = cell.origin.x() + cell.size.x() / 2.0;
-            let dist = (length - target_depth).abs();
-            match best {
-                Some((_, best_dist)) if dist >= best_dist => {}
-                _ => best = Some(([x, y, z], dist)),
+            if let CellType::Material(_) = cell.cell_type {
+                let origin_x = cell.origin.x();
+                let dist = (origin_x - target_depth).abs();
+                match best {
+                    Some((_, best_dist)) if dist >= best_dist => {}
+                    _ => best = Some(([x, y, z], dist)),
+                }
             }
         }
         best.map(|(idx, _)| idx)

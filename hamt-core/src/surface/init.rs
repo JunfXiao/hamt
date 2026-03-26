@@ -226,12 +226,21 @@ impl Surface {
         if self.user_defined_depth.is_none() {
             self.user_defined_depth = Some({
                 // default to mid-depth if not provided
-                let dims = self.cells.raw_dim();
-                if dims[0] > 0 {
-                    Quantity((dims[0]) as f64 / 2.0)
-                } else {
-                    Quantity(0.0)
-                }
+                
+                // Calculate the thickness of the surface based on the first and last cell positions in the x-direction
+                let first_cell_pos = self
+                    .cells
+                    .get([0, 0, 0])
+                    .map(|c| c.origin.x() - c.size.x() / 2.0) // Get the left boundary of the first cell
+                    .unwrap_or(0.0 * meter);
+
+                let last_cell_pos = self
+                    .cells
+                    .get([self.cells.len() - 1, 0, 0])
+                    .map(|c| c.origin.x() + c.size.x() / 2.0) // Get the right boundary of the last cell
+                    .unwrap_or(0.0 * meter);
+            
+                (first_cell_pos + last_cell_pos) / 2.0
             })
         }
         self.user_defined_cell_idx = self
