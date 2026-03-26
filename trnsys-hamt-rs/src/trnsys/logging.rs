@@ -1,5 +1,5 @@
 use crate::TYPE_NUMBER;
-use crate::trnsys::{Severity, get_current_unit, log_message, messages, simulation_has_error};
+use crate::trnsys::{Severity, get_current_unit, get_simulation_time, log_message, messages, simulation_has_error};
 use std::backtrace;
 use std::fmt::{Debug, Formatter, Pointer};
 use std::fs::OpenOptions;
@@ -172,7 +172,7 @@ where
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> std::fmt::Result {
-        write!(writer, "[Unit {}]", get_current_unit())?;
+        write!(writer, "[Unit {}] [T={}]", get_current_unit(), get_simulation_time())?;
 
         self.0.format_event(ctx, writer.by_ref(), event)?;
 

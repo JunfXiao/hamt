@@ -13,6 +13,7 @@ use crate::{
 
 use super::*;
 use anyhow::{Context, Result};
+use tracing::warn;
 
 impl Surface {
     /// Compatibility helper for callers that previously expected a vector of surfaces.
@@ -195,7 +196,7 @@ impl Surface {
 
         let boundary_cell = boundary_convection_idx
             .and_then(|idx| self.cells.get(idx))
-            .with_context(|| "No boundary convection cell found for surface heat flux")?;
+            .context("No boundary convection cell found for surface heat flux")?;
 
         for idx in self.virtual_cells(location.clone()) {
             let surf = self
@@ -214,6 +215,10 @@ impl Surface {
         Ok(if total_area > ECLIPSE * square_meter {
             total_flux / total_area
         } else {
+            warn!(
+                "Total area for heat flux for {} calculation is too small: {:?}. Returning zero flux.",
+                location, total_area
+            );
             Quantity(0.0)
         })
     }
@@ -281,6 +286,10 @@ impl Surface {
         Ok(if total_area > 0.0 {
             accum_flux / total_area
         } else {
+            warn!(
+                "Total area for moisture flux for {} calculation is too small: {:?}. Returning zero flux.",
+                location, total_area
+            );
             Quantity(0.0)
         })
     }
