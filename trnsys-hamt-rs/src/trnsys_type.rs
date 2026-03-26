@@ -7,6 +7,7 @@ use csv::Writer;
 use hamt_core::boundary::{celsius_to_kelvin, kelvin_to_celsius};
 use hamt_core::hamt_manager::{HamtManager, HamtSettings};
 use hamt_core::io::load_hamt_by_path;
+use hamt_core::uom::Quantity;
 use hamt_core::uom::units::{
     dimensionless, hours, kg_per_hr, kg_per_m2_s, kg_per_m3, kg_per_s, kj_per_hr, kj_per_hr_m2_k, m_per_s, meter, square_meter, w_per_m2
 };
@@ -23,7 +24,6 @@ impl TrnSysType {
 
     /// Very first call of the simulation: declare I/O sizes and iteration mode.
     pub fn first_call_of_simulation(&self, state: &mut TrnSysState) -> Result<()> {
-        state.num_params = 8;
         state.num_inputs = 11;
         state.num_outputs = 11;
         state.num_derivatives = 0;
@@ -93,16 +93,23 @@ impl TrnSysType {
             ..Default::default()
         };
 
-        if let Some(depth) = state.params.get(7) {
-            let depth_value: f64 = depth.value;
-            if depth_value <= 0.0 {
+        if let Some(n_div) = state.params.get(8) {
+            let n_div_value: i32 = n_div.try_into().map_err(|_| InputError::BadParameter {
+                index: 9,
+                message: "Number of divisions must be an integer".to_string(),
+            })?;
+            if n_div_value <= 0 {
                 return Err(InputError::BadParameter {
-                    index: 8,
-                    message: "User-defined depth must be positive".to_string(),
+                    index: 9,
+                    message: "Number of divisions must be positive".to_string(),
                 }
                 .into());
             }
-            settings.user_defined_depth = Some(depth_value * meter);
+            info!("Using user-defined number of divisions: {}", n_div_value);
+            // div_length
+            let total_thickness: Quantity<f64, _> = construction.layers.iter().map(|l|l.thickness).sum();
+            settings.div_length = total_thickness / n_div_value as f64;
+            settings.div_length = settings.div_length.max(0.001 * meter).min(0.1 * meter); // set a minimum division length to avoid too many divisions for very thin materials
         }
 
         let manager = HamtManager::new(
