@@ -1,6 +1,6 @@
 use crate::{
     cell::Boundary,
-    physics::ECLIPSE,
+    physics::{ECLIPSE, geometry::Pt3D},
     uom::{
         Dimension, Quantity,
         dimensions::{
@@ -140,14 +140,188 @@ impl Surface {
         best.map(|(idx, _)| idx)
     }
 
+    /// Compute trilinear interpolation weights for a target point within the
+    /// material cell grid.
+    ///
+    /// Returns 8 `(cell_index, weight)` pairs whose weights sum to 1.0.
+    /// For axes with only one cell (e.g. ny=1, nz=1 in a 1-D simulation) the
+    /// corresponding fraction is 0 and only 2 entries carry non-zero weight
+    /// (degenerating to simple linear interpolation).
+    ///
+    /// If the target coordinate is outside the material cell range on any axis,
+    /// it is clamped to the nearest cell (no extrapolation).
+    pub fn compute_interpolation_weights(
+        &self,
+        target: &Pt3D,
+    ) -> InterpolationWeights {
+        let dims = self.cells.raw_dim();
+        let (nx, ny, nz) = (dims[0], dims[1], dims[2]);
+
+        // Helper: extract sorted unique material-cell coordinates along one axis.
+        // Returns (sorted_indices, sorted_coords).
+        fn axis_coords(
+            cells: &ndarray::ArcArray3<Cell>,
+            axis: usize,
+            n: usize,
+        ) -> (Vec<usize>, Vec<f64>) {
+            let mut indices = Vec::new();
+            let mut coords = Vec::new();
+            for k in 0..n {
+                let idx: [usize; 3] = match axis {
+                    0 => [k, 0, 0],
+                    1 => [0, k, 0],
+                    _ => [0, 0, k],
+                };
+                if let Some(cell) = cells.get(idx) {
+                    if matches!(cell.cell_type, CellType::Material(_)) {
+                        let coord = match axis {
+                            0 => cell.origin.x().value_in(meter),
+                            1 => cell.origin.y().value_in(meter),
+                            _ => cell.origin.z().value_in(meter),
+                        };
+                        indices.push(k);
+                        coords.push(coord);
+                    }
+                }
+            }
+            (indices, coords)
+        }
+
+        // Helper: find bracket (lo_index, hi_index, fraction) for a target on one axis.
+        // Returns grid indices (into the cells array) and the interpolation fraction.
+        fn find_bracket(
+            indices: &[usize],
+            coords: &[f64],
+            target: f64,
+        ) -> (usize, usize, f64) {
+            if indices.is_empty() {
+                return (0, 0, 0.0);
+            }
+            if indices.len() == 1 || target <= coords[0] {
+                return (indices[0], indices[0], 0.0);
+            }
+            if target >= *coords.last().unwrap() {
+                let last = *indices.last().unwrap();
+                return (last, last, 0.0);
+            }
+            // Binary-search style: find the last coord <= target
+            let mut lo = 0;
+            for (i, &c) in coords.iter().enumerate() {
+                if c <= target {
+                    lo = i;
+                } else {
+                    break;
+                }
+            }
+            let hi = lo + 1;
+            let span = coords[hi] - coords[lo];
+            let frac = if span > 0.0 {
+                (target - coords[lo]) / span
+            } else {
+                0.0
+            };
+            (indices[lo], indices[hi], frac)
+        }
+
+        let (xi, xc) = axis_coords(&self.cells, 0, nx);
+        let (yi, yc) = axis_coords(&self.cells, 1, ny);
+        let (zi, zc) = axis_coords(&self.cells, 2, nz);
+
+        let tx_val = target.x().value_in(meter);
+        let ty_val = target.y().value_in(meter);
+        let tz_val = target.z().value_in(meter);
+
+        let (x0, x1, tx) = find_bracket(&xi, &xc, tx_val);
+        let (y0, y1, ty) = find_bracket(&yi, &yc, ty_val);
+        let (z0, z1, tz) = find_bracket(&zi, &zc, tz_val);
+
+        // 8 trilinear weights: w_ijk = (1-tx or tx) * (1-ty or ty) * (1-tz or tz)
+        let wx = [1.0 - tx, tx];
+        let wy = [1.0 - ty, ty];
+        let wz = [1.0 - tz, tz];
+        let xs = [x0, x1];
+        let ys = [y0, y1];
+        let zs = [z0, z1];
+
+        let mut weights: InterpolationWeights = [([0, 0, 0], 0.0); 8];
+        let mut k = 0;
+        for (ix, &xi_val) in xs.iter().enumerate() {
+            for (iy, &yi_val) in ys.iter().enumerate() {
+                for (iz, &zi_val) in zs.iter().enumerate() {
+                    weights[k] = ([xi_val, yi_val, zi_val], wx[ix] * wy[iy] * wz[iz]);
+                    k += 1;
+                }
+            }
+        }
+        weights
+    }
+
+    /// Interpolate a quantity at an exact point using trilinear interpolation
+    /// between bracketing material cells.
+    ///
+    /// For a 1-D grid this degenerates to linear interpolation along x.
+    /// If the target is outside the material cell range, the nearest cell value
+    /// is returned (no extrapolation).
+    pub fn interpolate_at_point<F, const D: Dimension>(
+        &self,
+        target: &Pt3D,
+        f: F,
+    ) -> Quantity<f64, D>
+    where
+        F: Fn(&Cell) -> Quantity<f64, D>,
+    {
+        let weights = self.compute_interpolation_weights(target);
+        Self::apply_interpolation_weights(&self.cells, &weights, f)
+    }
+
+    /// Evaluate a weighted sum over cells using pre-computed interpolation weights.
+    pub fn apply_interpolation_weights<F, const D: Dimension>(
+        cells: &ndarray::ArcArray3<Cell>,
+        weights: &InterpolationWeights,
+        f: F,
+    ) -> Quantity<f64, D>
+    where
+        F: Fn(&Cell) -> Quantity<f64, D>,
+    {
+        let mut value = 0.0;
+        for &(idx, w) in weights {
+            if w > 0.0 {
+                if let Some(cell) = cells.get(idx) {
+                    value += w * f(cell).value_unchecked();
+                }
+            }
+        }
+        Quantity(value)
+    }
+
+    /// Convenience wrapper: interpolate at a depth along x (y=0, z=0).
+    /// Equivalent to `interpolate_at_point` with a 1-D target.
+    pub fn interpolate_at_depth<F, const D: Dimension>(
+        &self,
+        target_depth: Length<f64>,
+        f: F,
+    ) -> Quantity<f64, D>
+    where
+        F: Fn(&Cell) -> Quantity<f64, D>,
+    {
+        let target = Pt3D::new(target_depth, 0.0 * meter, 0.0 * meter);
+        self.interpolate_at_point(&target, f)
+    }
+
     /// This function returns the values of the user-defined depth.
     /// If no user-defined depth is provided, it returns the mid-depth of the surface.
+    ///
+    /// Values are interpolated using cached trilinear weights for accuracy when
+    /// cell centers do not align exactly with the target depth.
+    ///
     /// # Returns
     /// A tuple containing the (cell_temp, cell_rh, water) of the depth.
     pub fn user_defined_values(&self) -> (Temperature<f64>, Dimensionless<f64>, Density<f64>) {
-        if let Some([x, y, z]) = self.user_defined_cell_idx {
-            let cell = &self.cells[[x, y, z]];
-            (cell.cell_temp, cell.cell_rh, cell.volumetric_water)
+        if let Some(ref weights) = self.user_defined_cell_idx {
+            let temp = Self::apply_interpolation_weights(&self.cells, weights, |c| c.cell_temp);
+            let rh = Self::apply_interpolation_weights(&self.cells, weights, |c| c.cell_rh);
+            let water = Self::apply_interpolation_weights(&self.cells, weights, |c| c.volumetric_water);
+            (temp, rh, water)
         } else {
             (Quantity(0.0), Quantity(0.0), Quantity(0.0))
         }

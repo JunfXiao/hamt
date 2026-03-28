@@ -1,7 +1,7 @@
 
 use super::*;
 use crate::uom::dimensions::Length;
-use crate::uom::{self, Quantity};
+use crate::uom::{self};
 use crate::{
     cell::Boundary,
     material::Construction,
@@ -12,7 +12,7 @@ use uom::units::meter;
 impl Surface {
     pub fn new(
         name: String,
-        area: Area<f64>,
+        dimension: Size3D,
         construction_name: String,
         cells: ArcArray3<Cell>,
         settings: &HamtSettings,
@@ -20,8 +20,10 @@ impl Surface {
         let mut surface = Surface {
             name,
             construction_name,
-            area,
+            area: dimension.y() * dimension.z(),
+            thickness: dimension.x(),
             cells,
+            size: dimension,
             cells_idx_map: HashMap::new(),
             user_defined_depth: settings.user_defined_depth,
             user_defined_cell_idx: None,
@@ -199,17 +201,14 @@ impl Surface {
         // currently, only 1D
         let cells_3d = ArcArray3::from_shape_vec((cells.len(), 1, 1), cells)?;
 
-        let mut surface = Surface::new(
+
+        Ok(Surface::new(
             surface_name,
-            surface_area,
+            get_size(construction.layers.iter().map(|l| l.thickness).sum()),
             construction.name.clone(),
             cells_3d,
             settings,
-        );
-
-        surface.init_cells_idx_map();
-
-        Ok(surface)
+        ))
     }
 
     fn init_cells_idx_map(&mut self) {
@@ -243,9 +242,9 @@ impl Surface {
                 (first_cell_pos + last_cell_pos) / 2.0
             })
         }
-        self.user_defined_cell_idx = self
-            .user_defined_depth
-            .map(|v| self.find_cell_idx_at_depth(v))
-            .flatten();
+        self.user_defined_cell_idx = self.user_defined_depth.map(|v| {
+            let target = Pt3D::new(v, self.size.y(), self.size.z());
+            self.compute_interpolation_weights(&target)
+        });
     }
 }

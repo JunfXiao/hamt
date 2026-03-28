@@ -9,7 +9,7 @@ use hamt_core::hamt_manager::{HamtManager, HamtSettings};
 use hamt_core::io::load_hamt_by_path;
 use hamt_core::uom::Quantity;
 use hamt_core::uom::units::{
-    dimensionless, hours, kg_per_hr, kg_per_m2_s, kg_per_m3, kg_per_s, kj_per_hr, kj_per_hr_m2_k, m_per_s, meter, square_meter, w_per_m2
+    dimensionless, hours, kg_per_hr, kg_per_m3, kj_per_hr, kj_per_hr_m2_k, m_per_s, meter, square_meter
 };
 use std::iter;
 use std::path::Path;

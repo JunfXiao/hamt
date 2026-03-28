@@ -216,15 +216,18 @@ impl Surface {
                         }
                     }
 
-                    let q_adds = if surface_curr
+                    let q_weight = surface_curr
                         .user_defined_cell_idx
-                        .map(|idx| idx[0] == i)
-                        .unwrap_or(false)
-                    {
-                        bc.q_addition_userdef
-                    } else {
-                        0.0 * watts
-                    };
+                        .as_ref()
+                        .map(|weights| {
+                            weights
+                                .iter()
+                                .filter(|(idx, _)| idx[0] == i)
+                                .map(|(_, w)| w)
+                                .sum::<f64>()
+                        })
+                        .unwrap_or(0.0);
+                    let q_adds = bc.q_addition_userdef * q_weight;
 
                     let denom_t = oorsum + (tcap_j_per_k / dt_s);
 

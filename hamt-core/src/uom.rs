@@ -205,7 +205,6 @@ pub const DIM_VAPOR_TRANSPORT_COEFF: Dimension = Dimension {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::uom::dimensions::{HeatTransferCoeff, Power, VaporTransportCoeff};
     use crate::uom::units::{
         dimensionless, kg_per_m2_s_pa, kg_per_m3, kj_per_hr, kj_per_hr_m2_k, m_per_s, pascals,

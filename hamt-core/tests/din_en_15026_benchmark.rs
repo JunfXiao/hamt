@@ -31,9 +31,8 @@ use hamt_core::{
     hamt_manager::{AdaptiveState, HamtManager, HamtSettings},
 };
 use hamt_core::{
-    physics::ATMOSPHERE_PRESSURE,
     surface::Surface,
-    uom::{constants::VAPOR_GAS_CONSTANT, units::pascals},
+    uom::units::pascals,
 };
 use std::time::{Duration, Instant};
 use std::{
@@ -219,16 +218,11 @@ fn get_vapor_diffusion_curve() -> Curve<DIM_DIMENSIONLESS, DIM_DIMENSIONLESS> {
             let x = x.value().clamp(0.0, 1.0) * dimensionless;
             let water_content_ratio = sorption_isotherm(x) / water_sat();
             let rest_water_ratio = 1.0 - water_content_ratio.value();
-            // 200.0 * (0.503 * rest_water_ratio.powf(2.0) + 0.497) / rest_water_ratio * dimensionless
-            // According to https://wufi.de/en/wp-content/uploads/sites/11/2015/04/WUFI-Pro-Benchmarktest-EN15026_en.pdf
-            let delta_p: Quantity<f64, _> =
-                1.0 / (VAPOR_GAS_CONSTANT * t_ref().value_in(kelvin)) * 26.1e-6 / 200.0
-                    * rest_water_ratio
-                    / (0.503 * rest_water_ratio.powf(2.0) + 0.497);
-
-            1.968e-7 * t_ref().value_in(kelvin).powf(0.81)
-                / ATMOSPHERE_PRESSURE.value_in(pascals)
-                / delta_p.value_in(kg_per_m2_s_pa)
+            // μ = μ_dry / f(w), where f(w) = (1-w/w_f) / (0.503*(1-w/w_f)² + 0.497)
+            // This is the direct form that avoids any δ₀ temperature conversion.
+            // It is consistent with vapor_diffusivity_model = Linear { coeff: 26.1e-6 },
+            // which uses δ_a = 26.1e-6 / (R_v × T) — the temperature factors cancel in μ.
+            200.0 * (0.503 * rest_water_ratio.powf(2.0) + 0.497) / rest_water_ratio
                 * dimensionless
         },
         x_values,
@@ -362,7 +356,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
             20.0,
             0.5,
             vec![0.1, 0.9, 4.0, 10.0, 20.0],
-            vec![Some(40), Some(60), Some(60), Some(60), Some(60)],
+            vec![Some(80), Some(60), Some(60), Some(60), Some(60)],
         );
         let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
 
@@ -732,14 +726,9 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
     let mut fail_count = 0u32;
     let mut t_passed = true;
     for (depth, ref_t) in temp_ref {
-        let cell_idx = surface
-            .find_cell_idx_at_depth(*depth * meter)
-            .expect(&format!("Searching cell at depth {}", *depth));
-        let cell = surface.cells.get(cell_idx).expect("Cannot find the cell");
-
-        // println!("Cell at {:.2} m: {}", depth, cell.cell_type);
-
-        let cell_t = kelvin_to_celsius(cell.cell_temp);
+        let target = *depth * meter;
+        let cell_t = kelvin_to_celsius(surface.interpolate_at_depth(target, |c| c.cell_temp));
+        let cell_idx = surface.find_cell_idx_at_depth(target).unwrap_or([0, 0, 0]);
         let diviation = (cell_t - ref_t).abs() / ref_t;
 
         let turn_passed = diviation <= PERCENTAGE_RANGE_T;
@@ -785,12 +774,9 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
 
     let mut rh_passed = true;
     for (depth, ref_wc) in wc_ref {
-        let cell_idx = surface
-            .find_cell_idx_at_depth(*depth * meter)
-            .expect(&format!("Searching cell at depth {}", *depth));
-        let cell = surface.cells.get(cell_idx).expect("Cannot find the cell");
-
-        let cell_wc = cell.volumetric_water.value_in(kg_per_m3);
+        let target = *depth * meter;
+        let cell_wc = surface.interpolate_at_depth(target, |c| c.volumetric_water).value_in(kg_per_m3);
+        let cell_idx = surface.find_cell_idx_at_depth(target).unwrap_or([0, 0, 0]);
         let diviation = (cell_wc - ref_wc).abs() / ref_wc;
 
         let turn_passed = diviation <= PERCENTAGE_RANGE_RH;
