@@ -147,6 +147,16 @@ where
             return (y_data[0], zero_grad);
         }
 
+        // Guard against non-finite inputs (e.g. NaN from unstable upstream state)
+        // to avoid invalid comparisons inside the interval search.
+        if !target_x.0.is_finite() {
+            if target_x.0 > 0.0 {
+                return (y_data[y_data.len() - 1], zero_grad);
+            } else {
+                return (y_data[0], zero_grad);
+            }
+        }
+
         let n = x_data.len();
 
         // Fix: Use strictly less/greater comparisons for constant extrapolation.
@@ -164,23 +174,19 @@ where
         // uses the PCHIP formula to return the boundary value and the boundary tangent.
 
         // Find index i such that x[i] <= target_x < x[i+1]
-        let mut i = 0;
-        let mut low = 0;
-        let mut high = n - 1;
-
-        while low <= high {
-            let mid = (low + high) / 2;
+        // Use an upper-bound binary search with [low, high) bounds, which avoids
+        // usize underflow on the "high = mid - 1" path.
+        let mut low = 0usize;
+        let mut high = n;
+        while low < high {
+            let mid = low + (high - low) / 2;
             if x_data[mid] <= target_x {
-                i = mid;
                 low = mid + 1;
             } else {
-                high = mid - 1;
+                high = mid;
             }
         }
-        // Ensure i is not the last element (if target_x is exactly x_data[n-1])
-        if i >= n - 1 {
-            i = n - 2;
-        }
+        let i = low.saturating_sub(1).min(n - 2);
 
         // Hermite Basis Functions
         let h = x_data[i + 1].0 - x_data[i].0;
@@ -241,6 +247,10 @@ where
 
         if self.y.is_empty() {
             return (zero_x, zero_grad);
+        }
+
+        if !in_y.0.is_finite() {
+            return (self.x[0], zero_grad);
         }
 
         let mut upper_index: Option<usize> = None;
@@ -368,6 +378,28 @@ mod tests {
         );
         let (x, grad) = curve.reverse_interpolate(10.0 * kg_per_m3);
         assert!((x.value() - 1.0).abs() < 1e-12);
+        assert!(grad.value_in(kg_per_m3).abs() < 1e-12);
+    }
+
+    #[test]
+    fn interpolate_nan_input_returns_first_point_without_panic() {
+        let curve = Curve::new(
+            vec![0.0 * dimensionless, 0.8 * dimensionless],
+            vec![1.0 * kg_per_m3, 5.0 * kg_per_m3],
+        );
+        let (y, grad) = curve.interpolate(f64::NAN * dimensionless);
+        assert!((y.value_in(kg_per_m3) - 1.0).abs() < 1e-12);
+        assert!(grad.value_in(kg_per_m3).abs() < 1e-12);
+    }
+
+    #[test]
+    fn reverse_interpolate_nan_input_returns_first_point_without_panic() {
+        let curve = Curve::new(
+            vec![0.0 * dimensionless, 1.0 * dimensionless],
+            vec![2.0 * kg_per_m3, 6.0 * kg_per_m3],
+        );
+        let (x, grad) = curve.reverse_interpolate(f64::NAN * kg_per_m3);
+        assert!((x.value() - 0.0).abs() < 1e-12);
         assert!(grad.value_in(kg_per_m3).abs() < 1e-12);
     }
 }

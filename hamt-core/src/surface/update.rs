@@ -216,15 +216,18 @@ impl Surface {
                         }
                     }
 
-                    let q_adds = if surface_curr
+                    let q_weight = surface_curr
                         .user_defined_cell_idx
-                        .map(|idx| idx[0] == i)
-                        .unwrap_or(false)
-                    {
-                        bc.q_addition_userdef
-                    } else {
-                        0.0 * watts
-                    };
+                        .as_ref()
+                        .map(|weights| {
+                            weights
+                                .iter()
+                                .filter(|(idx, _)| idx[0] == i)
+                                .map(|(_, w)| w)
+                                .sum::<f64>()
+                        })
+                        .unwrap_or(0.0);
+                    let q_adds = bc.q_addition_userdef * q_weight;
 
                     let denom_t = oorsum + (tcap_j_per_k / dt_s);
 
@@ -233,6 +236,11 @@ impl Surface {
                         let inertial_term: Power<f64> = tcap_j_per_k * prev_temp_k / dt_s;
                         let numer = torsum + q_vapor + q_adds + inertial_term;
                         numer / denom_t
+                    } else {
+                        cell_curr.cell_temp
+                    };
+                    let t_next = if t_next.value_in(kelvin).is_finite() {
+                        t_next
                     } else {
                         cell_curr.cell_temp
                     };
@@ -338,6 +346,11 @@ impl Surface {
                     } else {
                         cell_curr.cell_rh
                     };
+                    let rh_next = if rh_next.value().is_finite() {
+                        rh_next
+                    } else {
+                        cell_curr.cell_rh
+                    };
 
                     (t_next, rh_next)
                 } else {
@@ -354,14 +367,42 @@ impl Surface {
 
         if let Some(cells) = self.cells.as_slice_mut() {
             par_or_seq_mut(cells).enumerate().for_each(|(i, cell)| {
-                cell.cell_temp = results[i].0;
-                cell.cell_rh = results[i].1.clamp(Quantity(0.0), Quantity(1.01));
+                let next_temp = results[i].0;
+                let next_rh = results[i].1;
+
+                cell.cell_temp = if next_temp.value_in(kelvin).is_finite() {
+                    next_temp
+                } else {
+                    surface_curr.cells[[i, 0, 0]].cell_temp
+                };
+
+                let rh_safe = if next_rh.value().is_finite() {
+                    next_rh
+                } else {
+                    surface_curr.cells[[i, 0, 0]].cell_rh
+                };
+
+                cell.cell_rh = rh_safe.clamp(Quantity(0.0), Quantity(1.01));
                 cell.calc_dependent_state(bc, settings);
             });
         } else {
             for i in 0..nx {
-                self.cells[[i, 0, 0]].cell_temp = results[i].0;
-                self.cells[[i, 0, 0]].cell_rh = results[i].1.clamp(Quantity(0.0), Quantity(1.01));
+                let next_temp = results[i].0;
+                let next_rh = results[i].1;
+
+                self.cells[[i, 0, 0]].cell_temp = if next_temp.value_in(kelvin).is_finite() {
+                    next_temp
+                } else {
+                    surface_curr.cells[[i, 0, 0]].cell_temp
+                };
+
+                let rh_safe = if next_rh.value().is_finite() {
+                    next_rh
+                } else {
+                    surface_curr.cells[[i, 0, 0]].cell_rh
+                };
+
+                self.cells[[i, 0, 0]].cell_rh = rh_safe.clamp(Quantity(0.0), Quantity(1.01));
                 self.cells[[i, 0, 0]].calc_dependent_state(bc, settings);
             }
         }
