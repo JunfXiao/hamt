@@ -183,7 +183,7 @@ impl HamtManager {
             }
         }
 
-        warn!(
+        debug!(
             max_iter = self.settings.max_iterations,
             max_delta_t_k = stats.max_delta_t_k,
             max_delta_rh = stats.max_delta_rh,
