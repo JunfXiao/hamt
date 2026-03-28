@@ -369,40 +369,48 @@ impl Surface {
             par_or_seq_mut(cells).enumerate().for_each(|(i, cell)| {
                 let next_temp = results[i].0;
                 let next_rh = results[i].1;
+                let curr_temp = surface_curr.cells[[i, 0, 0]].cell_temp;
+                let curr_rh = surface_curr.cells[[i, 0, 0]].cell_rh;
+                let alpha = cell.relaxation_factor;
 
-                cell.cell_temp = if next_temp.value_in(kelvin).is_finite() {
-                    next_temp
+                let relaxed_temp = if next_temp.value_in(kelvin).is_finite() {
+                    next_temp * alpha + curr_temp * (1.0 - alpha)
                 } else {
-                    surface_curr.cells[[i, 0, 0]].cell_temp
+                    curr_temp
                 };
 
-                let rh_safe = if next_rh.value().is_finite() {
-                    next_rh
+                let relaxed_rh = if next_rh.value().is_finite() {
+                    next_rh * alpha + curr_rh * (1.0 - alpha)
                 } else {
-                    surface_curr.cells[[i, 0, 0]].cell_rh
+                    curr_rh
                 };
 
-                cell.cell_rh = rh_safe.clamp(Quantity(0.0), Quantity(1.01));
+                cell.cell_temp = relaxed_temp;
+                cell.cell_rh = relaxed_rh.clamp(Quantity(0.0), Quantity(1.01));
                 cell.calc_dependent_state(bc, settings);
             });
         } else {
             for i in 0..nx {
                 let next_temp = results[i].0;
                 let next_rh = results[i].1;
+                let curr_temp = surface_curr.cells[[i, 0, 0]].cell_temp;
+                let curr_rh = surface_curr.cells[[i, 0, 0]].cell_rh;
+                let alpha = self.cells[[i, 0, 0]].relaxation_factor;
 
-                self.cells[[i, 0, 0]].cell_temp = if next_temp.value_in(kelvin).is_finite() {
-                    next_temp
+                let relaxed_temp = if next_temp.value_in(kelvin).is_finite() {
+                    next_temp * alpha + curr_temp * (1.0 - alpha)
                 } else {
-                    surface_curr.cells[[i, 0, 0]].cell_temp
+                    curr_temp
                 };
 
-                let rh_safe = if next_rh.value().is_finite() {
-                    next_rh
+                let relaxed_rh = if next_rh.value().is_finite() {
+                    next_rh * alpha + curr_rh * (1.0 - alpha)
                 } else {
-                    surface_curr.cells[[i, 0, 0]].cell_rh
+                    curr_rh
                 };
 
-                self.cells[[i, 0, 0]].cell_rh = rh_safe.clamp(Quantity(0.0), Quantity(1.01));
+                self.cells[[i, 0, 0]].cell_temp = relaxed_temp;
+                self.cells[[i, 0, 0]].cell_rh = relaxed_rh.clamp(Quantity(0.0), Quantity(1.01));
                 self.cells[[i, 0, 0]].calc_dependent_state(bc, settings);
             }
         }

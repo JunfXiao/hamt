@@ -66,7 +66,7 @@ pub enum BoundaryLocation {
 /// This struct holds all the geometric, material, and state information for a
 /// single finite difference node. The names are kept consistent with the legacy
 /// Fortran and EnergyPlus implementations for easier comparison.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Cell {
     //
     // ========== Constant Properties (set at initialization) ==========
@@ -157,6 +157,37 @@ pub struct Cell {
     ///
     /// Updated by [Cell::calc_dependent_state]
     pub volumetric_water: Density<f64>,
+
+    /// Per-cell under-relaxation factor for nonlinear iteration (0 < α ≤ 1).
+    /// Starts at 1.0 (no relaxation). Reduced adaptively toward the global
+    /// minimum when the cell's iteration residuals indicate divergence.
+    pub relaxation_factor: f64,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Self {
+            cell_type: CellType::default(),
+            volume: Default::default(),
+            origin: Default::default(),
+            size: Default::default(),
+            density: Default::default(),
+            spech: Default::default(),
+            mu: Default::default(),
+            htc: Default::default(),
+            additional_power: Default::default(),
+            vtc: Default::default(),
+            w_thermal_c: Default::default(),
+            dwd_phi: Default::default(),
+            dw: Default::default(),
+            cell_temp: Default::default(),
+            cell_rh: Default::default(),
+            cell_vp: Default::default(),
+            vp_sat: Default::default(),
+            volumetric_water: Default::default(),
+            relaxation_factor: 1.0,
+        }
+    }
 }
 
 impl Cell {
@@ -258,5 +289,6 @@ impl Cell {
         self.cell_vp = ref_cell.cell_vp;
         self.vp_sat = ref_cell.vp_sat;
         self.volumetric_water = ref_cell.volumetric_water;
+        self.relaxation_factor = ref_cell.relaxation_factor;
     }
 }

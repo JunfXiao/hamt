@@ -398,6 +398,14 @@ impl TrnSysType {
 
     /// Called at each TRNSYS call within a timestep.
     pub fn iterate(&self, state: &mut TrnSysState) -> Result<()> {
+        let trnsys_iter = get_timestep_iteration();
+        let trnsys_time = get_simulation_time();
+        debug!(
+            time = trnsys_time,
+            trnsys_iter,
+            "iterate: TRNSYS calling Type395"
+        );
+
         // Read Input
         let t_int = state.inputs[0].value;
         let t_out = state.inputs[1].value;
@@ -430,15 +438,26 @@ impl TrnSysType {
                 manager.boundary_condition
             );
 
-            manager
+            let solve_start = std::time::Instant::now();
+            let result = manager
                 .solve_timestep_adaptive(&mut state.adaptive_state, None)
                 .with_context(|| {
                     format!(
                         "Solving time step {}, iteration {}",
-                        get_simulation_time(),
-                        get_timestep_iteration()
+                        trnsys_time,
+                        trnsys_iter
                     )
-                })?;
+                });
+            let elapsed = solve_start.elapsed();
+            if elapsed.as_millis() > 500 {
+                warn!(
+                    time = trnsys_time,
+                    trnsys_iter,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "iterate: solve took >500ms"
+                );
+            }
+            result?;
 
             // Map outputs
             return self.update_output(state, false);

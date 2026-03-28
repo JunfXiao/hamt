@@ -12,7 +12,7 @@ use crate::{error, uom};
 use anyhow::{Context, Ok, Result};
 use std::mem;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, warn};
 use uom::dimensions::Area;
 use uom::dimensions::Length;
 use uom::units;
@@ -101,11 +101,22 @@ impl HamtManager {
                 self.boundary_condition.mass_convection_coeff_int
                     / (R_V * self.boundary_condition.temp_inside_air);
         }
-        // Previous stats for adaptive time stepping
 
-        let mut stats: ConvergenceStats;
+        let mut stats: ConvergenceStats = ConvergenceStats::default();
 
-        for _ in 0..self.settings.max_iterations {
+        // Reset per-cell relaxation factors to 1.0 at the start of each timestep solve
+        for cell in self.surface_curr.cells.iter_mut() {
+            cell.relaxation_factor = 1.0;
+        }
+        for cell in self.surface_next.cells.iter_mut() {
+            cell.relaxation_factor = 1.0;
+        }
+
+        let temp_tol = self.settings.temp_convergence_tolerance.value_in(kelvin);
+        let rh_tol = self.settings.rh_convergence_tolerance;
+        let min_alpha = self.settings.min_relaxation_factor;
+
+        for iter in 0..self.settings.max_iterations {
             self.surface_next.calculate_iteration(
                 &self.settings,
                 &self.boundary_condition,
@@ -115,22 +126,56 @@ impl HamtManager {
 
             stats = convergence_stats(&self.surface_next, &self.surface_curr, &self.settings);
 
+            // Adaptive per-cell relaxation: reduce α for cells with large residuals
+            for (cell_next, cell_curr) in self
+                .surface_next
+                .cells
+                .iter_mut()
+                .zip(self.surface_curr.cells.iter())
+            {
+                if !matches!(cell_next.cell_type, CellType::Material(_)) {
+                    continue;
+                }
+                let delta_t = (cell_next.cell_temp - cell_curr.cell_temp)
+                    .value_in(kelvin)
+                    .abs();
+                let delta_rh = (cell_next.cell_rh - cell_curr.cell_rh).value().abs();
+
+                // If residual is large (>10× tolerance), tighten relaxation
+                if delta_t > temp_tol * 10.0 || delta_rh > rh_tol * 10.0 {
+                    cell_next.relaxation_factor =
+                        (cell_next.relaxation_factor * 0.9).max(min_alpha);
+                } else if delta_t < temp_tol && delta_rh < rh_tol {
+                    // Cell is converged — slowly recover toward 1.0
+                    cell_next.relaxation_factor =
+                        (cell_next.relaxation_factor * 1.02).min(1.0);
+                }
+            }
+
             mem::swap(&mut self.surface_curr, &mut self.surface_next);
 
-            if stats.converged {
-                if stats.rh_converged {
-                    return Ok(true); // Converged
+            if stats.converged && stats.rh_converged {
+                if iter > 100 {
+                    debug!(
+                        iter,
+                        max_delta_t_k = stats.max_delta_t_k,
+                        max_delta_rh = stats.max_delta_rh,
+                        "solve_timestep converged (slow)"
+                    );
                 }
+                return Ok(true);
             }
         }
 
-        // warn!(
-        //     max_delta_t_k = stats.max_delta_t_k,
-        //     max_delta_rh = stats.max_delta_rh,
-        //     max_temp_cell = ?stats.max_temp_cell,
-        //     max_rh_cell = ?stats.max_rh_cell,
-        //     "HAMT timestep did not converge within max iterations"
-        // );
+        warn!(
+            max_iter = self.settings.max_iterations,
+            max_delta_t_k = stats.max_delta_t_k,
+            max_delta_rh = stats.max_delta_rh,
+            max_temp_cell = ?stats.max_temp_cell,
+            max_rh_cell = ?stats.max_rh_cell,
+            dt_hours = self.settings.timestep.value_in(hours),
+            "solve_timestep did NOT converge"
+        );
         Ok(false) // Not converged
     }
 
@@ -158,12 +203,22 @@ impl HamtManager {
         // Track remaining substeps as integer rounds so the sum lands exactly on orig_timestep.
         let mut rounds_remaining = 1_i32 << (adaptive_state.split_factor - 1);
         self.settings.timestep = timestep_for_split(adaptive_state.split_factor);
-        
+
+        debug!(
+            orig_dt_hours = orig_timestep.value_in(hours),
+            split_factor = adaptive_state.split_factor,
+            rounds_remaining,
+            sub_dt_hours = self.settings.timestep.value_in(hours),
+            "solve_timestep_adaptive: BEGIN"
+        );
+
         if let Some(ref mut prev_surface_state) = adaptive_state.prev_surface_state {
             prev_surface_state.sync_state_from(&self.surface_prev)?;
         } else {
             adaptive_state.prev_surface_state = Some(self.surface_prev.clone());
         }
+
+        let mut total_substeps = 0_u32;
 
         while rounds_remaining > 0 {
             if adaptive_state.retry_wait_time > 0 {
@@ -182,6 +237,13 @@ impl HamtManager {
                 adaptive_state.reset_time_in_contineous = false;
                 adaptive_state.split_factor += 1;
                 if adaptive_state.split_factor > adaptive_state.max_split_factor as i32 {
+                    warn!(
+                        split_factor = adaptive_state.split_factor,
+                        max_split = adaptive_state.max_split_factor,
+                        rounds_remaining,
+                        total_substeps,
+                        "solve_timestep_adaptive: CONVERGENCE FAILED — max split exceeded"
+                    );
                     self.settings.timestep = orig_timestep;
                     return Err(error::Error::Other(format!(
                         "Convergence failed with splitting factor {} at {:.2} hours",
@@ -190,6 +252,12 @@ impl HamtManager {
                     ))
                     .into());
                 }
+                warn!(
+                    split_factor = adaptive_state.split_factor,
+                    rounds_remaining = rounds_remaining * 2,
+                    sub_dt_hours = timestep_for_split(adaptive_state.split_factor).value_in(hours),
+                    "solve_timestep_adaptive: splitting further"
+                );
 
                 adaptive_state.time_in_contineous_split += 1;
                 adaptive_state.retry_wait_time +=
@@ -212,6 +280,7 @@ impl HamtManager {
             adaptive_state.substep_time += actual_step;
             adaptive_state.current_time += actual_step;
             rounds_remaining -= 1;
+            total_substeps += 1;
             self.tick_timestep()?;
             
 
@@ -235,6 +304,12 @@ impl HamtManager {
                 self.settings.timestep = timestep_for_split(adaptive_state.split_factor);
             }
         }
+
+        debug!(
+            total_substeps,
+            final_split_factor = adaptive_state.split_factor,
+            "solve_timestep_adaptive: DONE"
+        );
 
         // Pretend we never substepped by "rewinding" the ticking and substepping.
         // First, swap back the surface_curr and surface_prev
@@ -371,6 +446,13 @@ pub struct HamtSettings {
     pub div_distribution_factor: f64,
     /// user defined depth [m]
     pub user_defined_depth: Option<Length<f64>>,
+    /// Minimum per-cell under-relaxation factor (floor) for nonlinear iteration.
+    ///
+    /// Each cell starts with α=1.0 (no relaxation). When a cell's iteration
+    /// residuals indicate divergence, α is reduced adaptively but never below
+    /// this floor. Lower values allow more aggressive damping at the cost of
+    /// slower convergence.
+    pub min_relaxation_factor: f64,
 }
 
 impl Default for HamtSettings {
@@ -390,6 +472,7 @@ impl Default for HamtSettings {
             adj_length: 0.00005 * units::meter,
             div_distribution_factor: 0.5,
             user_defined_depth: None,
+            min_relaxation_factor: 0.5,
         }
     }
 }
