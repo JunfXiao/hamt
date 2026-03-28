@@ -356,7 +356,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
             20.0,
             0.5,
             vec![0.1, 0.9, 4.0, 10.0, 20.0],
-            vec![Some(80), Some(60), Some(60), Some(60), Some(60)],
+            vec![Some(60), Some(60), Some(60), Some(60), Some(60)],
         );
         let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
 
@@ -369,6 +369,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         settings.min_div = 20;
         settings.div_length = 1e-5 * meter;
         settings.adj_length = 1e-4 * meter;
+        settings.min_relaxation_factor = 1.0;
 
         let boundary_coeff = BoundaryCondition {
             heat_transfer_coeff_ext: 9e9 * w_per_m2_k,
@@ -433,14 +434,19 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
             let allowed_err: Dimensionless<f64> = 1e-4 * dimensionless;
             let mut adap_state = AdaptiveState::default();
 
+            let preheat_speed_tracker = Rc::new(RefCell::new(SpeedTracker::new(10)));
+            let preheat_end_hours: f64 = (7.0_f64 * days).value_in(hours);
+
             let make_progress_bar_preheat = {
                 let ui_clone = ui.clone();
                 let start_time_for_ui = Rc::new(start_time);
                 let orig_timestep_for_ui = Rc::new(mgr.settings.timestep.clone());
+                let tracker = preheat_speed_tracker.clone();
                 move || {
                     let ui_clone = ui_clone.clone();
                     let start_time_for_ui = start_time_for_ui.clone();
                     let orig_timestep_for_ui = orig_timestep_for_ui.clone();
+                    let tracker = tracker.clone();
                     move |state: &AdaptiveState<Vec<(Time<f64>, u32)>>| -> Result<()> {
                         let orig_timestep = (*orig_timestep_for_ui).clone();
                         let current_step = if state.split_factor > 0 {
@@ -448,13 +454,19 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                         } else {
                             orig_timestep.clone()
                         };
+                        let sim_hours = state.current_time.value_in(hours);
+                        let remaining_hours = preheat_end_hours - sim_hours;
+                        tracker.borrow_mut().record(sim_hours);
+                        let (speed, eta) = tracker.borrow().speed_and_eta(remaining_hours);
                         ui_clone.borrow_mut().set_status(
                             format!(
-                                "Preheat ΔT={:.2e} K, Δrh={:.2}% | Time={:.2} hours | Run time: {} seconds | () | timestep: {:?} (orig: {:?})",
+                                "Preheat ΔT={:.2e} K, Δrh={:.2}% | Time={:.2} hours | Run time: {} seconds | {:.2} hr/s, ETA: {:.1} s | timestep: {:?} (orig: {:?})",
                                 prev_delta_t.value_in(kelvin),
                                 prev_delta_rh.value()*100.0,
-                                (state.current_time / hours).value(),
+                                sim_hours,
                                 start_time_for_ui.elapsed().as_secs(),
+                                speed,
+                                eta,
                                 current_step,
                                 orig_timestep
                             ),
@@ -547,16 +559,20 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
             let mut current_time: Time<f64> = 0.0 * hours;
             let orig_timestep = mgr.settings.timestep;
 
+            let speed_tracker = Rc::new(RefCell::new(SpeedTracker::new(10)));
+
             let make_progress_bar = {
                 let ui_clone = ui.clone();
                 let start_time_for_ui = Rc::new(start_time);
                 let simulation_durations_for_ui = simulation_durations_days.clone();
                 let orig_timestep_for_ui = Rc::new(orig_timestep);
+                let tracker = speed_tracker.clone();
                 move || {
                     let ui_clone = ui_clone.clone();
                     let start_time_for_ui = start_time_for_ui.clone();
                     let simulation_durations_for_ui = simulation_durations_for_ui.clone();
                     let orig_timestep_for_ui = orig_timestep_for_ui.clone();
+                    let tracker = tracker.clone();
                     move |state: &AdaptiveState<Vec<(Time<f64>, u32)>>| -> Result<()> {
                         let orig_timestep = (*orig_timestep_for_ui).clone();
                         let current_step = if state.split_factor > 0 {
@@ -569,25 +585,19 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
                             simulation_durations_for_ui.as_ref(),
                             24,
                         );
+                        let sim_hours = state.current_time.value_in(hours);
+                        let remaining_hours = (end_time - state.current_time).value_in(hours);
+                        tracker.borrow_mut().record(sim_hours);
+                        let (speed, eta) = tracker.borrow().speed_and_eta(remaining_hours);
                         let realworld_elapsed = start_time_for_ui.elapsed().as_secs();
-                        let speed: f64 = if realworld_elapsed > 0 {
-                            (state.current_time).value_in(hours) / realworld_elapsed as f64
-                        } else {
-                            0.0
-                        };
-                        let estimated_time = if speed > 0.0 {
-                            (end_time - state.current_time).value_in(hours) as f64 / speed
-                        } else {
-                            0.0
-                        };
                         ui_clone.borrow_mut().set_status(
                             format!(
                                 "{} Time={:.2} hours | Run time: {} seconds | {:.2} hr/s, ETA: {:.1} s | timestep: {:?} (orig: {:?})",
                                 progress,
-                                (state.current_time / hours).value(),
-                                start_time_for_ui.elapsed().as_secs(),
+                                sim_hours,
+                                realworld_elapsed,
                                 speed,
-                                estimated_time,
+                                eta,
                                 current_step,
                                 orig_timestep
                             ),
@@ -1038,7 +1048,7 @@ impl Ui {
             self.stdout.queue(Print("\n"))?;
         }
 
-        // 3. 如果当前内容的行数比上次少，清除下方残留的行
+
         let current_height = lines.len();
         if current_height < self.last_render_height {
             for y in current_height..self.last_render_height.min(max_content_lines) {
@@ -1048,7 +1058,7 @@ impl Ui {
         }
         self.last_render_height = current_height;
 
-        // 4. 渲染状态栏（固定在底部）
+
         let status = truncate_line(&self.status_line, cols);
         self.stdout
             .queue(cursor::MoveTo(0, rows.saturating_sub(1) as u16))?
@@ -1076,14 +1086,12 @@ impl Ui {
     }
 }
 
-// Drop 实现保持不变，用于正常的 Scope 退出清理
+
 impl Drop for Ui {
     fn drop(&mut self) {
         if !self.enabled {
             return;
         }
-        // 使用 queue 可能会在 panic 时无法刷新，这里改用 execute 确保立即执行
-        // 或者保留原有逻辑，只要 Ctrl+C handler 工作正常即可
         let _ = self.stdout.execute(style::SetAttribute(Attribute::Reset));
         let _ = self.stdout.execute(cursor::Show);
         let _ = self.stdout.execute(terminal::LeaveAlternateScreen);
@@ -1129,6 +1137,55 @@ impl StatusStyle {
         } else {
             StatusStyle::Normal
         }
+    }
+}
+
+/// Tracks recent simulation speed using a sliding window over real time.
+/// Only considers samples from the last `window` seconds for speed/ETA calculations.
+struct SpeedTracker {
+    samples: Vec<(Instant, f64)>, // (real_time, sim_hours)
+    window: Duration,
+}
+
+impl SpeedTracker {
+    fn new(window_secs: u64) -> Self {
+        Self {
+            samples: Vec::new(),
+            window: Duration::from_secs(window_secs),
+        }
+    }
+
+    fn record(&mut self, sim_hours: f64) {
+        let now = Instant::now();
+        self.samples.push((now, sim_hours));
+        // Evict samples older than the window
+        let cutoff = now.checked_sub(self.window).unwrap_or(now);
+        // Keep at least 1 sample (the earliest in window) for delta computation
+        let first_in_window = self.samples.partition_point(|(t, _)| *t < cutoff);
+        if first_in_window > 1 {
+            self.samples.drain(..first_in_window - 1);
+        }
+    }
+
+    /// Returns (speed_hr_per_s, eta_seconds). Speed is based on the sliding window.
+    fn speed_and_eta(&self, remaining_sim_hours: f64) -> (f64, f64) {
+        if self.samples.len() < 2 {
+            return (0.0, 0.0);
+        }
+        let first = &self.samples[0];
+        let last = &self.samples[self.samples.len() - 1];
+        let dt_real = last.0.duration_since(first.0).as_secs_f64();
+        let dt_sim = last.1 - first.1;
+        if dt_real < 0.01 {
+            return (0.0, 0.0);
+        }
+        let speed = dt_sim / dt_real;
+        let eta = if speed > 0.0 {
+            remaining_sim_hours / speed
+        } else {
+            0.0
+        };
+        (speed, eta)
     }
 }
 
