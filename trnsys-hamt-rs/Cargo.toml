@@ -3,6 +3,7 @@
 name = "trnsys_hamt_rs"
 version = "0.2.0"
 edition = "2024"
+authors = ["Junfeng Xiao"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [package.metadata.trnsys]
@@ -36,3 +37,4 @@ winapi-util = "0.1.11"
 
 [build-dependencies]
 toml = "0.8"
+winres = "0.1"
