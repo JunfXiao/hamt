@@ -104,17 +104,14 @@ impl HamtManager {
 
         let mut stats: ConvergenceStats = ConvergenceStats::default();
 
-        // Reset per-cell relaxation factors to 1.0 at the start of each timestep solve
-        for cell in self.surface_curr.cells.iter_mut() {
-            cell.relaxation_factor = 1.0;
-        }
-        for cell in self.surface_next.cells.iter_mut() {
-            cell.relaxation_factor = 1.0;
-        }
-
         let temp_tol = self.settings.temp_convergence_tolerance.value_in(kelvin);
         let rh_tol = self.settings.rh_convergence_tolerance;
         let min_alpha = self.settings.min_relaxation_factor;
+
+        // For early termination: track best residual to detect stalls/oscillation
+        let mut best_max_delta = f64::MAX;
+        let mut stall_count = 0_i32;
+        const STALL_PATIENCE: i32 = 50; // bail out if no improvement for this many iterations
 
         for iter in 0..self.settings.max_iterations {
             self.surface_next.calculate_iteration(
@@ -165,6 +162,25 @@ impl HamtManager {
                 }
                 return Ok(true);
             }
+
+            // Early termination: detect stall/oscillation
+            let current_max = stats.max_delta_t_k.max(stats.max_delta_rh * 1000.0);
+            if current_max < best_max_delta * 0.99 {
+                // Meaningful improvement (>1%) — reset stall counter
+                best_max_delta = current_max;
+                stall_count = 0;
+            } else {
+                stall_count += 1;
+                if stall_count >= STALL_PATIENCE {
+                    debug!(
+                        iter,
+                        max_delta_t_k = stats.max_delta_t_k,
+                        max_delta_rh = stats.max_delta_rh,
+                        "solve_timestep: early termination — residual stalled"
+                    );
+                    break;
+                }
+            }
         }
 
         warn!(
@@ -179,6 +195,19 @@ impl HamtManager {
         Ok(false) // Not converged
     }
 
+    /// Resets all per-cell relaxation factors to 1.0.
+    pub fn reset_relaxation_factors(&mut self) {
+        for cell in self.surface_curr.cells.iter_mut() {
+            cell.relaxation_factor = 1.0;
+        }
+        for cell in self.surface_next.cells.iter_mut() {
+            cell.relaxation_factor = 1.0;
+        }
+        for cell in self.surface_prev.cells.iter_mut() {
+            cell.relaxation_factor = 1.0;
+        }
+    }
+
 
     /// Solves for the current timestep using adaptive substepping.
     /// 
@@ -190,6 +219,9 @@ impl HamtManager {
     ) -> Result<()> {
         adaptive_state.substep_time = 0.0 * hours;
         let orig_timestep = self.settings.timestep;
+
+        // Reset relaxation factors once at the start of each macro-timestep
+        self.reset_relaxation_factors();
 
         if adaptive_state.split_factor < 1 {
             adaptive_state.split_factor = 1;
@@ -237,7 +269,7 @@ impl HamtManager {
                 adaptive_state.reset_time_in_contineous = false;
                 adaptive_state.split_factor += 1;
                 if adaptive_state.split_factor > adaptive_state.max_split_factor as i32 {
-                    warn!(
+                    debug!(
                         split_factor = adaptive_state.split_factor,
                         max_split = adaptive_state.max_split_factor,
                         rounds_remaining,
@@ -252,7 +284,7 @@ impl HamtManager {
                     ))
                     .into());
                 }
-                warn!(
+                debug!(
                     split_factor = adaptive_state.split_factor,
                     rounds_remaining = rounds_remaining * 2,
                     sub_dt_hours = timestep_for_split(adaptive_state.split_factor).value_in(hours),
@@ -270,10 +302,26 @@ impl HamtManager {
                     callback(adaptive_state)?;
                 }
 
+                // Preserve learned relaxation factors across the state reset
+                let saved_alphas: Vec<f64> = self
+                    .surface_curr
+                    .cells
+                    .iter()
+                    .map(|c| c.relaxation_factor)
+                    .collect();
+
                 self.surface_curr
                     .sync_state_from(&self.surface_prev.clone())?;
                 self.surface_next
                     .sync_state_from(&self.surface_prev.clone())?;
+
+                // Restore learned relaxation factors
+                for (cell, &alpha) in self.surface_curr.cells.iter_mut().zip(saved_alphas.iter()) {
+                    cell.relaxation_factor = alpha;
+                }
+                for (cell, &alpha) in self.surface_next.cells.iter_mut().zip(saved_alphas.iter()) {
+                    cell.relaxation_factor = alpha;
+                }
             }
 
             let actual_step = self.settings.timestep;
