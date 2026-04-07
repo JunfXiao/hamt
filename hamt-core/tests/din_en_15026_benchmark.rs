@@ -221,7 +221,7 @@ fn get_vapor_diffusion_curve() -> Curve<DIM_DIMENSIONLESS, DIM_DIMENSIONLESS> {
             // μ = μ_dry / f(w), where f(w) = (1-w/w_f) / (0.503*(1-w/w_f)² + 0.497)
             // This is the direct form that avoids any δ₀ temperature conversion.
             // It is consistent with vapor_diffusivity_model = Linear { coeff: 26.1e-6 },
-            // which uses δ_a = 26.1e-6 / (R_v × T) — the temperature factors cancel in μ.
+            // which uses δ_a = 26.1e-6 / (VAPOR_GAS_CONSTANT × T) — the temperature factors cancel in μ.
             200.0 * (0.503 * rest_water_ratio.powf(2.0) + 0.497) / rest_water_ratio
                 * dimensionless
         },

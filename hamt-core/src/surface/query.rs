@@ -4,10 +4,9 @@ use crate::{
     uom::{
         Dimension, Quantity,
         dimensions::{
-            Density, HeatTransferCoeff, Pressure, ThermalConductivity, ThermalResistance,
-            VaporResistance,
+            Density, HeatTransferCoeff, MassFlux, Pressure, ThermalConductivity, ThermalResistance, VaporResistance
         },
-        units::{dimensionless, kg_per_m2_s_pa, meter, square_meter, w_per_m2_k},
+        units::{dimensionless, kg_per_m2_s_pa, meter, square_meter, w_per_m2_k, kg_per_hr, kg_per_s},
     },
 };
 
@@ -414,8 +413,8 @@ impl Surface {
         location: BoundaryLocation,
         bc: &BoundaryCondition,
     ) -> Result<MassFluxDensity<f64>> {
-        let mut accum_flux: MassFluxDensity<f64> = Quantity(0.0);
-        let mut total_area = 0.0;
+        let mut accum_flux: MassFlux<f64> = 0.0 * kg_per_hr;
+        let mut total_area = 0.0 * square_meter;
 
         let boundary_convection_idx =
             self.cells_idx_map
@@ -449,7 +448,7 @@ impl Surface {
                 .with_context(|| format!("Failed to get virtual cell {:?}", idx))?;
 
             let delta_vp: Pressure<f64> = boundary_cell.cell_vp - surf.cell_vp;
-            let cell_area: f64 = surf.size.area_along(0).value_in(square_meter);
+            let cell_area: Area<f64> = surf.size.area_along(0);
 
             if vtc > ECLIPSE * kg_per_m2_s_pa {
                 accum_flux += vtc * delta_vp * cell_area;
@@ -457,7 +456,7 @@ impl Surface {
             }
         }
 
-        Ok(if total_area > 0.0 {
+        Ok(if total_area > 0.0 * square_meter {
             accum_flux / total_area
         } else {
             warn!(

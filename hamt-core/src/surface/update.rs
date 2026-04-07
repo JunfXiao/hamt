@@ -1,12 +1,10 @@
 use crate::{
     boundary::kelvin_to_celsius, parallel::{par_or_seq, par_or_seq_mut}, physics::ECLIPSE, uom::{
-        Quantity,
-        dimensions::{
+        Quantity, constants::{WATER_LATENT_HEAT, WATER_SPECIFIC_HEAT}, dimensions::{
             HeatTransferCoeff, LiquidTransportCoeff, MassFlux, MassResistance, Power, ThermalConductance, VaporConductance, VaporTransportCoeff
-        },
-        units::{
+        }, units::{
             dimensionless, k_per_w, kelvin, kg_per_m2_s_pa, kg_per_m3, kg_per_s, kilograms, m2_per_s, pa_s_per_kg, pascals, s_per_kg, seconds, w_per_k, watts
-        },
+        }
     }
 };
 
@@ -205,11 +203,11 @@ impl Surface {
                     let volume = cell_curr.volume;
 
                     let tcap_j_per_k =
-                        (density * spech + volumetric_water * physics::W_SPECH) * volume;
+                        (density * spech + volumetric_water * WATER_SPECIFIC_HEAT) * volume;
 
                     let mut q_vapor: Power<f64> = 0.0 * watts;
                     if is_material && settings.latent_heat_enabled {
-                        q_vapor = vapor_diffusion_net_flux * physics::W_HV;
+                        q_vapor = vapor_diffusion_net_flux * WATER_LATENT_HEAT;
 
                         if q_vapor.abs() > settings.max_latent_heat {
                             q_vapor = q_vapor.value_in(watts).signum() * settings.max_latent_heat;

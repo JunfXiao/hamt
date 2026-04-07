@@ -105,6 +105,7 @@ unit_system!(
     constant WATER_SPECIFIC_HEAT = 4180.0f64 * j_per_kg_k;
     constant WATER_LATENT_HEAT = 2_489_000.0f64 * j_per_kg;
     constant VAPOR_GAS_CONSTANT = 461.524f64 * j_per_kg_k;
+    constant ATMOSPHERE_PRESSURE = 101_325.0f64 * pascals;
 );
 
 // Convenience type aliases for external modules

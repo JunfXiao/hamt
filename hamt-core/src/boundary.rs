@@ -1,13 +1,14 @@
 use serde::Serialize;
 
 use crate::{
-    physics::{ATMOSPHERE_PRESSURE, KELVIN_CONV},
+    physics::{ KELVIN_CONV},
     uom::{
         Quantity,
         dimensions::{
             Dimensionless, HeatTransferCoeff, MassConvectionCoeff, Power, Pressure, Temperature, VaporTransportCoeff
         },
         units::{self, m_per_s, w_per_m2_k, watts},
+        constants::{ATMOSPHERE_PRESSURE}
     },
 };
 
@@ -103,7 +104,7 @@ impl Default for BoundaryCondition {
             temp_inside_air: celsius_to_kelvin(20.0),
             rh_outside_air: Quantity(0.5),
             rh_inside_air: Quantity(0.5),
-            pressure_air: ATMOSPHERE_PRESSURE,
+            pressure_air: ATMOSPHERE_PRESSURE * 1.0,
             heat_transfer_coeff_ext: 1.5 * w_per_m2_k,
             heat_transfer_coeff_int: 1.5 * w_per_m2_k,
             mass_convection_coeff_ext: 0.0 * m_per_s,

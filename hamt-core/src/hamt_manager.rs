@@ -3,9 +3,10 @@
 use crate::boundary::BoundaryCondition;
 use crate::cell::CellType;
 use crate::material::{Construction, Material};
-use crate::physics::R_V;
+
 use crate::physics::geometry::{Pt3D, Size3D};
 use crate::surface::Surface;
+use crate::uom::constants::VAPOR_GAS_CONSTANT;
 use crate::uom::dimensions::{Power, Temperature, Time};
 use crate::uom::units::{hours, kelvin};
 use crate::{error, uom};
@@ -94,12 +95,12 @@ impl HamtManager {
         if !self.construction.surface_vapor_coef.is_external_const {
             self.boundary_condition.vapor_transport_coeff_ext =
                 self.boundary_condition.mass_convection_coeff_ext
-                    / (R_V * self.boundary_condition.temp_outside_air);
+                    / (VAPOR_GAS_CONSTANT * self.boundary_condition.temp_outside_air);
         }
         if !self.construction.surface_vapor_coef.is_internal_const {
             self.boundary_condition.vapor_transport_coeff_int =
                 self.boundary_condition.mass_convection_coeff_int
-                    / (R_V * self.boundary_condition.temp_inside_air);
+                    / (VAPOR_GAS_CONSTANT * self.boundary_condition.temp_inside_air);
         }
 
         let mut stats: ConvergenceStats = ConvergenceStats::default();

@@ -1,28 +1,23 @@
 //! Contains pure physics and psychrometric functions for the HAMT model.
 
-use crate::uom::Quantity;
+use crate::uom::constants::VAPOR_GAS_CONSTANT;
+use crate::uom::{Quantity, Unit};
 use crate::uom::dimensions::{
     Density, Dimensionless, Pressure, SpecificEnergy, SpecificHeatCapacity, Temperature,
     VaporPermeability,
 };
 use crate::uom::units::{self, kelvin, kg_per_m_s_pa, kg_per_m3, pascals};
+
 mod curve;
 pub mod geometry;
 pub use curve::*;
 
 /// Universal gas constant for water vapor [J/kg·K].
-pub const R_V: SpecificHeatCapacity<f64> = Quantity(461.52);
+
 /// Kelvin conversion constant.
 pub const KELVIN_CONV: f64 = 273.15;
 
-/// Specific heat of water [J/kg·K].
-pub const W_SPECH: SpecificHeatCapacity<f64> = Quantity(4180.0);
-/// Evaporation enthalpy of water [J/kg].
-pub const W_HV: SpecificEnergy<f64> = Quantity(2_489_000.0);
-/// Density of water [kg/m³].
-pub const W_DENSITY: Density<f64> = Quantity(1000.0);
 
-pub const ATMOSPHERE_PRESSURE: Pressure<f64> = Quantity(101_325.0);
 
 pub const ECLIPSE: f64 = 1e-16;
 
@@ -102,7 +97,7 @@ pub fn rh_from_t_vd(t_db: Temperature<f64>, rho_vapor: Density<f64>) -> Dimensio
         return Quantity(0.0);
     }
     let p_sat = psy_psat_fn_temp(t_db);
-    let rh = rho_vapor * R_V * t_db / p_sat;
+    let rh = rho_vapor * VAPOR_GAS_CONSTANT * t_db / p_sat;
 
     // Clamp the value between 0 and 1, as small inaccuracies can push it slightly out of bounds.
     Quantity(rh.value().min(1.0).max(0.0))
@@ -115,5 +110,5 @@ pub fn rh_from_t_vd(t_db: Temperature<f64>, rho_vapor: Density<f64>) -> Dimensio
 /// * `rh` - Relative humidity [0-1].
 pub fn vd_from_t_rh(trybulb: Temperature<f64>, rh: Dimensionless<f64>) -> Density<f64> {
     let p_sat = psy_psat_fn_temp(trybulb);
-    (p_sat * rh) / (R_V * trybulb)
+    (p_sat * rh) / (VAPOR_GAS_CONSTANT * trybulb)
 }
