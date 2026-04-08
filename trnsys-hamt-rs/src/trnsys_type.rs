@@ -8,7 +8,7 @@ use hamt_core::boundary::{celsius_to_kelvin, kelvin_to_celsius};
 use hamt_core::hamt_manager::{HamtManager, HamtSettings};
 use hamt_core::io::load_hamt_by_path;
 use hamt_core::uom::units::{
-    dimensionless, hours, kg_per_hr, kg_per_m3, kj_per_hr, kj_per_hr_m2_k, m_per_s, meter, square_meter
+    dimensionless, hours, kg_per_hr, kg_per_m3, kg_per_m2_s_pa, kj_per_hr, kj_per_hr_m2_k, meter, square_meter
 };
 use std::iter;
 use std::path::Path;
@@ -397,6 +397,21 @@ impl TrnSysType {
     }
 
     /// Called at each TRNSYS call within a timestep.
+    ///
+    /// Expected inputs (11 total):
+    /// 0. T_int   – inside air temperature [°C]
+    /// 1. T_out   – outside air temperature [°C]
+    /// 2. RH_int  – inside relative humidity [%]
+    /// 3. RH_out  – outside relative humidity [%]
+    /// 4. hconv_int – inside convective heat transfer coefficient [kJ/(hr·m²·K)]
+    /// 5. hconv_out – outside convective heat transfer coefficient [kJ/(hr·m²·K)]
+    /// 6. q_int   – additional energy source on inside surface [kJ/hr]
+    /// 7. q_out   – additional energy source on outside surface [kJ/hr]
+    /// 8. beta_int – inside vapor transport coefficient β [kg/(m²·s·Pa)]
+    ///              Deck formula: β ≈ 7e-9 × h_conv[W/m²K] (Lewis analogy at ~20 °C)
+    ///              i.e. `0.000000007 * hconv_kJ_hr_m2K / 3.6`
+    /// 9. beta_out – outside vapor transport coefficient β [kg/(m²·s·Pa)]  (same formula)
+    /// 10. q_userdef – additional heat gain at user-defined depth [kJ/hr]
     pub fn iterate(&self, state: &mut TrnSysState) -> Result<()> {
         let trnsys_iter = get_timestep_iteration();
         let trnsys_time = get_simulation_time();
@@ -415,8 +430,8 @@ impl TrnSysType {
         let hconv_out = state.inputs[5].value;
         let q_int = state.inputs[6].value;
         let q_out = state.inputs[7].value;
-        let hmass_conv_int = state.inputs[8].value;
-        let hmass_conv_out = state.inputs[9].value;
+        let beta_int = state.inputs[8].value;  // vapor transport coeff β [kg/(m²·s·Pa)]
+        let beta_out = state.inputs[9].value;  // vapor transport coeff β [kg/(m²·s·Pa)]
         let q_additional_userdef = state.inputs[10].value;
 
         if let Some(manager) = &mut state.hamt_manager {
@@ -428,8 +443,12 @@ impl TrnSysType {
             manager.boundary_condition.heat_transfer_coeff_int = hconv_int * kj_per_hr_m2_k;
             manager.boundary_condition.additional_energy_ext = q_out * kj_per_hr;
             manager.boundary_condition.additional_energy_int = q_int * kj_per_hr;
-            manager.boundary_condition.mass_convection_coeff_ext = hmass_conv_out * m_per_s;
-            manager.boundary_condition.mass_convection_coeff_int = hmass_conv_int * m_per_s;
+            // Inputs 8/9 are vapor transport coefficients β [kg/(m²·s·Pa)], set directly.
+            // The deck formula is: β ≈ 7e-9 × h_conv[W/m²K] (Lewis analogy).
+            // Do NOT use mass_convection_coeff_ext/int here — those trigger an extra ÷(R_v·T)
+            // division in HamtManager::solve_timestep that would make β ~135 000× too small.
+            manager.boundary_condition.vapor_transport_coeff_ext = beta_out * kg_per_m2_s_pa;
+            manager.boundary_condition.vapor_transport_coeff_int = beta_int * kg_per_m2_s_pa;
             manager.boundary_condition.q_addition_userdef = q_additional_userdef * kj_per_hr;
 
             debug!(
@@ -438,7 +457,7 @@ impl TrnSysType {
                 manager.boundary_condition
             );
 
-            let solve_start = std::time::Instant::now();
+            // let solve_start = std::time::Instant::now();
             let result = manager
                 .solve_timestep_adaptive(&mut state.adaptive_state, None)
                 .with_context(|| {
@@ -448,15 +467,15 @@ impl TrnSysType {
                         trnsys_iter
                     )
                 });
-            let elapsed = solve_start.elapsed();
-            if elapsed.as_millis() > 500 {
-                warn!(
-                    time = trnsys_time,
-                    trnsys_iter,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    "iterate: solve took >500ms"
-                );
-            }
+            // let elapsed = solve_start.elapsed();
+            // if elapsed.as_millis() > 500 {
+            //     warn!(
+            //         time = trnsys_time,
+            //         trnsys_iter,
+            //         elapsed_ms = elapsed.as_millis() as u64,
+            //         "iterate: solve took >500ms"
+            //     );
+            // }
             result?;
 
             // Map outputs

@@ -8,7 +8,7 @@ use crate::physics::geometry::{Pt3D, Size3D};
 use crate::surface::Surface;
 use crate::uom::constants::VAPOR_GAS_CONSTANT;
 use crate::uom::dimensions::{Power, Temperature, Time};
-use crate::uom::units::{hours, kelvin};
+use crate::uom::units::{hours, kelvin, m_per_s};
 use crate::{error, uom};
 use anyhow::{Context, Ok, Result};
 use std::mem;
@@ -91,13 +91,20 @@ impl HamtManager {
 
     /// Solves for the current timestep by iterating until convergence.
     pub fn solve_timestep(&mut self) -> Result<bool> {
-        // Reapply surface vapor coefficients if not using constant value
-        if !self.construction.surface_vapor_coef.is_external_const {
+        // Reapply surface vapor coefficients if not using constant value.
+        // When mass_convection_coeff is non-zero it represents h_mass [m/s] and β is derived
+        // via β = h_mass / (R_v·T).  When it is zero the caller has set vapor_transport_coeff
+        // directly as β [kg/(m²·s·Pa)] and no conversion is needed.
+        if !self.construction.surface_vapor_coef.is_external_const
+            && self.boundary_condition.mass_convection_coeff_ext.value_in(m_per_s) != 0.0
+        {
             self.boundary_condition.vapor_transport_coeff_ext =
                 self.boundary_condition.mass_convection_coeff_ext
                     / (VAPOR_GAS_CONSTANT * self.boundary_condition.temp_outside_air);
         }
-        if !self.construction.surface_vapor_coef.is_internal_const {
+        if !self.construction.surface_vapor_coef.is_internal_const
+            && self.boundary_condition.mass_convection_coeff_int.value_in(m_per_s) != 0.0
+        {
             self.boundary_condition.vapor_transport_coeff_int =
                 self.boundary_condition.mass_convection_coeff_int
                     / (VAPOR_GAS_CONSTANT * self.boundary_condition.temp_inside_air);
