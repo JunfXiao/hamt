@@ -21,6 +21,12 @@ pub const KELVIN_CONV: f64 = 273.15;
 
 pub const ECLIPSE: f64 = 1e-16;
 
+/// Stefan–Boltzmann constant [W/(m²·K⁴)].
+pub const SIGMA: f64 = 5.670374419e-8;
+
+/// Default surface long-wave emissivity [-] for interior radiation exchange.
+pub const EPSILON: f64 = 0.9;
+
 /// Calculates saturation vapor pressure as a function of temperature.
 /// Implements the Hyland & Wexler formulation as seen in EnergyPlus.
 ///

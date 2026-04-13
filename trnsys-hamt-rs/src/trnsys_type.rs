@@ -8,7 +8,7 @@ use hamt_core::boundary::{celsius_to_kelvin, kelvin_to_celsius};
 use hamt_core::hamt_manager::{HamtManager, HamtSettings};
 use hamt_core::io::load_hamt_by_path;
 use hamt_core::uom::units::{
-    dimensionless, hours, kg_per_hr, kg_per_m3, kg_per_m2_s_pa, kj_per_hr, kj_per_hr_m2_k, meter, square_meter
+    dimensionless, hours, kg_per_hr, kg_per_m3, kg_per_m2_s_pa, kj_per_hr, kj_per_hr_m2_k, meter, pascals, square_meter, w_per_m2_k,
 };
 use std::iter;
 use std::path::Path;
@@ -23,7 +23,17 @@ impl TrnSysType {
 
     /// Very first call of the simulation: declare I/O sizes and iteration mode.
     pub fn first_call_of_simulation(&self, state: &mut TrnSysState) -> Result<()> {
-        state.num_inputs = 11;
+        if state.num_inputs >= 11 && state.num_inputs <= 14 {
+            // valid
+        } else {
+            return Err(InputError::BadParameter {
+                index: 1,
+                message: format!("Number of inputs must be 11 to 14. Got: {}", state.num_inputs),
+            }
+            .into());
+
+        }
+
         state.num_outputs = 11;
         state.num_derivatives = 0;
         state.iteration_mode = IterationMode::DynamicMode;
@@ -110,6 +120,8 @@ impl TrnSysType {
             settings.min_div = n_div_value;
         }
 
+        settings.min_relaxation_factor = 0.01; // allow more aggressive refinement for better convergence in TRNSYS
+
         let manager = HamtManager::new(
             Some(settings),
             None,
@@ -145,6 +157,9 @@ impl TrnSysType {
 
         let water_output_path = format!("Type395_0{}_water.out", output_file_id);
         state.water_csv_writer = Some(Writer::from_path(water_output_path)?);
+
+        let vp_output_path = format!("Type395_0{}_vp.out", output_file_id);
+        state.vp_csv_writer = Some(Writer::from_path(vp_output_path)?);
 
         // Write t title columns
         let cell_table_titles = vec!["time [h]".to_string()].into_iter().chain(
@@ -212,6 +227,13 @@ impl TrnSysType {
         }
 
         if let Some(writer) = &mut state.water_csv_writer {
+            writer.write_record(cell_table_titles.clone())?;
+            writer.write_record(cell_depth_titles.clone())?;
+            writer.write_record(cell_thickness_titles.clone())?;
+            writer.write_record(cell_material_titles.clone())?;
+        }
+
+        if let Some(writer) = &mut state.vp_csv_writer {
             writer.write_record(cell_table_titles)?;
             writer.write_record(cell_depth_titles)?;
             writer.write_record(cell_thickness_titles)?;
@@ -272,7 +294,7 @@ impl TrnSysType {
     pub fn update_output(&self, state: &mut TrnSysState, write_file: bool) -> Result<()> {
         let report_row = if let Some(manager) = &mut state.hamt_manager {
             // Map outputs
-            let report = manager.surface_curr.report(&manager.boundary_condition)?;
+            let report: hamt_core::surface::SurfaceReport = manager.surface_curr.report(&manager.boundary_condition)?;
             let surface_area = manager.surface_curr.area;
             let outputs = [
                 kelvin_to_celsius(report.temp_surf_int),
@@ -393,25 +415,54 @@ impl TrnSysType {
             writer.flush()?;
         }
 
+        // Output cell vapor pressure [Pa]
+        if let Some(writer) = &mut state.vp_csv_writer {
+            let time = get_simulation_time();
+            let cell_vp_rows = iter::once(time.to_string()).chain(
+                state
+                    .hamt_manager
+                    .as_ref()
+                    .unwrap()
+                    .surface_curr
+                    .cells
+                    .iter()
+                    .map(|c| format!("{:.3e}", c.cell_vp.value_in(pascals))),
+            );
+            writer
+                .write_record(cell_vp_rows)
+                .context("Error writing cell VP row")?;
+            writer.flush()?;
+        }
+
         Ok(())
     }
 
     /// Called at each TRNSYS call within a timestep.
     ///
-    /// Expected inputs (11 total):
-    /// 0. T_int   – inside air temperature [°C]
-    /// 1. T_out   – outside air temperature [°C]
-    /// 2. RH_int  – inside relative humidity [%]
-    /// 3. RH_out  – outside relative humidity [%]
-    /// 4. hconv_int – inside convective heat transfer coefficient [kJ/(hr·m²·K)]
-    /// 5. hconv_out – outside convective heat transfer coefficient [kJ/(hr·m²·K)]
-    /// 6. q_int   – additional energy source on inside surface [kJ/hr]
-    /// 7. q_out   – additional energy source on outside surface [kJ/hr]
-    /// 8. beta_int – inside vapor transport coefficient β [kg/(m²·s·Pa)]
-    ///              Deck formula: β ≈ 7e-9 × h_conv[W/m²K] (Lewis analogy at ~20 °C)
-    ///              i.e. `0.000000007 * hconv_kJ_hr_m2K / 3.6`
-    /// 9. beta_out – outside vapor transport coefficient β [kg/(m²·s·Pa)]  (same formula)
-    /// 10. q_userdef – additional heat gain at user-defined depth [kJ/hr]
+    /// Expected inputs (up to 14 total; backward compatible — decks with 11/12/13 inputs
+    /// fall back to legacy behaviour for any missing trailing inputs):
+    /// 0. T_int        – inside star-node temperature TSTAR [°C] (used for heat convection path)
+    /// 1. T_out        – outside air temperature [°C]
+    /// 2. RH_int       – inside relative humidity [%]
+    /// 3. RH_out       – outside relative humidity [%]
+    /// 4. hconv_int    – inside convective heat transfer coefficient [kJ/(hr·m²·K)]
+    /// 5. hconv_out    – outside convective heat transfer coefficient [kJ/(hr·m²·K)]
+    /// 6. q_int        – additional energy source on inside surface [kJ/hr]
+    /// 7. q_out        – additional energy source on outside surface [kJ/hr]
+    /// 8. beta_int     – inside vapor transport coefficient β [kg/(m²·s·Pa)]
+    ///                   Deck formula: β ≈ 7e-9 × h_conv[W/m²K] (Lewis analogy at ~20 °C)
+    ///                   i.e. `0.000000007 * hconv_kJ_hr_m2K / 3.6`
+    /// 9. beta_out     – outside vapor transport coefficient β [kg/(m²·s·Pa)]  (same formula)
+    /// 10. q_userdef   – additional heat gain at user-defined depth [kJ/hr]
+    /// 11. T_int_moist – actual inside air temperature TAIR [°C], used only for moisture VP_bc.
+    ///                   Decouples the moisture boundary VP from the star-node temperature.
+    ///                   Falls back to T_int (input 0) when the deck provides only 11 inputs.
+    /// 12. HCONVI      – pure convective interior HTC (TRNBuild NType 108) [kJ/(hr·m²·K)].
+    ///                   Excludes the radiation component embedded in the REQV-derived hconv_int.
+    ///                   Falls back to input 4 (combined hconv_int) for decks with <13 inputs.
+    /// 13. TMR         – interior mean radiant temperature (TRNBuild NType 120) [°C], used by
+    ///                   the separate interior Radiation boundary cell for linearised longwave
+    ///                   exchange. Falls back to T_int (input 0, TSTAR) for decks with <14 inputs.
     pub fn iterate(&self, state: &mut TrnSysState) -> Result<()> {
         let trnsys_iter = get_timestep_iteration();
         let trnsys_time = get_simulation_time();
@@ -433,6 +484,27 @@ impl TrnSysType {
         let beta_int = state.inputs[8].value;  // vapor transport coeff β [kg/(m²·s·Pa)]
         let beta_out = state.inputs[9].value;  // vapor transport coeff β [kg/(m²·s·Pa)]
         let q_additional_userdef = state.inputs[10].value;
+        // Input 11 (optional): actual room air temperature TAIR for moisture VP_bc.
+        // Falls back to T_int (TSTAR) when the deck still provides only 11 inputs.
+        let t_int_moisture = if state.inputs.len() >= 12 {
+            state.inputs[11].value
+        } else {
+            t_int
+        };
+        // Input 12 (optional): pure convective HTC [kJ/(hr·m²·K)] — NType 108 HCONVI.
+        // Falls back to input 4 (combined hconv_int) when the deck still provides <13 inputs.
+        let hconv_conv_int = if state.inputs.len() >= 13 {
+            state.inputs[12].value
+        } else {
+            hconv_int
+        };
+        // Input 13 (optional): mean radiant temperature [°C] — NType 120 TMR.
+        // Falls back to input 0 (TSTAR) when the deck still provides <14 inputs.
+        let tmr_int = if state.inputs.len() >= 14 {
+            state.inputs[13].value
+        } else {
+            t_int
+        };
 
         if let Some(manager) = &mut state.hamt_manager {
             manager.boundary_condition.temp_inside_air = celsius_to_kelvin(t_int);
@@ -449,7 +521,24 @@ impl TrnSysType {
             // division in HamtManager::solve_timestep that would make β ~135 000× too small.
             manager.boundary_condition.vapor_transport_coeff_ext = beta_out * kg_per_m2_s_pa;
             manager.boundary_condition.vapor_transport_coeff_int = beta_int * kg_per_m2_s_pa;
+            // Set the new decoupled interior thermal BCs (with legacy fallbacks).
+            manager.boundary_condition.heat_transfer_coeff_conv_int = hconv_conv_int * kj_per_hr_m2_k;
+            manager.boundary_condition.temp_inside_mean_radiant = celsius_to_kelvin(tmr_int);
+            // Lewis-analogy fallback: when the deck passes β_int = 0, derive it from the pure
+            // convective HTC (HCONVI). 7e-9 [kg/(m²·s·Pa)] per [W/(m²·K)] is the Lewis-number
+            // coefficient at ~20 °C used throughout the d18 deck.
+            if manager.boundary_condition.vapor_transport_coeff_int.value_in(kg_per_m2_s_pa) == 0.0 {
+                let h_w = manager
+                    .boundary_condition
+                    .heat_transfer_coeff_conv_int
+                    .value_in(w_per_m2_k);
+                manager.boundary_condition.vapor_transport_coeff_int =
+                    7.0e-9 * h_w * kg_per_m2_s_pa;
+            }
             manager.boundary_condition.q_addition_userdef = q_additional_userdef * kj_per_hr;
+            manager.boundary_condition.temp_inside_air_moisture = celsius_to_kelvin(t_int_moisture);
+            // Outside moisture temperature equals outside air temperature (no star-node effect outside).
+            manager.boundary_condition.temp_outside_air_moisture = celsius_to_kelvin(t_out);
 
             debug!(
                 "Time = {}, bc: \n{:#?}",

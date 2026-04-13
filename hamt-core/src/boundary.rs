@@ -46,6 +46,23 @@ pub struct BoundaryCondition {
     /// Internal vapor transport coefficient [kg/(m²·s·Pa)].
     pub vapor_transport_coeff_int: VaporTransportCoeff<f64>,
 
+    /// Room air temperature used only for interior moisture VP: VP_bc = RH × Psat(T).
+    /// Distinct from `temp_inside_air`, which is the star-node temperature (TSTAR) used
+    /// for the heat convection path paired with the REQV-derived h_conv.
+    /// Set this to the actual zone air temperature (TAIR from TRNBuild [56,1]).
+    pub temp_inside_air_moisture: Temperature<f64>,
+
+    /// Outside air temperature used only for exterior moisture VP.
+    /// Defaults to `temp_outside_air` (equal in the current d18 deck).
+    pub temp_outside_air_moisture: Temperature<f64>,
+
+    /// Mean radiant temperature seen by the interior surface (TMR, TRNBuild NType 120). [K]
+    pub temp_inside_mean_radiant: Temperature<f64>,
+
+    /// Pure convective interior HTC (HCONVI, NType 108), excludes the radiation
+    /// component embedded in REQV-derived h_conv. [W/(m²·K)]
+    pub heat_transfer_coeff_conv_int: HeatTransferCoeff<f64>,
+
     /// External additional energy [W].
     pub additional_energy_ext: Power<f64>,
 
@@ -89,6 +106,10 @@ impl BoundaryCondition {
             mass_convection_coeff_int: mass_conv_coeff_int * m_per_s,
             vapor_transport_coeff_ext: Quantity(0.0),
             vapor_transport_coeff_int: Quantity(0.0),
+            temp_inside_air_moisture: celsius_to_kelvin(temp_inside_c),
+            temp_outside_air_moisture: celsius_to_kelvin(temp_outside_c),
+            temp_inside_mean_radiant: celsius_to_kelvin(temp_inside_c),
+            heat_transfer_coeff_conv_int: heat_transfer_coeff_int * w_per_m2_k,
             additional_energy_ext: q_additional_out * watts,
             additional_energy_int: q_additional_in * watts,
             q_addition_userdef: q_additional_userdef * watts,
@@ -111,10 +132,57 @@ impl Default for BoundaryCondition {
             mass_convection_coeff_int: 0.0 * m_per_s,
             vapor_transport_coeff_ext: Quantity(0.0),
             vapor_transport_coeff_int: Quantity(0.0),
+            temp_inside_air_moisture: celsius_to_kelvin(20.0),
+            temp_outside_air_moisture: celsius_to_kelvin(20.0),
+            temp_inside_mean_radiant: celsius_to_kelvin(20.0),
+            heat_transfer_coeff_conv_int: 1.5 * w_per_m2_k,
             additional_energy_ext: 0.0 * watts,
             additional_energy_int: 0.0 * watts,
             q_addition_userdef: 0.0 * watts,
             is_raining: false,
+        }
+    }
+}
+
+impl BoundaryCondition {
+    /// Linearly interpolate between two boundary conditions.
+    ///
+    /// `t = 0.0` returns `self`, `t = 1.0` returns `other`.
+    pub fn lerp(&self, other: &Self, t: f64) -> Self {
+        let s = 1.0 - t;
+        Self {
+            temp_outside_air: self.temp_outside_air * s + other.temp_outside_air * t,
+            temp_inside_air: self.temp_inside_air * s + other.temp_inside_air * t,
+            rh_outside_air: self.rh_outside_air * s + other.rh_outside_air * t,
+            rh_inside_air: self.rh_inside_air * s + other.rh_inside_air * t,
+            pressure_air: self.pressure_air * s + other.pressure_air * t,
+            heat_transfer_coeff_ext: self.heat_transfer_coeff_ext * s
+                + other.heat_transfer_coeff_ext * t,
+            heat_transfer_coeff_int: self.heat_transfer_coeff_int * s
+                + other.heat_transfer_coeff_int * t,
+            mass_convection_coeff_ext: self.mass_convection_coeff_ext * s
+                + other.mass_convection_coeff_ext * t,
+            mass_convection_coeff_int: self.mass_convection_coeff_int * s
+                + other.mass_convection_coeff_int * t,
+            vapor_transport_coeff_ext: self.vapor_transport_coeff_ext * s
+                + other.vapor_transport_coeff_ext * t,
+            vapor_transport_coeff_int: self.vapor_transport_coeff_int * s
+                + other.vapor_transport_coeff_int * t,
+            temp_inside_air_moisture: self.temp_inside_air_moisture * s
+                + other.temp_inside_air_moisture * t,
+            temp_outside_air_moisture: self.temp_outside_air_moisture * s
+                + other.temp_outside_air_moisture * t,
+            temp_inside_mean_radiant: self.temp_inside_mean_radiant * s
+                + other.temp_inside_mean_radiant * t,
+            heat_transfer_coeff_conv_int: self.heat_transfer_coeff_conv_int * s
+                + other.heat_transfer_coeff_conv_int * t,
+            additional_energy_ext: self.additional_energy_ext * s
+                + other.additional_energy_ext * t,
+            additional_energy_int: self.additional_energy_int * s
+                + other.additional_energy_int * t,
+            q_addition_userdef: self.q_addition_userdef * s + other.q_addition_userdef * t,
+            // For booleans, use the end-of-timestep value (e.g. is_raining is an event flag).
+            is_raining: other.is_raining,
         }
     }
 }

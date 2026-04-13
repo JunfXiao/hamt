@@ -147,7 +147,7 @@ impl HamtManager {
                 let delta_rh = (cell_next.cell_rh - cell_curr.cell_rh).value().abs();
 
                 // If residual is large (>10× tolerance), tighten relaxation
-                if delta_t > temp_tol * 10.0 || delta_rh > rh_tol * 10.0 {
+                if delta_t > temp_tol * 10.0 * (STALL_PATIENCE-stall_count) as f64 / STALL_PATIENCE as f64 || delta_rh > rh_tol * 10.0 * (STALL_PATIENCE-stall_count) as f64 / STALL_PATIENCE as f64 {
                     cell_next.relaxation_factor =
                         (cell_next.relaxation_factor * 0.9).max(min_alpha);
                 } else if delta_t < temp_tol && delta_rh < rh_tol {

@@ -25,6 +25,8 @@ impl Surface {
             cells,
             size: dimension,
             cells_idx_map: HashMap::new(),
+            interior_surface_material_idx: None,
+            exterior_surface_material_idx: None,
             user_defined_depth: settings.user_defined_depth,
             user_defined_cell_idx: None,
         };
@@ -185,13 +187,25 @@ impl Surface {
 
         base_pt.0 += boundary_cell_size.0;
 
-        // --- Interior Boundary Cell ---
+        // --- Interior Boundary Cells ---
+        // Interior Convection and Radiation cells share the same geometric position
+        // (same base_pt, no x-advance between them) — mirroring the exterior side which
+        // stacks Convection/Radiation/Sky/Ground at the same base_pt. Both are reachable
+        // from the interior Virtual cell because `neighbor_indices` for Virtual(Interior)
+        // collects ALL cells to its right, so the Virtual acts as a hub and the 1-D
+        // neighbor walk doesn't need Radiation to be at a distinct x slot.
         let int_con_cell = Cell::new(
             CellType::Boundary(Boundary::Convection, BoundaryLocation::Interior),
             get_origin(base_pt, boundary_cell_size),
             boundary_cell_size,
         );
         cells.push(int_con_cell);
+        let int_rad_cell = Cell::new(
+            CellType::Boundary(Boundary::Radiation, BoundaryLocation::Interior),
+            get_origin(base_pt, boundary_cell_size),
+            boundary_cell_size,
+        );
+        cells.push(int_rad_cell);
 
         // calc dependent properties
         cells
@@ -220,6 +234,15 @@ impl Surface {
                 .or_insert(Vec::with_capacity(self.cells.len())) // For performance
                 .push([x, y, z]);
         }
+
+        // Cache boundary-adjacent material cell indices (scan x-axis once).
+        let nx = self.cells.raw_dim()[0];
+        self.exterior_surface_material_idx = (0..nx).find(|&i| {
+            matches!(self.cells[[i, 0, 0]].cell_type, CellType::Material(_))
+        });
+        self.interior_surface_material_idx = (0..nx).rev().find(|&i| {
+            matches!(self.cells[[i, 0, 0]].cell_type, CellType::Material(_))
+        });
 
         // default to mid-depth if not provided
         if self.user_defined_depth.is_none() {

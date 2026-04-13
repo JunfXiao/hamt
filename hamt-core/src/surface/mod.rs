@@ -61,6 +61,15 @@ pub struct Surface {
     cells_idx_map: HashMap<CellType, Vec<[usize; 3]>>,
 
 
+    // ========= Boundary-adjacent material cell indices =========
+    /// Index (x-axis) of the outermost interior material cell (last Material cell in x).
+    /// Radiation absorbed at the interior surface is deposited here.
+    pub interior_surface_material_idx: Option<usize>,
+
+    /// Index (x-axis) of the outermost exterior material cell (first Material cell in x).
+    /// Radiation absorbed at the exterior surface is deposited here.
+    pub exterior_surface_material_idx: Option<usize>,
+
     // ========= Optional user-defined probe =========
     /// Depth (m) at which user-defined reporting is performed.
     pub user_defined_depth: Option<Length<f64>>,

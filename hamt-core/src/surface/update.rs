@@ -3,7 +3,7 @@ use crate::{
         Quantity, constants::{WATER_LATENT_HEAT, WATER_SPECIFIC_HEAT}, dimensions::{
             HeatTransferCoeff, LiquidTransportCoeff, MassFlux, MassResistance, Power, ThermalConductance, VaporConductance, VaporTransportCoeff
         }, units::{
-            dimensionless, k_per_w, kelvin, kg_per_m2_s_pa, kg_per_m3, kg_per_s, kilograms, m2_per_s, pa_s_per_kg, pascals, s_per_kg, seconds, w_per_k, watts
+            dimensionless, k_per_w, kelvin, kg_per_m2_s_pa, kg_per_m3, kg_per_s, kilograms, m2_per_s, pa_s_per_kg, pascals, s_per_kg, seconds, w_per_k, w_per_m2_k, watts
         }
     }
 };
@@ -86,6 +86,9 @@ impl Surface {
         _settings: &HamtSettings,
     ) -> Result<()> {
         let nx = self.cells.raw_dim()[0];
+        let interior_mat_idx = self.interior_surface_material_idx;
+        let interior_mat_temp: Option<Temperature<f64>> =
+            interior_mat_idx.map(|i| self.cells[[i, 0, 0]].cell_temp);
         for i in 0..nx {
             let cell = &mut self.cells[[i, 0, 0]];
             if cell.is_boundary() {
@@ -93,7 +96,10 @@ impl Surface {
                     cell.htc = bc.heat_transfer_coeff_ext;
                     cell.cell_temp = bc.temp_outside_air;
                     cell.cell_rh = bc.rh_outside_air;
-                    let psat = physics::psy_psat_fn_temp(cell.cell_temp);
+                    // Use the dedicated moisture temperature (actual outside air T) for VP_bc,
+                    // so the VP boundary condition is physically correct even when cell_temp
+                    // is set to the star-node temperature for the heat convection path.
+                    let psat = physics::psy_psat_fn_temp(bc.temp_outside_air_moisture);
                     let rh = cell.cell_rh;
                     let vtc = if matches!(cell.cell_type, CellType::Boundary(crate::cell::Boundary::Convection, _)) {
                         if bc.vapor_transport_coeff_ext > VaporTransportCoeff::<f64>::zero() {
@@ -113,28 +119,57 @@ impl Surface {
                     cell.vtc = vtc;
                     cell.cell_vp = rh * psat;
                 } else {
-                    cell.htc = bc.heat_transfer_coeff_int;
-                    cell.cell_temp = bc.temp_inside_air;
-                    cell.cell_rh = bc.rh_inside_air;
-                    let psat = physics::psy_psat_fn_temp(cell.cell_temp);
-                    let rh = cell.cell_rh;
-                    let vtc = if matches!(cell.cell_type, CellType::Boundary(crate::cell::Boundary::Convection, _)) {
-                        if bc.vapor_transport_coeff_int > VaporTransportCoeff::<f64>::zero() {
-                            bc.vapor_transport_coeff_int
-                        } else {
-                            let rho_v = physics::vd_from_t_rh(cell.cell_temp, rh);
-                            let denom = psat * rh;
-                            if denom > Quantity(1.0e-9) {
-                                bc.mass_convection_coeff_int * rho_v / denom
+                    match &cell.cell_type {
+                        CellType::Boundary(crate::cell::Boundary::Convection, BoundaryLocation::Interior) => {
+                            // Pure convective HTC (HCONVI). Paired with TAIR on the heat side;
+                            // TAIR is also used for VP_bc on the moisture side.
+                            cell.htc = bc.heat_transfer_coeff_conv_int;
+                            cell.cell_temp = bc.temp_inside_air;
+                            cell.cell_rh = bc.rh_inside_air;
+                            let psat = physics::psy_psat_fn_temp(bc.temp_inside_air_moisture);
+                            let rh = cell.cell_rh;
+                            let vtc = if bc.vapor_transport_coeff_int > VaporTransportCoeff::<f64>::zero() {
+                                bc.vapor_transport_coeff_int
                             } else {
-                                0.0 * kg_per_m2_s_pa
-                            }
+                                let rho_v = physics::vd_from_t_rh(cell.cell_temp, rh);
+                                let denom = psat * rh;
+                                if denom > Quantity(1.0e-9) {
+                                    bc.mass_convection_coeff_int * rho_v / denom
+                                } else {
+                                    0.0 * kg_per_m2_s_pa
+                                }
+                            };
+                            cell.vtc = vtc;
+                            cell.cell_vp = rh * psat;
                         }
-                    } else {
-                        0.0 * kg_per_m2_s_pa
-                    };
-                    cell.vtc = vtc;
-                    cell.cell_vp = rh * psat;
+                        CellType::Boundary(crate::cell::Boundary::Radiation, BoundaryLocation::Interior) => {
+                            // Linearised longwave exchange against mean radiant temperature.
+                            // h_rad = 4 σ ε T_m³, T_m ≈ mean of surface and TMR.
+                            // Use the adjacent interior material cell's current temperature as the
+                            // surface proxy.
+                            let t_s = interior_mat_temp.unwrap_or(bc.temp_inside_mean_radiant);
+                            let t_m_k = (t_s + bc.temp_inside_mean_radiant) * 0.5;
+                            let t_m_cubed = t_m_k.value_in(kelvin).powi(3);
+                            let h_rad =
+                                4.0 * physics::SIGMA * physics::EPSILON * t_m_cubed * w_per_m2_k;
+                            cell.htc = h_rad;
+                            cell.cell_temp = bc.temp_inside_mean_radiant;
+                            cell.vtc = VaporTransportCoeff::<f64>::zero();
+                            cell.cell_vp = 0.0 * pascals;
+                            cell.cell_rh = bc.rh_inside_air; // unused, kept valid
+                        }
+                        _ => {
+                            // Fallback: legacy combined behaviour for any other interior
+                            // boundary cell type not explicitly handled above.
+                            cell.htc = bc.heat_transfer_coeff_int;
+                            cell.cell_temp = bc.temp_inside_air;
+                            cell.cell_rh = bc.rh_inside_air;
+                            let psat = physics::psy_psat_fn_temp(bc.temp_inside_air_moisture);
+                            let rh = cell.cell_rh;
+                            cell.vtc = VaporTransportCoeff::<f64>::zero();
+                            cell.cell_vp = rh * psat;
+                        }
+                    }
                 }
             } else {
                 cell.vtc = VaporTransportCoeff::<f64>::zero();
@@ -227,12 +262,25 @@ impl Surface {
                         .unwrap_or(0.0);
                     let q_adds = bc.q_addition_userdef * q_weight;
 
+                    // Deposit absorbed radiation (QABSI + QABSILW - QWG from TRNBuild) into the
+                    // boundary-adjacent material cell, not the massless Virtual cell.
+                    // Real surfaces absorb shortwave/longwave flux in the outermost material layer;
+                    // placing it in the Virtual cell had no thermal effect (zero mass, zero storage).
+                    let q_boundary_energy: Power<f64> =
+                        if Some(i) == surface_curr.interior_surface_material_idx {
+                            bc.additional_energy_int
+                        } else if Some(i) == surface_curr.exterior_surface_material_idx {
+                            bc.additional_energy_ext
+                        } else {
+                            0.0 * watts
+                        };
+
                     let denom_t = oorsum + (tcap_j_per_k / dt_s);
 
                     let t_next = if denom_t > 1e-10 * w_per_k {
                         let prev_temp_k = cell_prev.cell_temp;
                         let inertial_term: Power<f64> = tcap_j_per_k * prev_temp_k / dt_s;
-                        let numer = torsum + q_vapor + q_adds + inertial_term;
+                        let numer = torsum + q_vapor + q_adds + q_boundary_energy + inertial_term;
                         numer / denom_t
                     } else {
                         cell_curr.cell_temp
@@ -274,7 +322,7 @@ impl Surface {
                     // Correction term for P_v due to temperature change: phi_curr * dPsat/dT * dt
                     let p_sat_thermal_correction = cell_curr.cell_rh.value() * d_psat_d_t * delta_t_val;
 
-                    const RELAXATION_FACTOR: f64 = 0.6; // Empirical factor to prevent overshooting in RH update
+                    const RELAXATION_FACTOR: f64 = 1.0; // Empirical factor to prevent overshooting in RH update
                     let vpsat_old = physics::psy_psat_fn_temp(cell_prev.cell_temp);
                     let vpsat_pa_val = vpsat_curr * RELAXATION_FACTOR + vpsat_old * (1.0 - RELAXATION_FACTOR);
 
