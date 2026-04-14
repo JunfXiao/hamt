@@ -1,9 +1,10 @@
 use crate::{
-    boundary::kelvin_to_celsius, parallel::{par_or_seq, par_or_seq_mut}, physics::ECLIPSE, uom::{
+    parallel::{par_or_seq, par_or_seq_mut}, uom::{
         Quantity, constants::{WATER_LATENT_HEAT, WATER_SPECIFIC_HEAT}, dimensions::{
-            HeatTransferCoeff, LiquidTransportCoeff, MassFlux, MassResistance, Power, ThermalConductance, VaporConductance, VaporTransportCoeff
+            HeatTransferCoeff, MassFlux, MassResistance, Power, ThermalConductance, VaporConductance, VaporTransportCoeff
         }, units::{
-            dimensionless, k_per_w, kelvin, kg_per_m2_s_pa, kg_per_m3, kg_per_s, kilograms, m2_per_s, pa_s_per_kg, pascals, s_per_kg, seconds, w_per_k, w_per_m2_k, watts
+            dimensionless, j_per_k, j_per_kg, k_per_w, kelvin, kg_per_m2_s_pa, kg_per_m3, kg_per_s,
+            kilograms, m2_per_s, pa_s_per_kg, pascals, s_per_kg, seconds, w_per_k, w_per_m2_k, watts
         }
     }
 };
@@ -208,56 +209,84 @@ impl Surface {
                     let cell_prev = &surface_prev.cells[[i, 0, 0]];
                     let is_material = matches!(cell_curr.cell_type, CellType::Material(_));
 
-                    // ==========================================
-                    // 1. Heat Calculation (Calculate T_next)
-                    // ==========================================
-                    // oorsum: over sum of 1/R_thermal to neighbors
+                    // =========================================================
+                    // Build all neighbor sums in a single pass
+                    //   Heat:     oorsum, torsum, vapor_diffusion_net_flux
+                    //   Vapor:    vpoosum, vporsum
+                    //   Liquid:   phioosum, phiorsum
+                    // Merging the two former loops avoids calling
+                    // calculate_resistance_pair twice per neighbor per cell.
+                    // =========================================================
                     let mut oorsum: ThermalConductance<f64> = 0.0 * w_per_k;
-                    // torsum: over sum of T_neighbor/R_thermal to neighbors
                     let mut torsum: Power<f64> = 0.0 * watts;
                     let mut vapor_diffusion_net_flux: MassFlux<f64> = 0.0 * kilograms / seconds;
+                    let mut vpoosum: VaporConductance<f64> = 0.0 * kg_per_s / pascals;
+                    let mut vporsum: MassFlux<f64> = 0.0 * kg_per_s;
+                    let mut phioosum: MassFlux<f64> = 0.0 * kg_per_s;
+                    let mut phiorsum: MassFlux<f64> = 0.0 * kg_per_s;
 
                     let curr_vp_pa = cell_curr.cell_vp;
 
                     for nbr_i in surface_curr.neighbor_indices(i, nx) {
-                        let neighbor_curr = &surface_curr.cells[[nbr_i, 0, 0]];
+                        let nbr_curr = &surface_curr.cells[[nbr_i, 0, 0]];
 
-                        let (therm_resistance, vapor_resistance_coeff) =
-                            Self::calculate_resistance_pair(
-                                cell_curr,
-                                neighbor_curr,
-                                bc.pressure_air,
-                            );
+                        let (therm_r, vapor_r) =
+                            Self::calculate_resistance_pair(cell_curr, nbr_curr, bc.pressure_air);
 
-                        if therm_resistance > 1e-12 * k_per_w {
-                            let nbr_temp_k = neighbor_curr.cell_temp;
-                            oorsum += 1.0 / therm_resistance;
-                            torsum += nbr_temp_k / therm_resistance;
+                        if therm_r > 1e-12 * k_per_w {
+                            oorsum += 1.0 / therm_r;
+                            torsum += nbr_curr.cell_temp / therm_r;
                         }
 
-                        if vapor_resistance_coeff > 1e-12 * pa_s_per_kg {
-                            let nbr_vp_pa = neighbor_curr.cell_vp;
-                            vapor_diffusion_net_flux +=
-                                (nbr_vp_pa - curr_vp_pa) / vapor_resistance_coeff;
+                        if vapor_r > 1e-12 * pa_s_per_kg {
+                            let nbr_vp = nbr_curr.cell_vp;
+                            let vc = 1.0 / vapor_r;
+                            vapor_diffusion_net_flux += (nbr_vp - curr_vp_pa) / vapor_r;
+                            vpoosum += vc;
+                            vporsum += nbr_vp * vc;
+                        }
+
+                        let overlap_area = cell_curr.size.area_along(0).min(nbr_curr.size.area_along(0));
+                        let rh_r1: MassResistance<f64> =
+                            if cell_curr.dw > 1e-20 * m2_per_s && cell_curr.dwd_phi > 1e-20 * kg_per_m3 {
+                                (cell_curr.size.x().abs() * 0.5)
+                                    / (overlap_area * cell_curr.dw * cell_curr.dwd_phi)
+                            } else {
+                                0.0f64 * s_per_kg
+                            };
+                        let rh_r2: MassResistance<f64> =
+                            if nbr_curr.dw > 1e-20 * m2_per_s && nbr_curr.dwd_phi > 1e-20 * kg_per_m3 {
+                                (nbr_curr.size.x().abs() * 0.5)
+                                    / (overlap_area * nbr_curr.dw * nbr_curr.dwd_phi)
+                            } else {
+                                0.0f64 * s_per_kg
+                            };
+                        let r_total: Quantity<f64, _> = (rh_r1 + rh_r2) * dimensionless;
+                        if r_total < f64::MAX * dimensionless / kg_per_s
+                            && r_total > 1e-13 * dimensionless / kg_per_s
+                        {
+                            let cond: MassFlux<f64> = 1.0 / r_total;
+                            phioosum += cond;
+                            phiorsum += nbr_curr.cell_rh * cond;
                         }
                     }
 
-                    let density = cell_curr.density;
-                    let spech = cell_curr.spech;
-                    let volumetric_water = cell_curr.volumetric_water;
-                    let volume = cell_curr.volume;
+                    // =========================================================
+                    // Cell-level scalars (independent of solver path)
+                    // =========================================================
+                    let tcap_j_per_k = (cell_curr.density * cell_curr.spech
+                        + cell_curr.volumetric_water * WATER_SPECIFIC_HEAT)
+                        * cell_curr.volume;
 
-                    let tcap_j_per_k =
-                        (density * spech + volumetric_water * WATER_SPECIFIC_HEAT) * volume;
-
-                    let mut q_vapor: Power<f64> = 0.0 * watts;
-                    if is_material && settings.latent_heat_enabled {
-                        q_vapor = vapor_diffusion_net_flux * WATER_LATENT_HEAT;
-
-                        if q_vapor.abs() > settings.max_latent_heat {
-                            q_vapor = q_vapor.value_in(watts).signum() * settings.max_latent_heat;
-                        }
-                    }
+                    let wcap = if cell_curr.dwd_phi > 1e-10 * kg_per_m3 {
+                        cell_curr.dwd_phi * cell_curr.volume
+                    } else {
+                        debug!(
+                            "Cell {} has very low dwd_phi, using fallback moisture capacity to prevent instability",
+                            i
+                        );
+                        1.0e-10 * kilograms
+                    };
 
                     let q_weight = surface_curr
                         .user_defined_cell_idx
@@ -272,10 +301,7 @@ impl Surface {
                         .unwrap_or(0.0);
                     let q_adds = bc.q_addition_userdef * q_weight;
 
-                    // Deposit absorbed radiation (QABSI + QABSILW - QWG from TRNBuild) into the
-                    // boundary-adjacent material cell, not the massless Virtual cell.
-                    // Real surfaces absorb shortwave/longwave flux in the outermost material layer;
-                    // placing it in the Virtual cell had no thermal effect (zero mass, zero storage).
+                    // Deposit absorbed radiation into the boundary-adjacent material cell.
                     let q_boundary_energy: Power<f64> =
                         if Some(i) == surface_curr.interior_surface_material_idx {
                             bc.additional_energy_int
@@ -285,131 +311,161 @@ impl Surface {
                             0.0 * watts
                         };
 
-                    let denom_t = oorsum + (tcap_j_per_k / dt_s);
-
-                    let t_next = if denom_t > 1e-10 * w_per_k {
-                        let prev_temp_k = cell_prev.cell_temp;
-                        let inertial_term: Power<f64> = tcap_j_per_k * prev_temp_k / dt_s;
-                        let numer = torsum + q_vapor + q_adds + q_boundary_energy + inertial_term;
-                        numer / denom_t
-                    } else {
-                        cell_curr.cell_temp
-                    };
-                    let t_next = if t_next.value_in(kelvin).is_finite() {
-                        t_next
-                    } else {
-                        cell_curr.cell_temp
-                    };
-
-                    // ==========================================
-                    // 2. Moisture Calculation (Calculate RH_next)
-                    // ==========================================
-
-                    let mut phioosum: MassFlux<f64> = 0.0 * kg_per_s; // sum(1/R_liquid)
-                    let mut phiorsum: MassFlux<f64> = 0.0 * kg_per_s; // sum(phi_nb/R_liquid)
-                    let mut vpoosum: VaporConductance<f64> = 0.0 * kg_per_s / pascals; // sum(1/R_vapor)
-                    let mut vporsum: MassFlux<f64> = 0.0 * kg_per_s; // sum(P_v_nb/R_vapor)
-
-
-                    // Taylor Series Linearization for Vapor Pressure:
-                    // P_v^{n+1} \approx P_v^n + \left. \frac{\partial P_v}{\partial \phi} \right|^n (\phi^{n+1} - \phi^n) + \left. \frac{\partial P_v}{\partial T} \right|^n (T^{n+1} - T^n)
-                    // gives:
-                    // P_v^{n+1} \approx P_{sat}(T^n) \cdot \phi^{n+1} + \phi^n \cdot \frac{d P_{sat}}{d T}(T^n) \cdot (T^{n+1} - T^n)
-
                     let t_curr = cell_curr.cell_temp;
-                    let t_curr_c = kelvin_to_celsius(t_curr);
-                    let vpsat_curr = physics::psy_psat_fn_temp(t_curr);
-                    // Approximate derivative using Magnus formula: dP_sat/dT ≈ P_sat * 17.27 * 237.3 / (T + 237.3)^2
-                    let denom_magnus = t_curr_c + 237.3;
-                    let d_psat_d_t = if denom_magnus > ECLIPSE {
-                        vpsat_curr * 17.27 * 237.3 / (denom_magnus * denom_magnus)
-                    } else {
-                        0.0 * pascals
-                    };
+                    let vpsat_curr = cell_curr.vp_sat;
+                    // dPsat/dT [Pa/K] pre-cached in calc_dependent_state (Magnus formula)
+                    let d_psat_d_t = cell_curr.d_psat_d_t;
 
-                    let delta_t_val = (t_next - t_curr).value_in(kelvin);
+                    // =========================================================
+                    // Solve for (T_next, RH_next)
+                    // =========================================================
+                    let (t_next, rh_next);
 
-                    // Correction term for P_v due to temperature change: phi_curr * dPsat/dT * dt
-                    let p_sat_thermal_correction = cell_curr.cell_rh.value() * d_psat_d_t * delta_t_val;
+                    if settings.coupled_heat_moisture_enabled && is_material && settings.latent_heat_enabled {
+                        // ── Symmetric 2×2 block solve ─────────────────────────────────────────
+                        //
+                        // Linearise P_v,i^{k+1} ≈ Psat(T^k)·φ^{k+1} + φ^k·(dPsat/dT)·(T^{k+1}−T^k)
+                        //
+                        // System (all quantities in SI, raw f64):
+                        //
+                        //  ┌ A_tt  A_tp ┐ ┌ T_next ┐   ┌ b_t ┐
+                        //  └ A_pt  A_pp ┘ └ φ_next ┘ = └ b_p ┘
+                        //
+                        // where:
+                        //   A_tt = oorsum + tcap/dt + L_eff·vpoosum·φ_k·(dPsat/dT)  [W/K]
+                        //   A_tp = L_eff·vpoosum·Psat                                [W]
+                        //   A_pt = vpoosum·φ_k·(dPsat/dT)                           [kg/(s·K)]
+                        //   A_pp = phioosum + vpoosum·Psat + wcap/dt                 [kg/s]
+                        //   b_t  = torsum + q_adds + q_bnd + (tcap/dt)·T_prev
+                        //          + L_eff·(vporsum + A_pt·T_k)                      [W]
+                        //   b_p  = phiorsum + vporsum + (wcap/dt)·φ_prev + A_pt·T_k [kg/s]
+                        //
+                        // L_eff = L_v + H_diff(φ) — see uom.rs constant WATER_LATENT_HEAT
+                        // (2,489,000 J/kg) plus the optional per-material sorption enthalpy.
 
-                    const RELAXATION_FACTOR: f64 = 1.0; // Empirical factor to prevent overshooting in RH update
-                    let vpsat_old = physics::psy_psat_fn_temp(cell_prev.cell_temp);
-                    let vpsat_pa_val = vpsat_curr * RELAXATION_FACTOR + vpsat_old * (1.0 - RELAXATION_FACTOR);
-
-                    for nbr_i in surface_curr.neighbor_indices(i, nx) {
-                        let nbr_curr = &surface_curr.cells[[nbr_i, 0, 0]];
-                        let (_, vaporr) =
-                        // Should be vaporr1 + vaporr2
-                            Self::calculate_resistance_pair(cell_curr, nbr_curr, bc.pressure_air);
-
-                        if vaporr > 1e-13 * pa_s_per_kg {
-                            let vapor_conductance = 1.0 / vaporr;
-                            vpoosum += vapor_conductance;
-
-                            vporsum += nbr_curr.cell_vp * vapor_conductance;
-                        }
-
-                        let overlap_area = cell_curr
-                            .size
-                            .area_along(0)
-                            .min(nbr_curr.size.area_along(0));
-
-                        let dw1: LiquidTransportCoeff<f64> = cell_curr.dw;
-                        let dwd_phi1: Density<f64> = cell_curr.dwd_phi;
-                        let dw2: LiquidTransportCoeff<f64> = nbr_curr.dw;
-                        let dwd_phi2: Density<f64> = nbr_curr.dwd_phi;
-
-                        let rh_r1: MassResistance<f64> =
-                            if dw1 > 1e-20 * m2_per_s && dwd_phi1 > 1e-20 * kg_per_m3 {
-                                (cell_curr.size.x().abs() * 0.5) / (overlap_area * dw1 * dwd_phi1)
+                        // L_eff [J/kg] as a raw scalar
+                        // WATER_LATENT_HEAT = 2_489_000 J/kg (from uom::constants)
+                        let l_eff_f: f64 = 2_489_000.0
+                            + if settings.sorption_enthalpy_enabled {
+                                cell_curr.h_sorp_diff.value_in(j_per_kg)
                             } else {
-                                0.0f64 * s_per_kg
+                                0.0
                             };
 
-                        let rh_r2: MassResistance<f64> = if dw2 > 1e-20 * m2_per_s && dwd_phi2 > 1e-20 * kg_per_m3 {
-                            (nbr_curr.size.x().abs() * 0.5) / (overlap_area * dw2 * dwd_phi2)
+                        let oorsum_f  = oorsum.value_in(w_per_k);
+                        let torsum_f  = torsum.value_in(watts);
+                        let vpoosum_f = vpoosum.value_in(kg_per_s / pascals);
+                        let vporsum_f = vporsum.value_in(kg_per_s);
+                        let phioosum_f = phioosum.value_in(kg_per_s);
+                        let phiorsum_f = phiorsum.value_in(kg_per_s);
+                        let tcap_f    = tcap_j_per_k.value_in(j_per_k);
+                        let wcap_f    = wcap.value_in(kilograms);
+                        let dt_f      = dt_s.value_in(seconds);
+                        let psat_f    = vpsat_curr.value_in(pascals);
+                        let dpsat_f   = d_psat_d_t.value_in(pascals); // Pa/K (as Pa)
+                        let phi_k     = cell_curr.cell_rh.value();
+                        let phi_prev  = cell_prev.cell_rh.value();
+                        let t_k       = t_curr.value_in(kelvin);
+                        let t_prev_f  = cell_prev.cell_temp.value_in(kelvin);
+                        let q_adds_f  = q_adds.value_in(watts);
+                        let q_b_f     = q_boundary_energy.value_in(watts);
+
+                        // cross = vpoosum · φ_k · dPsat/dT  [kg/(s·K)]
+                        let cross = vpoosum_f * phi_k * dpsat_f;
+
+                        let a_tt = oorsum_f + tcap_f / dt_f + l_eff_f * cross;
+                        let a_tp = l_eff_f * vpoosum_f * psat_f;
+                        let a_pt = cross;
+                        let a_pp = phioosum_f + vpoosum_f * psat_f + wcap_f / dt_f;
+
+                        let b_t = torsum_f + q_adds_f + q_b_f
+                            + (tcap_f / dt_f) * t_prev_f
+                            + l_eff_f * (vporsum_f + cross * t_k);
+                        let b_p = phiorsum_f + vporsum_f
+                            + (wcap_f / dt_f) * phi_prev
+                            + cross * t_k;
+
+                        let det = a_tt * a_pp - a_tp * a_pt;
+
+                        let (t_k_next, phi_next) = if det.abs() > 1e-30 {
+                            let t_n = (b_t * a_pp - a_tp * b_p) / det;
+                            let p_n = (a_tt * b_p - a_pt * b_t) / det;
+                            (t_n, p_n)
                         } else {
-                            0.0f64 * s_per_kg
+                            // Near-singular (e.g. no vapor coupling): fall back to current state;
+                            // the outer relaxation loop will converge on next iteration.
+                            (t_k, phi_k)
                         };
 
-                        let r_total: Quantity<f64, _> = (rh_r1 + rh_r2) * dimensionless;
-
-                        if r_total < f64::MAX * dimensionless / kg_per_s && r_total > 1e-13 * dimensionless / kg_per_s {
-                            let conductance: MassFlux<f64> = 1.0 / r_total;
-                            phioosum += conductance;
-                            phiorsum += nbr_curr.cell_rh * conductance;
+                        t_next = if t_k_next.is_finite() {
+                            t_k_next * kelvin
+                        } else {
+                            t_curr
+                        };
+                        rh_next = if phi_next.is_finite() {
+                            phi_next * dimensionless
+                        } else {
+                            cell_curr.cell_rh
+                        };
+                    } else {
+                        // ── Legacy sequential scalar solve ────────────────────────────────────
+                        // Reproduce the pre-coupling behaviour exactly when flag is false.
+                        // Taylor Series Linearization for Vapor Pressure:
+                        // P_v^{k+1} ≈ Psat(T^k)·φ^{k+1} + φ^k·(dPsat/dT)·(T^{k+1} − T^k)
+                        let mut q_vapor: Power<f64> = 0.0 * watts;
+                        if is_material && settings.latent_heat_enabled {
+                            q_vapor = vapor_diffusion_net_flux * WATER_LATENT_HEAT;
+                            if settings.sorption_enthalpy_enabled {
+                                q_vapor += vapor_diffusion_net_flux * cell_curr.h_sorp_diff;
+                            }
+                            if q_vapor.abs() > settings.max_latent_heat {
+                                q_vapor =
+                                    q_vapor.value_in(watts).signum() * settings.max_latent_heat;
+                            }
                         }
+
+                        let denom_t = oorsum + tcap_j_per_k / dt_s;
+                        let t_next_s = if denom_t > 1e-10 * w_per_k {
+                            let inertial = tcap_j_per_k * cell_prev.cell_temp / dt_s;
+                            (torsum + q_vapor + q_adds + q_boundary_energy + inertial) / denom_t
+                        } else {
+                            t_curr
+                        };
+                        t_next = if t_next_s.value_in(kelvin).is_finite() {
+                            t_next_s
+                        } else {
+                            t_curr
+                        };
+
+                        // Moisture: thermal correction uses the just-computed t_next
+                        let delta_t_val = (t_next - t_curr).value_in(kelvin);
+                        let p_sat_thermal_correction =
+                            cell_curr.cell_rh.value() * d_psat_d_t * delta_t_val;
+                        let thermal_source_term = vpoosum * p_sat_thermal_correction;
+                        let denom_rh: MassFlux<f64> =
+                            phioosum + vpoosum * vpsat_curr + wcap / dt_s;
+
+                        let rh_next_s = if denom_rh > 1e-20 * kg_per_s {
+                            (phiorsum + vporsum + (wcap * cell_prev.cell_rh.value()) / dt_s
+                                - thermal_source_term)
+                                / denom_rh
+                        } else {
+                            debug!(
+                                "Cell {} has very low moisture conductance {:?}, using fallback RH to prevent instability",
+                                i, denom_rh
+                            );
+                            cell_curr.cell_rh
+                        };
+                        rh_next = if rh_next_s.value().is_finite() {
+                            rh_next_s
+                        } else {
+                            debug!(
+                                "Cell {} has non-finite RH_next {:?}, using fallback RH to prevent instability",
+                                i, rh_next_s
+                            );
+                            cell_curr.cell_rh
+                        };
                     }
-
-                    // Moisture Capacity
-                    let wcap:Mass<f64> = if cell_curr.dwd_phi > 1e-10 * kg_per_m3 {
-                        cell_curr.dwd_phi * cell_curr.volume
-                    } else {
-                        debug!("Cell {} has very low dwd_phi, using fallback moisture capacity to prevent instability", i);
-                        1.0e-10 * kilograms // 防止除零
-                    };
-
-                    // RH_next
-                    // P_v_next = P_sat(T_next) * RH_next
-                    // Eq: (phioosum + vpoosum * Psat) * RH_next = phiorsum + vporsum + (wcap/dt)*RH_prev
-
-                    let inertia_term = (wcap * cell_prev.cell_rh.value()) / dt_s;
-                    // subtract the thermal correction term from LHS P_v expansion
-                    let thermal_source_term = vpoosum * p_sat_thermal_correction;
-                    let denom_rh:MassFlux<f64> = phioosum + (vpoosum * vpsat_pa_val) + (wcap / dt_s);
-
-                    let rh_next = if denom_rh > 1e-20 * kg_per_s {
-                        (phiorsum + vporsum + inertia_term - thermal_source_term) / denom_rh
-                    } else {
-                        debug!("Cell {} has very low moisture conductance {:?}, using fallback RH to prevent instability", i, denom_rh);
-                        cell_curr.cell_rh
-                    };
-                    let rh_next = if rh_next.value().is_finite() {
-                        rh_next
-                    } else {
-                        debug!("Cell {} has non-finite RH_next {:?}, using fallback RH to prevent instability", i, rh_next);
-                        cell_curr.cell_rh
-                    };
 
                     (t_next, rh_next)
                 } else {

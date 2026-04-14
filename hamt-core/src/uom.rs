@@ -196,6 +196,13 @@ pub const DIM_LIQUID_TRANSPORT_COEFF: Dimension = Dimension {
     temperature: 0,
 };
 
+pub const DIM_SPECIFIC_ENERGY: Dimension = Dimension {
+    length: 2,
+    time: -2,
+    mass: 0,
+    temperature: 0,
+};
+
 pub const DIM_VAPOR_TRANSPORT_COEFF: Dimension = Dimension {
     length: -2,
     time: -1,

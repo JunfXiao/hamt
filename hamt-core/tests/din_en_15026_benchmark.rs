@@ -307,6 +307,7 @@ fn create_library(
         redistribution: get_liquid_transport_coeff_curve(),
         sorption_isotherm: sorption_isotherm,
         vapor_diffusion_resistance: get_vapor_diffusion_curve(),
+        sorption_enthalpy: None,
         initial_temp: celsius_to_kelvin(init_temp_celsius),
         num_div: None,
         div_distribution_factor: 0.3,

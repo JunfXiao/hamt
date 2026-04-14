@@ -4,11 +4,14 @@
 
 use strum::Display;
 
-use crate::boundary::celsius_to_kelvin;
+use crate::boundary::{celsius_to_kelvin, kelvin_to_celsius};
+use crate::uom::units::pascals;
 use crate::uom::dimensions::{
     Density, Dimensionless, HeatTransferCoeff, LiquidTransportCoeff, Power, Pressure,
-    SpecificHeatCapacity, Temperature, ThermalConductivity, VaporTransportCoeff, Volume,
+    SpecificEnergy, SpecificHeatCapacity, Temperature, ThermalConductivity, VaporTransportCoeff,
+    Volume,
 };
+use crate::uom::units::j_per_kg;
 use crate::{
     boundary::BoundaryCondition,
     hamt_manager::HamtSettings,
@@ -153,10 +156,24 @@ pub struct Cell {
     /// Updated by [Cell::calc_dependent_state]
     pub vp_sat: Pressure<f64>,
 
+    /// Derivative of saturation vapor pressure w.r.t. temperature [Pa/K] (Magnus approximation).
+    ///
+    /// Stored as `Pressure<f64>` (the per-Kelvin factor is implicit; multiply by ΔT [K] to get ΔP [Pa]).
+    ///
+    /// Updated by [Cell::calc_dependent_state]
+    pub d_psat_d_t: Pressure<f64>,
+
     /// Volumetric water content [kg/m³ Material]. Updated each iteration.
     ///
     /// Updated by [Cell::calc_dependent_state]
     pub volumetric_water: Density<f64>,
+
+    /// Differential heat of sorption at current RH [J/kg].
+    ///
+    /// Zero for non-hygroscopic materials or when the material provides no sorption-enthalpy curve.
+    ///
+    /// Updated by [Cell::calc_dependent_state]
+    pub h_sorp_diff: SpecificEnergy<f64>,
 
     /// Per-cell under-relaxation factor for nonlinear iteration (0 < α ≤ 1).
     /// Starts at 1.0 (no relaxation). Reduced adaptively toward the global
@@ -184,7 +201,9 @@ impl Default for Cell {
             cell_rh: Default::default(),
             cell_vp: Default::default(),
             vp_sat: Default::default(),
+            d_psat_d_t: Default::default(),
             volumetric_water: Default::default(),
+            h_sorp_diff: Default::default(),
             relaxation_factor: 1.0,
         }
     }
@@ -248,6 +267,15 @@ impl Cell {
 
         self.vp_sat = vp_sat_pa;
 
+        // Magnus-formula derivative: dP_sat/dT ≈ P_sat · 17.27 · 237.3 / (T_°C + 237.3)²
+        let t_c = kelvin_to_celsius(t_self);
+        let denom_magnus = t_c + 237.3;
+        self.d_psat_d_t = if denom_magnus > physics::ECLIPSE {
+            vp_sat_pa * 17.27 * 237.3 / (denom_magnus * denom_magnus)
+        } else {
+            0.0 * pascals
+        };
+
         self.cell_vp = rh_self * vp_sat_pa;
 
         if let CellType::Material(mat) = &self.cell_type {
@@ -273,6 +301,14 @@ impl Cell {
             let (k, _) = mat.thermal_conductivity.interpolate(water);
 
             self.w_thermal_c = k;
+
+            self.h_sorp_diff = match &mat.sorption_enthalpy {
+                Some(curve) => {
+                    let (h, _) = curve.interpolate(rh_self);
+                    if h.value_in(j_per_kg) >= 0.0 { h } else { 0.0 * j_per_kg }
+                }
+                None => 0.0 * j_per_kg,
+            };
         }
     }
 
@@ -288,7 +324,9 @@ impl Cell {
         self.cell_rh = ref_cell.cell_rh;
         self.cell_vp = ref_cell.cell_vp;
         self.vp_sat = ref_cell.vp_sat;
+        self.d_psat_d_t = ref_cell.d_psat_d_t;
         self.volumetric_water = ref_cell.volumetric_water;
+        self.h_sorp_diff = ref_cell.h_sorp_diff;
         self.relaxation_factor = ref_cell.relaxation_factor;
     }
 }

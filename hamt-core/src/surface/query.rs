@@ -8,7 +8,7 @@ use crate::{
             VaporResistance,
         },
         units::{
-            dimensionless, k_per_w, kg_per_hr, kg_per_m2_s_pa, kg_per_s, meter, square_meter, w_per_m2_k
+            dimensionless, k_per_w, kg_per_hr, kg_per_m2_s_pa, kg_per_s, meter, pa_s_per_kg, square_meter, w_per_m2_k
         },
     },
 };
@@ -523,7 +523,7 @@ impl Surface {
                 cell1.cell_type,
                 cell2.cell_type
             );
-            return (Quantity(1e100), Quantity(1e100));
+            return (1e100 * k_per_w, 1e100 * pa_s_per_kg);
         }
 
         if dist1 <= ECLIPSE * meter || dist2 <= ECLIPSE * meter {
@@ -535,7 +535,7 @@ impl Surface {
                 cell1.cell_type,
                 cell2.cell_type
             );
-            return (0.0 * k_per_w, 0.0 * k_per_w);
+            return (0.0 * k_per_w, 0.0 * pa_s_per_kg);
         }
 
         let htc1 = cell1.htc;
@@ -567,7 +567,7 @@ impl Surface {
             (dist1 * cell1.mu)
                 / (overlap * physics::water_vapor_permeability_coeff(cell1.cell_temp, pressure_air))
         } else {
-            Quantity(0.0)
+            0.0 * pa_s_per_kg
         };
         let vtc2 = cell2.vtc;
         let vaporr2: VaporResistance<f64> = if vtc2 > VaporTransportCoeff::<f64>::zero() {
@@ -576,7 +576,7 @@ impl Surface {
             (dist2 * cell2.mu)
                 / (overlap * physics::water_vapor_permeability_coeff(cell2.cell_temp, pressure_air))
         } else {
-            Quantity(0.0)
+            0.0 * pa_s_per_kg
         };
 
         (thermr1 + thermr2, vaporr1 + vaporr2)

@@ -509,6 +509,20 @@ pub struct HamtSettings {
     /// this floor. Lower values allow more aggressive damping at the cost of
     /// slower convergence.
     pub min_relaxation_factor: f64,
+
+    /// Enable symmetric 2×2 heat–moisture block solve.
+    ///
+    /// When `true`, the energy equation is linearized to include the T↔φ cross-coupling
+    /// term through P_sat, giving symmetric first-order coupling in both directions.
+    /// Set to `false` to reproduce the legacy staggered (lagged) scheme exactly.
+    pub coupled_heat_moisture_enabled: bool,
+
+    /// Enable differential sorption-enthalpy contribution to latent heat.
+    ///
+    /// When `true` and a material provides a `sorption_enthalpy` curve, the effective
+    /// latent heat used in the energy balance is `L_v + H_diff(φ)` instead of `L_v` alone.
+    /// Has no effect if no material in the construction provides the curve.
+    pub sorption_enthalpy_enabled: bool,
 }
 
 impl Default for HamtSettings {
@@ -529,6 +543,8 @@ impl Default for HamtSettings {
             div_distribution_factor: 0.5,
             user_defined_depth: None,
             min_relaxation_factor: 0.5,
+            coupled_heat_moisture_enabled: true,
+            sorption_enthalpy_enabled: true,
         }
     }
 }

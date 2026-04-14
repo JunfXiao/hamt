@@ -12,7 +12,7 @@ use crate::{
     error::{Error, InvalidInputReason},
     physics::Curve,
     uom::{
-        DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT,
+        DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_SPECIFIC_ENERGY, DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT,
         Quantity,
         dimensions::{Density, Dimensionless, Length, SpecificHeatCapacity, Temperature},
     },
@@ -86,6 +86,16 @@ pub struct Material {
     /// - Y: Thermal Conductivity [W/mK]
     pub thermal_conductivity: Curve<DIM_WATER_CONTENT, DIM_THERMAL_CONDUCTIVITY>,
 
+    /// Differential heat of sorption curve (extra heat released on adsorption, beyond L_v).
+    ///
+    /// - X: Relative Humidity [-]
+    /// - Y: Differential heat of sorption [J/kg]
+    ///
+    /// Optional: when `None`, pure L_v is used (legacy behavior). Only relevant for
+    /// hygroscopic materials (wood, gypsum, cellulose); non-hygroscopic materials
+    /// (mineral wool, foams) leave this as `None`.
+    pub sorption_enthalpy: Option<Curve<DIM_DIMENSIONLESS, DIM_SPECIFIC_ENERGY>>,
+
     // Discretization parameters
     /// Initial temperature for cells of this material [°C].
     pub initial_temp: Temperature<f64>,
@@ -128,6 +138,7 @@ impl Default for Material {
             redistribution: Curve::default(),
             vapor_diffusion_resistance: Curve::default(),
             thermal_conductivity: Curve::default(),
+            sorption_enthalpy: None,
             initial_temp: celsius_to_kelvin(20.0),
             num_div: None,
             div_distribution_factor: 0.7,
