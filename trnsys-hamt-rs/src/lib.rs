@@ -3,7 +3,6 @@
 
 use crate::logging::init_tracing;
 use crate::trnsys::error::ErrorHandler;
-use crate::trnsys::logging::cleanup_tracing;
 use crate::trnsys_type::TrnSysType;
 use anyhow::Result;
 use fpu_guard::fpu_guard::FpuGuard;
@@ -86,7 +85,6 @@ fn main(mut state: &mut TrnSysState) -> Result<()> {
 
     if is_last_call_of_simulation() {
         type_instance.simulation_ends(&mut state)?;
-        cleanup_tracing();
         return Ok(());
     }
 

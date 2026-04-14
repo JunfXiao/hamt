@@ -138,24 +138,21 @@ impl<S: Subscriber> Layer<S> for TrnSysLogLayer {
     }
 }
 
-/// Returns the default log file name.
-/// Usually it is a file under temp directory,
-/// with a name like "trnsys_{Timestamp}.log".
+/// Returns the default log file name under the current directory.
 pub fn get_default_log_file() -> String {
-    let timestamp = SystemTime::now();
 
     let file_name = format!(
-        "trnsys_{}_{}.log",
+        "type_{}_{}.log",
         TYPE_NUMBER,
-        timestamp.duration_since(UNIX_EPOCH).unwrap().as_secs()
+        get_current_unit()
     );
-
-    let temp_dir = std::env::temp_dir();
-    temp_dir
-        .join(file_name)
+    let cwd = std::env::current_dir().unwrap_or(std::env::temp_dir());
+    
+    cwd.join(file_name)
         .to_str()
         .expect("Failed to get log file name")
         .to_string()
+
 }
 
 struct UnitNoFmt<F>(F);
@@ -182,6 +179,10 @@ where
 
 static LOGFILE_PATH: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
 
+pub fn is_tracing_initialized() -> bool {
+    LOGFILE_PATH.try_lock().map(|l|l.is_some()).unwrap_or(true)
+}
+
 /// Initializes tracing with custom layers and settings.
 ///
 /// # Arguments
@@ -197,7 +198,8 @@ pub fn init_tracing(file_name: Option<String>) {
     // Open (or create) the log file
     let log_file = OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(file_name)
         .expect("Failed to open log file");
 
@@ -233,40 +235,7 @@ pub fn init_tracing(file_name: Option<String>) {
     // panic hook
     std::panic::set_hook(Box::new(|panic_info| {
         error!("TrnSys Type Panicked: {:#}", panic_info);
-        cleanup_tracing();
+
     }));
 }
 
-/// Cleans up the tracing system.
-/// Removes the log file if it exists.
-/// If any error stops the simulation, the log file will be moved to simulation folder instead.
-pub fn cleanup_tracing() {
-    let mut log_file_path = LOGFILE_PATH.lock().unwrap();
-
-    if let Some(file_path) = log_file_path.as_ref() {
-        if simulation_has_error() {
-            // Move the log file to the current working directory
-            let new_file_path = std::env::current_dir()
-                .expect("Failed to get current directory")
-                .join(format!("type_{}_error.log", TYPE_NUMBER));
-            let new_file_path_str = new_file_path.clone().to_str().unwrap().to_owned();
-            // remove if the file already exists
-            if new_file_path.exists() {
-                std::fs::remove_file(&new_file_path).expect("Failed to remove existing log file");
-            }
-            std::fs::copy(file_path, &new_file_path).expect("Failed to move log file");
-            log_in_trnsys(
-                Level::INFO,
-                None,
-                &format!(
-                    "Simulation stopped due to error. Log file moved to current directory: {}",
-                    new_file_path_str
-                ),
-            );
-        }
-
-        std::fs::remove_file(file_path).expect("Failed to remove log file");
-
-        *log_file_path = None;
-    }
-}
