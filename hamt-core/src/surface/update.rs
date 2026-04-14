@@ -15,6 +15,7 @@ use anyhow::Result;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+
 impl Surface {
     /// Executes a single iteration of the HAMT simulation for a single timestep.
     /// `self` is the **only** writable `surface_next`.
@@ -147,11 +148,18 @@ impl Surface {
                             // h_rad = 4 σ ε T_m³, T_m ≈ mean of surface and TMR.
                             // Use the adjacent interior material cell's current temperature as the
                             // surface proxy.
-                            let t_s = interior_mat_temp.unwrap_or(bc.temp_inside_mean_radiant);
-                            let t_m_k = (t_s + bc.temp_inside_mean_radiant) * 0.5;
-                            let t_m_cubed = t_m_k.value_in(kelvin).powi(3);
-                            let h_rad =
-                                4.0 * physics::SIGMA * physics::EPSILON * t_m_cubed * w_per_m2_k;
+                            // Legacy decks (<14 Type395 inputs) keep using the combined
+                            // REQV-derived h_conv on the Convection cell; the Radiation cell
+                            // must then be inert (h_rad = 0) so the refactor is byte-identical
+                            // to the pre-refactor single-potential behaviour.
+                            let h_rad = if bc.has_separate_radiant_int {
+                                let t_s = interior_mat_temp.unwrap_or(bc.temp_inside_mean_radiant);
+                                let t_m_k = (t_s + bc.temp_inside_mean_radiant) * 0.5;
+                                let t_m_cubed = t_m_k.value_in(kelvin).powi(3);
+                                4.0 * physics::SIGMA * physics::EPSILON * t_m_cubed * w_per_m2_k
+                            } else {
+                                HeatTransferCoeff::<f64>::zero()
+                            };
                             cell.htc = h_rad;
                             cell.cell_temp = bc.temp_inside_mean_radiant;
                             cell.vtc = VaporTransportCoeff::<f64>::zero();
@@ -203,7 +211,9 @@ impl Surface {
                     // ==========================================
                     // 1. Heat Calculation (Calculate T_next)
                     // ==========================================
+                    // oorsum: over sum of 1/R_thermal to neighbors
                     let mut oorsum: ThermalConductance<f64> = 0.0 * w_per_k;
+                    // torsum: over sum of T_neighbor/R_thermal to neighbors
                     let mut torsum: Power<f64> = 0.0 * watts;
                     let mut vapor_diffusion_net_flux: MassFlux<f64> = 0.0 * kilograms / seconds;
 
@@ -375,6 +385,7 @@ impl Surface {
                     let wcap:Mass<f64> = if cell_curr.dwd_phi > 1e-10 * kg_per_m3 {
                         cell_curr.dwd_phi * cell_curr.volume
                     } else {
+                        debug!("Cell {} has very low dwd_phi, using fallback moisture capacity to prevent instability", i);
                         1.0e-10 * kilograms // 防止除零
                     };
 
@@ -390,11 +401,13 @@ impl Surface {
                     let rh_next = if denom_rh > 1e-20 * kg_per_s {
                         (phiorsum + vporsum + inertia_term - thermal_source_term) / denom_rh
                     } else {
+                        debug!("Cell {} has very low moisture conductance {:?}, using fallback RH to prevent instability", i, denom_rh);
                         cell_curr.cell_rh
                     };
                     let rh_next = if rh_next.value().is_finite() {
                         rh_next
                     } else {
+                        debug!("Cell {} has non-finite RH_next {:?}, using fallback RH to prevent instability", i, rh_next);
                         cell_curr.cell_rh
                     };
 

@@ -4,15 +4,18 @@ use crate::{
     uom::{
         Dimension, Quantity,
         dimensions::{
-            Density, HeatTransferCoeff, MassFlux, Pressure, ThermalConductivity, ThermalResistance, VaporResistance
+            Density, HeatTransferCoeff, MassFlux, Pressure, ThermalConductivity, ThermalResistance,
+            VaporResistance,
         },
-        units::{dimensionless, kg_per_m2_s_pa, meter, square_meter, w_per_m2_k, kg_per_hr, kg_per_s},
+        units::{
+            dimensionless, k_per_w, kg_per_hr, kg_per_m2_s_pa, kg_per_s, meter, square_meter, w_per_m2_k
+        },
     },
 };
 
 use super::*;
 use anyhow::{Context, Result};
-use tracing::warn;
+use tracing::debug;
 
 impl Surface {
     /// Compatibility helper for callers that previously expected a vector of surfaces.
@@ -149,10 +152,7 @@ impl Surface {
     ///
     /// If the target coordinate is outside the material cell range on any axis,
     /// it is clamped to the nearest cell (no extrapolation).
-    pub fn compute_interpolation_weights(
-        &self,
-        target: &Pt3D,
-    ) -> InterpolationWeights {
+    pub fn compute_interpolation_weights(&self, target: &Pt3D) -> InterpolationWeights {
         let dims = self.cells.raw_dim();
         let (nx, ny, nz) = (dims[0], dims[1], dims[2]);
 
@@ -188,11 +188,7 @@ impl Surface {
 
         // Helper: find bracket (lo_index, hi_index, fraction) for a target on one axis.
         // Returns grid indices (into the cells array) and the interpolation fraction.
-        fn find_bracket(
-            indices: &[usize],
-            coords: &[f64],
-            target: f64,
-        ) -> (usize, usize, f64) {
+        fn find_bracket(indices: &[usize], coords: &[f64], target: f64) -> (usize, usize, f64) {
             if indices.is_empty() {
                 return (0, 0, 0.0);
             }
@@ -319,7 +315,8 @@ impl Surface {
         if let Some(ref weights) = self.user_defined_cell_idx {
             let temp = Self::apply_interpolation_weights(&self.cells, weights, |c| c.cell_temp);
             let rh = Self::apply_interpolation_weights(&self.cells, weights, |c| c.cell_rh);
-            let water = Self::apply_interpolation_weights(&self.cells, weights, |c| c.volumetric_water);
+            let water =
+                Self::apply_interpolation_weights(&self.cells, weights, |c| c.volumetric_water);
             (temp, rh, water)
         } else {
             (Quantity(0.0), Quantity(0.0), Quantity(0.0))
@@ -388,7 +385,7 @@ impl Surface {
         Ok(if total_area > ECLIPSE * square_meter {
             total_flux / total_area
         } else {
-            warn!(
+            debug!(
                 "Total area for heat flux for {} calculation is too small: {:?}. Returning zero flux.",
                 location, total_area
             );
@@ -459,7 +456,7 @@ impl Surface {
         Ok(if total_area > 0.0 * square_meter {
             accum_flux / total_area
         } else {
-            warn!(
+            debug!(
                 "Total area for moisture flux for {} calculation is too small: {:?}. Returning zero flux.",
                 location, total_area
             );
@@ -515,13 +512,7 @@ impl Surface {
         cell2: &Cell,
         pressure_air: Pressure<f64>,
     ) -> (ThermalResistance<f64>, VaporResistance<f64>) {
-        let overlap: Area<f64> = Quantity(
-            cell1
-                .size
-                .area_along(0)
-                .value_unchecked()
-                .min(cell2.size.area_along(0).value_unchecked()),
-        );
+        let overlap: Area<f64> = cell1.size.area_along(0).min(cell2.size.area_along(0));
         let dist1 = cell1.size.x().abs() * 0.5;
         let dist2 = cell2.size.x().abs() * 0.5;
 
@@ -544,7 +535,7 @@ impl Surface {
                 cell1.cell_type,
                 cell2.cell_type
             );
-            return (Quantity(0.0), Quantity(0.0));
+            return (0.0 * k_per_w, 0.0 * k_per_w);
         }
 
         let htc1 = cell1.htc;
@@ -554,7 +545,7 @@ impl Surface {
         } else if k1 > ThermalConductivity::<f64>::zero() {
             dist1 / (k1 * overlap)
         } else {
-            Quantity(0.0)
+            0.0 * k_per_w
         };
         let htc2 = cell2.htc;
         let k2 = cell2.w_thermal_c;
@@ -565,7 +556,7 @@ impl Surface {
             // Conduction resistance
             dist2 / (k2 * overlap)
         } else {
-            Quantity(0.0)
+            0.0 * k_per_w
         };
 
         let vtc1 = cell1.vtc;

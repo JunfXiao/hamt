@@ -63,6 +63,12 @@ pub struct BoundaryCondition {
     /// component embedded in REQV-derived h_conv. [W/(m²·K)]
     pub heat_transfer_coeff_conv_int: HeatTransferCoeff<f64>,
 
+    /// True when the deck supplies the separated radiant coupling (TMR + HCONVI,
+    /// Type395 inputs 12 & 13). When false, legacy decks still use the combined
+    /// REQV-derived `heat_transfer_coeff_int` + TSTAR, and the interior Radiation
+    /// boundary cell must be inert (h_rad = 0) so legacy runs stay byte-identical.
+    pub has_separate_radiant_int: bool,
+
     /// External additional energy [W].
     pub additional_energy_ext: Power<f64>,
 
@@ -114,6 +120,7 @@ impl BoundaryCondition {
             additional_energy_int: q_additional_in * watts,
             q_addition_userdef: q_additional_userdef * watts,
             is_raining: false,
+            has_separate_radiant_int: false,
         }
     }
 }
@@ -140,6 +147,7 @@ impl Default for BoundaryCondition {
             additional_energy_int: 0.0 * watts,
             q_addition_userdef: 0.0 * watts,
             is_raining: false,
+            has_separate_radiant_int: false,
         }
     }
 }
@@ -183,6 +191,7 @@ impl BoundaryCondition {
             q_addition_userdef: self.q_addition_userdef * s + other.q_addition_userdef * t,
             // For booleans, use the end-of-timestep value (e.g. is_raining is an event flag).
             is_raining: other.is_raining,
+            has_separate_radiant_int: other.has_separate_radiant_int,
         }
     }
 }

@@ -524,6 +524,10 @@ impl TrnSysType {
             // Set the new decoupled interior thermal BCs (with legacy fallbacks).
             manager.boundary_condition.heat_transfer_coeff_conv_int = hconv_conv_int * kj_per_hr_m2_k;
             manager.boundary_condition.temp_inside_mean_radiant = celsius_to_kelvin(tmr_int);
+            // Enable the separated radiant path only when the deck supplies both inputs 12
+            // (HCONVI) and 13 (TMR). Legacy decks keep the inert Radiation cell so they
+            // remain byte-identical to the pre-refactor combined-potential behaviour.
+            manager.boundary_condition.has_separate_radiant_int = state.inputs.len() >= 14;
             // Lewis-analogy fallback: when the deck passes β_int = 0, derive it from the pure
             // convective HTC (HCONVI). 7e-9 [kg/(m²·s·Pa)] per [W/(m²·K)] is the Lewis-number
             // coefficient at ~20 °C used throughout the d18 deck.
