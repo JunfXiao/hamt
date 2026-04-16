@@ -94,7 +94,12 @@ impl TrnSysType {
 
         state.write_report = f64::from(&state.params[5]) > 0.0;
 
-        state.write_report_interval = (&state.params[6]).value * hours;
+        // to avoid floating point precision issue, truncate to 4 decimal places (0.0001 hours = 0.36 seconds)
+        state.write_report_interval = ((&state.params[6]).value * 1e4).round() / 1e4 * hours;
+        
+
+
+        info!("Write report: {}, interval: {} hours", state.write_report, state.write_report_interval.value_in(hours));
 
         let mut settings = HamtSettings {
             timestep: get_simulation_time_step() * hours,
@@ -486,25 +491,14 @@ impl TrnSysType {
         let q_additional_userdef = state.inputs[10].value;
         // Input 11 (optional): actual room air temperature TAIR for moisture VP_bc.
         // Falls back to T_int (TSTAR) when the deck still provides only 11 inputs.
-        let t_int_moisture = if state.inputs.len() >= 12 {
-            state.inputs[11].value
-        } else {
-            t_int
-        };
+        let t_int_moisture = state.inputs.get(11).map_or(t_int, |input| input.value);
         // Input 12 (optional): pure convective HTC [kJ/(hr·m²·K)] — NType 108 HCONVI.
         // Falls back to input 4 (combined hconv_int) when the deck still provides <13 inputs.
-        let hconv_conv_int = if state.inputs.len() >= 13 {
-            state.inputs[12].value
-        } else {
-            hconv_int
-        };
+        let hconv_conv_int = state.inputs.get(12).map_or(hconv_int, |input| input.value);
         // Input 13 (optional): mean radiant temperature [°C] — NType 120 TMR.
         // Falls back to input 0 (TSTAR) when the deck still provides <14 inputs.
-        let tmr_int = if state.inputs.len() >= 14 {
-            state.inputs[13].value
-        } else {
-            t_int
-        };
+        let tmr_int = state.inputs.get(13).map_or(t_int, |input| input.value);
+
 
         if let Some(manager) = &mut state.hamt_manager {
             manager.boundary_condition.temp_inside_air = celsius_to_kelvin(t_int);
