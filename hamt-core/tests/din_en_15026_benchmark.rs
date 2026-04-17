@@ -382,9 +382,14 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
             ..Default::default()
         };
 
+        // DIN EN 15026 specifies a single ambient state per side (heat and moisture
+        // match). Set both *_air and *_air_moisture explicitly so the test doesn't
+        // depend on Default::default() leaving a 20 °C moisture-side fallback.
         let boundary_condition_init = BoundaryCondition {
             temp_outside_air: celsius_to_kelvin(20.0),
             temp_inside_air: celsius_to_kelvin(20.0),
+            temp_outside_air_moisture: celsius_to_kelvin(20.0),
+            temp_inside_air_moisture: celsius_to_kelvin(20.0),
             rh_outside_air: 0.5 * dimensionless,
             rh_inside_air: 0.5 * dimensionless,
             ..boundary_coeff
@@ -393,6 +398,8 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         let boundary_condition = BoundaryCondition {
             temp_outside_air: celsius_to_kelvin(30.0),
             temp_inside_air: celsius_to_kelvin(20.0),
+            temp_outside_air_moisture: celsius_to_kelvin(30.0),
+            temp_inside_air_moisture: celsius_to_kelvin(20.0),
             rh_outside_air: 0.95 * dimensionless,
             rh_inside_air: 0.5 * dimensionless,
             ..boundary_coeff

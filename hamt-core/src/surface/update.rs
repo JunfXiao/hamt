@@ -123,10 +123,13 @@ impl Surface {
                 } else {
                     match &cell.cell_type {
                         CellType::Boundary(crate::cell::Boundary::Convection, BoundaryLocation::Interior) => {
-                            // Pure convective HTC (HCONVI). Paired with TAIR on the heat side;
-                            // TAIR is also used for VP_bc on the moisture side.
+                            // Pure convective HTC (HCONVI). Paired with TAIR on the heat side,
+                            // shared with VP_bc on the moisture side. In separated-conv-rad mode
+                            // (14-input deck) temp_inside_air_moisture = TAIR (NType 1);
+                            // in legacy 11-input mode it falls back to temp_inside_air = TSTAR,
+                            // preserving byte-identical single-potential behaviour.
                             cell.htc = bc.heat_transfer_coeff_conv_int;
-                            cell.cell_temp = bc.temp_inside_air;
+                            cell.cell_temp = bc.temp_inside_air_moisture;
                             cell.cell_rh = bc.rh_inside_air;
                             let psat = physics::psy_psat_fn_temp(bc.temp_inside_air_moisture);
                             let rh = cell.cell_rh;
@@ -469,12 +472,23 @@ impl Surface {
 
                     (t_next, rh_next)
                 } else {
+                    // Boundary cells: return the same T and RH that
+                    // apply_boundary_coefficients() already set, so the
+                    // post-step write loop does not overwrite them.
                     if cell_curr.is_exterior() {
-                        let t = bc.temp_outside_air;
-                        (t, bc.rh_outside_air)
+                        (bc.temp_outside_air, bc.rh_outside_air)
                     } else {
-                        let t = bc.temp_inside_air;
-                        (t, bc.rh_inside_air)
+                        match &cell_curr.cell_type {
+                            CellType::Boundary(crate::cell::Boundary::Convection, BoundaryLocation::Interior) => {
+                                (bc.temp_inside_air_moisture, bc.rh_inside_air)
+                            }
+                            CellType::Boundary(crate::cell::Boundary::Radiation, BoundaryLocation::Interior) => {
+                                (bc.temp_inside_mean_radiant, bc.rh_inside_air)
+                            }
+                            _ => {
+                                (bc.temp_inside_air, bc.rh_inside_air)
+                            }
+                        }
                     }
                 }
             })

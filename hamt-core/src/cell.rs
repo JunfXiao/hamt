@@ -276,7 +276,14 @@ impl Cell {
             0.0 * pascals
         };
 
-        self.cell_vp = rh_self * vp_sat_pa;
+        // Boundary cells' cell_vp was already set by apply_boundary_coefficients
+        // using the moisture-side temperature (temp_inside_air_moisture /
+        // temp_outside_air_moisture), which differs from cell_temp whenever the
+        // heat-side uses TSTAR. Recomputing here from cell_temp would overwrite
+        // the correct BC vapor pressure with psat(TSTAR)·RH.
+        if !self.is_boundary() {
+            self.cell_vp = rh_self * vp_sat_pa;
+        }
 
         if let CellType::Material(mat) = &self.cell_type {
             let (water, dwdphi) = mat.sorption_isotherm.interpolate(rh_self);
