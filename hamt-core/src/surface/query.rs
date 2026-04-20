@@ -423,7 +423,7 @@ impl Surface {
                     _ => None,
                 });
 
-        let boundary_cell = boundary_convection_idx
+        let boundary_conv_cell = boundary_convection_idx
             .and_then(|idx| self.cells.get(idx))
             .with_context(|| "No boundary convection cell found for surface moisture flux")?;
 
@@ -432,8 +432,8 @@ impl Surface {
             BoundaryLocation::Interior => bc.vapor_transport_coeff_int,
         };
 
-        let vtc = if boundary_cell.vtc > ECLIPSE * kg_per_m2_s_pa {
-            boundary_cell.vtc
+        let vtc = if boundary_conv_cell.vtc > ECLIPSE * kg_per_m2_s_pa {
+            boundary_conv_cell.vtc
         } else {
             vtc_from_bc
         };
@@ -444,7 +444,7 @@ impl Surface {
                 .get(*idx)
                 .with_context(|| format!("Failed to get virtual cell {:?}", idx))?;
 
-            let delta_vp: Pressure<f64> = boundary_cell.cell_vp - surf.cell_vp;
+            let delta_vp: Pressure<f64> = boundary_conv_cell.cell_vp - surf.cell_vp;
             let cell_area: Area<f64> = surf.size.area_along(0);
 
             if vtc > ECLIPSE * kg_per_m2_s_pa {

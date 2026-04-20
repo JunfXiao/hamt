@@ -35,6 +35,7 @@ pub(crate) struct TrnSysState {
     pub water_csv_writer: Option<Writer<File>>,
     pub output_csv_writer: Option<Writer<File>>,
     pub vp_csv_writer: Option<Writer<File>>,
+    pub boundary_csv_writer: Option<Writer<File>>,
 
     pub adaptive_state: hamt_core::hamt_manager::AdaptiveState<()>,
 
@@ -72,6 +73,7 @@ impl TrnSysState {
             water_csv_writer: None,
             output_csv_writer: None,
             vp_csv_writer: None,
+            boundary_csv_writer: None,
 
             adaptive_state: hamt_core::hamt_manager::AdaptiveState::default(),
 

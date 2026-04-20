@@ -245,6 +245,52 @@ impl TrnSysType {
             writer.write_record(cell_material_titles)?;
         }
 
+        // Boundary condition debug output
+        let boundary_output_path = format!("Type395_0{}_boundary.out", output_file_id);
+        state.boundary_csv_writer = Some(Writer::from_path(boundary_output_path)?);
+        if let Some(writer) = &mut state.boundary_csv_writer {
+            let headers = vec![
+                "Time [h]",
+                "Iter",
+                "NInputs",
+                // Inputs 0-10 (always present)
+                "In0_T_int_TSTAR [C]",
+                "In1_T_out [C]",
+                "In2_RH_int [%]",
+                "In3_RH_out [%]",
+                "In4_hconv_int [kJ/hr.m2.K]",
+                "In5_hconv_out [kJ/hr.m2.K]",
+                "In6_q_int [kJ/hr]",
+                "In7_q_out [kJ/hr]",
+                "In8_beta_int [kg/m2.s.Pa]",
+                "In9_beta_out [kg/m2.s.Pa]",
+                "In10_q_userdef [kJ/hr]",
+                // Inputs 11-13 (optional, 14-input mode)
+                "In11_T_int_moist [C]",
+                "In12_HCONVI [kJ/hr.m2.K]",
+                "In13_TMR [C]",
+                // Derived BC fields
+                "BC_has_sep_rad",
+                "BC_h_conv_int [W/m2.K]",
+                "BC_h_rad_int [W/m2.K]",
+                "BC_vtc_int [kg/m2.s.Pa]",
+                "BC_add_energy_int [W]",
+                // Flux diagnostics (interior side)
+                "T_conv_BC [C]",
+                "T_rad_BC [C]",
+                "T_virtual_int [C]",
+                "T_surf_mat_int [C]",
+                "Q_conv_int [W]",
+                "Q_rad_int [W]",
+                "Q_conv+rad_int [W]",
+                "VP_conv_BC [Pa]",
+                "VP_virtual_int [Pa]",
+                "MoistFlux_int [g/h]",
+            ];
+            writer.write_record(&headers)?;
+            writer.flush()?;
+        }
+
         // Write output title columns
         if let Some(writer) = &mut state.output_csv_writer {
             writer.write_record([
@@ -351,7 +397,8 @@ impl TrnSysType {
                 )
             })?;
             writer.flush()?;
-            self.output_cell_states(state)?
+            self.output_cell_states(state)?;
+            self.output_boundary_state(state)?;
         }
 
         for (i, v) in report_row.into_iter().enumerate() {
@@ -439,6 +486,147 @@ impl TrnSysType {
             writer.flush()?;
         }
 
+        Ok(())
+    }
+
+    /// Output boundary condition state for debugging.
+    /// Writes one row per reporting interval with all raw inputs and derived BC fields.
+    pub fn output_boundary_state(&self, state: &mut TrnSysState) -> Result<()> {
+        if let Some(writer) = &mut state.boundary_csv_writer {
+            let time = get_simulation_time();
+            let iter = get_timestep_iteration();
+            let n_inputs = state.inputs.len();
+
+            // Raw inputs (always present: 0-10)
+            let in0  = state.inputs[0].value;   // T_int TSTAR [C]
+            let in1  = state.inputs[1].value;   // T_out [C]
+            let in2  = state.inputs[2].value;   // RH_int [%]
+            let in3  = state.inputs[3].value;   // RH_out [%]
+            let in4  = state.inputs[4].value;   // hconv_int [kJ/hr.m2.K]
+            let in5  = state.inputs[5].value;   // hconv_out [kJ/hr.m2.K]
+            let in6  = state.inputs[6].value;   // q_int [kJ/hr]
+            let in7  = state.inputs[7].value;   // q_out [kJ/hr]
+            let in8  = state.inputs[8].value;   // beta_int [kg/m2.s.Pa]
+            let in9  = state.inputs[9].value;   // beta_out [kg/m2.s.Pa]
+            let in10 = state.inputs[10].value;  // q_userdef [kJ/hr]
+
+            // Optional inputs (14-input mode)
+            let in11 = state.inputs.get(11).map_or(f64::NAN, |v| v.value); // T_int_moist [C]
+            let in12 = state.inputs.get(12).map_or(f64::NAN, |v| v.value); // HCONVI [kJ/hr.m2.K]
+            let in13 = state.inputs.get(13).map_or(f64::NAN, |v| v.value); // TMR [C]
+
+            // Derived BC fields and flux diagnostics from the manager
+            let (
+                has_sep_rad, h_conv_int_w, h_rad_int_w, vtc_int, add_energy_w,
+                t_conv_bc, t_rad_bc, t_virtual_int, t_surf_mat_int,
+                q_conv_w, q_rad_w, q_total_w,
+                vp_conv_bc, vp_virtual_int, moist_flux_g_h,
+            ) = if let Some(manager) = &state.hamt_manager {
+                    let bc = &manager.boundary_condition;
+                    let cells = &manager.surface_curr.cells;
+                    let area = manager.surface_curr.area.value_in(square_meter);
+                    let has_sep = if bc.has_separate_radiant_int { 1.0 } else { 0.0 };
+                    let h_conv = bc.heat_transfer_coeff_conv_int.value_in(w_per_m2_k);
+                    let vtc = bc.vapor_transport_coeff_int.value_in(kg_per_m2_s_pa);
+                    let add_e = bc.additional_energy_int.value_in(kj_per_hr) * 1000.0 / 3600.0;
+
+                    // Find interior BC cells and virtual cell
+                    let conv_bc = cells.iter().find(|c| matches!(&c.cell_type,
+                        hamt_core::cell::CellType::Boundary(
+                            hamt_core::cell::Boundary::Convection,
+                            hamt_core::cell::BoundaryLocation::Interior)));
+                    let rad_bc = cells.iter().find(|c| matches!(&c.cell_type,
+                        hamt_core::cell::CellType::Boundary(
+                            hamt_core::cell::Boundary::Radiation,
+                            hamt_core::cell::BoundaryLocation::Interior)));
+                    let virt = cells.iter().find(|c| matches!(&c.cell_type,
+                        hamt_core::cell::CellType::Virtual(
+                            hamt_core::cell::BoundaryLocation::Interior)));
+                    // Interior surface material cell (first material cell from interior side)
+                    let surf_mat_idx = manager.surface_curr.interior_surface_material_idx;
+                    let surf_mat = surf_mat_idx.and_then(|i| cells.get([i, 0, 0]));
+
+                    let h_rad_val = rad_bc.map_or(0.0, |c| c.htc.value_in(w_per_m2_k));
+
+                    let t_conv = conv_bc.map_or(f64::NAN, |c| kelvin_to_celsius(c.cell_temp));
+                    let t_rad = rad_bc.map_or(f64::NAN, |c| kelvin_to_celsius(c.cell_temp));
+                    let t_virt = virt.map_or(f64::NAN, |c| kelvin_to_celsius(c.cell_temp));
+                    let t_smat = surf_mat.map_or(f64::NAN, |c| kelvin_to_celsius(c.cell_temp));
+
+                    // Q_conv = h_conv * (T_convBC - T_virtual) * area [W]
+                    let q_conv = if let (Some(cb), Some(v)) = (conv_bc, virt) {
+                        let dt = (cb.cell_temp - v.cell_temp).value_in(diman::si::units::kelvin);
+                        cb.htc.value_in(w_per_m2_k) * dt * area
+                    } else { 0.0 };
+
+                    // Q_rad = h_rad * (T_radBC - T_virtual) * area [W]
+                    let q_rad = if let (Some(rb), Some(v)) = (rad_bc, virt) {
+                        let dt = (rb.cell_temp - v.cell_temp).value_in(diman::si::units::kelvin);
+                        rb.htc.value_in(w_per_m2_k) * dt * area
+                    } else { 0.0 };
+
+                    // VP diagnostics
+                    let vp_conv = conv_bc.map_or(0.0, |c| c.cell_vp.value_in(pascals));
+                    let vp_virt = virt.map_or(0.0, |c| c.cell_vp.value_in(pascals));
+
+                    // Moisture flux = vtc * (VP_conv_BC - VP_virtual) * area [kg/s] -> g/h
+                    let mf = if let (Some(cb), Some(v)) = (conv_bc, virt) {
+                        let dvp = (cb.cell_vp - v.cell_vp).value_in(pascals);
+                        let cell_vtc = if cb.vtc.value_in(kg_per_m2_s_pa) > 1e-20 {
+                            cb.vtc.value_in(kg_per_m2_s_pa)
+                        } else { vtc };
+                        cell_vtc * dvp * area * 3600.0 * 1000.0 // kg/s -> g/h
+                    } else { 0.0 };
+
+                    (has_sep, h_conv, h_rad_val, vtc, add_e,
+                     t_conv, t_rad, t_virt, t_smat,
+                     q_conv, q_rad, q_conv + q_rad,
+                     vp_conv, vp_virt, mf)
+                } else {
+                    (0.0, 0.0, 0.0, 0.0, 0.0,
+                     f64::NAN, f64::NAN, f64::NAN, f64::NAN,
+                     0.0, 0.0, 0.0,
+                     0.0, 0.0, 0.0)
+                };
+
+            let row: Vec<String> = vec![
+                format!("{:.4}", time),
+                format!("{}", iter),
+                format!("{}", n_inputs),
+                format!("{:.4}", in0),
+                format!("{:.4}", in1),
+                format!("{:.4}", in2),
+                format!("{:.4}", in3),
+                format!("{:.6}", in4),
+                format!("{:.6}", in5),
+                format!("{:.4}", in6),
+                format!("{:.4}", in7),
+                format!("{:.3e}", in8),
+                format!("{:.3e}", in9),
+                format!("{:.4}", in10),
+                format!("{:.4}", in11),
+                format!("{:.6}", in12),
+                format!("{:.4}", in13),
+                format!("{:.0}", has_sep_rad),
+                format!("{:.4}", h_conv_int_w),
+                format!("{:.4}", h_rad_int_w),
+                format!("{:.3e}", vtc_int),
+                format!("{:.4}", add_energy_w),
+                // Flux diagnostics
+                format!("{:.4}", t_conv_bc),
+                format!("{:.4}", t_rad_bc),
+                format!("{:.4}", t_virtual_int),
+                format!("{:.4}", t_surf_mat_int),
+                format!("{:.2}", q_conv_w),
+                format!("{:.2}", q_rad_w),
+                format!("{:.2}", q_total_w),
+                format!("{:.2}", vp_conv_bc),
+                format!("{:.2}", vp_virtual_int),
+                format!("{:.4}", moist_flux_g_h),
+            ];
+            writer.write_record(&row)?;
+            writer.flush()?;
+        }
         Ok(())
     }
 
