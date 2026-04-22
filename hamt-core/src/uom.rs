@@ -40,6 +40,8 @@ unit_system!(
     dimension WaterContent = Mass / Volume; // kg/kg
     dimension LiquidTransportCoeff = Length^2 / Time; // m²/s
     dimension VaporPermeability = Mass/ (Length * Time * Pressure); // m²/s
+    dimension ArealEnergyDensity = Energy / Area; // J/m²  (flux × time integral)
+    dimension ArealMassDensity = Mass / Area; // kg/m²  (flux × time integral)
 
     dimension ThermalResistance =Temperature / Power; // K/W
     // Vapor resistance (Pa·s/kg), consistent with WVDC-based formulation
@@ -99,6 +101,8 @@ unit_system!(
     // Vapor resistance: Pa·s/kg
     unit pa_s_per_kg: VaporResistance = pascals * seconds / kilograms;
     unit s_per_kg: MassResistance = seconds / kilograms;
+    unit j_per_m2: ArealEnergyDensity = joules / square_meter;
+    unit kg_per_m2: ArealMassDensity = kilograms / square_meter;
 
     // Domain constants (SI)
     constant WATER_DENSITY = 1000.0f64 * kg_per_m3;

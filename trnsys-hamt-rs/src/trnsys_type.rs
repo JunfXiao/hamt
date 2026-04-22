@@ -8,7 +8,7 @@ use hamt_core::boundary::{celsius_to_kelvin, kelvin_to_celsius};
 use hamt_core::hamt_manager::{HamtManager, HamtSettings};
 use hamt_core::io::load_hamt_by_path;
 use hamt_core::uom::units::{
-    dimensionless, hours, kg_per_hr, kg_per_m3, kg_per_m2_s_pa, kj_per_hr, kj_per_hr_m2_k, meter, pascals, square_meter, w_per_m2_k,
+    dimensionless, hours, kg_per_hr, kg_per_m3, kg_per_m2_s_pa, kj_per_hr, kj_per_hr_m2_k, meter, pascals, seconds, square_meter, w_per_m2_k,
 };
 use std::iter;
 use std::path::Path;
@@ -347,6 +347,27 @@ impl TrnSysType {
             // Map outputs
             let report: hamt_core::surface::SurfaceReport = manager.surface_curr.report(&manager.boundary_condition)?;
             let surface_area = manager.surface_curr.area;
+
+            // Use time-averaged fluxes from adaptive accumulator when available.
+            // This corrects the endpoint-vs-average error that occurs with substepping.
+            let acc = &state.adaptive_state.flux_accumulator;
+            let (q_int_kj_hr, q_ext_kj_hr, m_int_kg_hr, m_ext_kg_hr) = if acc.total_time > 0.0 * seconds {
+                (
+                    (acc.avg_q_int() * surface_area).value_in(kj_per_hr),
+                    (acc.avg_q_ext() * surface_area).value_in(kj_per_hr),
+                    (acc.avg_m_int() * surface_area).value_in(kg_per_hr),
+                    (acc.avg_m_ext() * surface_area).value_in(kg_per_hr),
+                )
+            } else {
+                // Fallback to endpoint fluxes (no substepping or first call)
+                (
+                    (report.q_surf_int * surface_area).value_in(kj_per_hr),
+                    (report.q_surf_ext * surface_area).value_in(kj_per_hr),
+                    (report.m_surf_int * surface_area).value_in(kg_per_hr),
+                    (report.m_surf_ext * surface_area).value_in(kg_per_hr),
+                )
+            };
+
             let outputs = [
                 kelvin_to_celsius(report.temp_surf_int),
                 kelvin_to_celsius(report.temp_surf_out),
@@ -355,10 +376,10 @@ impl TrnSysType {
                 kelvin_to_celsius(report.temp_surf_user_def),
                 report.rh_surf_user_def.value(),
                 report.water_surf_user_def.value_in(kg_per_m3),
-                (report.q_surf_int * surface_area).value_in(kj_per_hr),
-                (report.q_surf_ext * surface_area).value_in(kj_per_hr),
-                (report.m_surf_int * surface_area).value_in(kg_per_hr),
-                (report.m_surf_ext * surface_area).value_in(kg_per_hr),
+                q_int_kj_hr,
+                q_ext_kj_hr,
+                m_int_kg_hr,
+                m_ext_kg_hr,
             ];
             outputs
         } else {
@@ -733,7 +754,7 @@ impl TrnSysType {
             );
 
             // let solve_start = std::time::Instant::now();
-            let result = manager
+            manager
                 .solve_timestep_adaptive(&mut state.adaptive_state, None)
                 .with_context(|| {
                     format!(
@@ -741,7 +762,9 @@ impl TrnSysType {
                         trnsys_time,
                         trnsys_iter
                     )
-                });
+                })?;
+
+
             // let elapsed = solve_start.elapsed();
             // if elapsed.as_millis() > 500 {
             //     warn!(
@@ -751,7 +774,7 @@ impl TrnSysType {
             //         "iterate: solve took >500ms"
             //     );
             // }
-            result?;
+            // result?;
 
             // Map outputs
             return self.update_output(state, false);

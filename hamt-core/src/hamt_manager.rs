@@ -7,8 +7,9 @@ use crate::material::{Construction, Material};
 use crate::physics::geometry::{Pt3D, Size3D};
 use crate::surface::Surface;
 use crate::uom::constants::VAPOR_GAS_CONSTANT;
-use crate::uom::dimensions::{Power, Temperature, Time};
-use crate::uom::units::{hours, kelvin, m_per_s};
+use crate::uom::dimensions::{ArealEnergyDensity, ArealMassDensity, EnergyFluxDensity, MassFluxDensity, Power, Temperature, Time};
+use crate::cell::BoundaryLocation;
+use crate::uom::units::{hours, j_per_m2, kelvin, kg_per_m2, kg_per_m2_s, m_per_s, seconds, w_per_m2};
 use crate::{error, uom};
 use anyhow::{Context, Ok, Result};
 use std::mem;
@@ -226,6 +227,7 @@ impl HamtManager {
         mut callback_state_change: Option<Box<dyn FnMut(&AdaptiveState<T>) -> Result<()>>>,
     ) -> Result<()> {
         adaptive_state.substep_time = 0.0 * hours;
+        adaptive_state.flux_accumulator.reset();
         let orig_timestep = self.settings.timestep;
 
         // Reset relaxation factors once at the start of each macro-timestep
@@ -338,7 +340,26 @@ impl HamtManager {
             rounds_remaining -= 1;
             total_substeps += 1;
             self.tick_timestep()?;
-            
+
+            // Accumulate time-weighted fluxes for this substep.
+            // After tick_timestep, surface_prev holds the just-converged state.
+            {
+                let sub_dt = actual_step;
+                let q_int = self.surface_prev
+                    .heat_flux(BoundaryLocation::Interior)?;
+                let q_ext = self.surface_prev
+                    .heat_flux(BoundaryLocation::Exterior)?;
+                let m_int = self.surface_prev
+                    .moisture_flux(BoundaryLocation::Interior, &self.boundary_condition)?;
+                let m_ext = self.surface_prev
+                    .moisture_flux(BoundaryLocation::Exterior, &self.boundary_condition)?;
+
+                adaptive_state.flux_accumulator.q_int_dt += q_int * sub_dt;
+                adaptive_state.flux_accumulator.q_ext_dt += q_ext * sub_dt;
+                adaptive_state.flux_accumulator.m_int_dt += m_int * sub_dt;
+                adaptive_state.flux_accumulator.m_ext_dt += m_ext * sub_dt;
+                adaptive_state.flux_accumulator.total_time += sub_dt;
+            }
 
             if adaptive_state.reset_time_in_contineous {
                 adaptive_state.time_in_contineous_split = 0;
@@ -549,7 +570,62 @@ impl Default for HamtSettings {
     }
 }
 
-pub struct AdaptiveState<T> 
+/// Accumulates time-weighted boundary fluxes across adaptive substeps.
+/// After all substeps, dividing each `*_dt` field by `total_time` yields the
+/// time-averaged flux density over the macro-timestep.
+#[derive(Debug, Clone)]
+pub struct SubstepFluxAccumulator {
+    /// ∫ q_int dt  [J/m²]
+    pub q_int_dt: ArealEnergyDensity<f64>,
+    /// ∫ q_ext dt  [J/m²]
+    pub q_ext_dt: ArealEnergyDensity<f64>,
+    /// ∫ m_int dt  [kg/m²]
+    pub m_int_dt: ArealMassDensity<f64>,
+    /// ∫ m_ext dt  [kg/m²]
+    pub m_ext_dt: ArealMassDensity<f64>,
+    /// Total substep time accumulated
+    pub total_time: Time<f64>,
+}
+
+impl Default for SubstepFluxAccumulator {
+    fn default() -> Self {
+        Self {
+            q_int_dt: 0.0 * j_per_m2,
+            q_ext_dt: 0.0 * j_per_m2,
+            m_int_dt: 0.0 * kg_per_m2,
+            m_ext_dt: 0.0 * kg_per_m2,
+            total_time: 0.0 * seconds,
+        }
+    }
+}
+
+impl SubstepFluxAccumulator {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Time-averaged interior heat flux [W/m²].
+    pub fn avg_q_int(&self) -> EnergyFluxDensity<f64> {
+        if self.total_time > 0.0 * seconds { self.q_int_dt / self.total_time } else { 0.0 * w_per_m2 }
+    }
+
+    /// Time-averaged exterior heat flux [W/m²].
+    pub fn avg_q_ext(&self) -> EnergyFluxDensity<f64> {
+        if self.total_time > 0.0 * seconds { self.q_ext_dt / self.total_time } else { 0.0 * w_per_m2 }
+    }
+
+    /// Time-averaged interior moisture flux [kg/(m²·s)].
+    pub fn avg_m_int(&self) -> MassFluxDensity<f64> {
+        if self.total_time > 0.0 * seconds { self.m_int_dt / self.total_time } else { 0.0 * kg_per_m2_s }
+    }
+
+    /// Time-averaged exterior moisture flux [kg/(m²·s)].
+    pub fn avg_m_ext(&self) -> MassFluxDensity<f64> {
+        if self.total_time > 0.0 * seconds { self.m_ext_dt / self.total_time } else { 0.0 * kg_per_m2_s }
+    }
+}
+
+pub struct AdaptiveState<T>
 {
     pub substep_time: Time<f64>,
     pub current_time: Time<f64>,
@@ -560,6 +636,7 @@ pub struct AdaptiveState<T>
     pub time_in_contineous_split: i32,
     pub reset_time_in_contineous: bool,
     pub prev_surface_state: Option<Surface>,
+    pub flux_accumulator: SubstepFluxAccumulator,
 }
 
 impl<T> Default for AdaptiveState<T>
@@ -576,6 +653,7 @@ where T:Default
             time_in_contineous_split: 0,
             reset_time_in_contineous: false,
             prev_surface_state: None,
+            flux_accumulator: SubstepFluxAccumulator::default(),
         }
     }
 }
