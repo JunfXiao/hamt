@@ -15,8 +15,8 @@ use hamt_core::uom::dimensions::{
     WaterContent,
 };
 use hamt_core::uom::units::{
-    days, dimensionless, hours, j_per_kg_k, j_per_m3_k, kelvin, kg_per_m2_s_pa, kg_per_m3, m_per_s,
-    m2_per_s, meter, square_meter, w_per_m_k, w_per_m2_k,
+    days, dimensionless, hours, j_per_kg_k, j_per_m3_k, kelvin, kg_per_m2_s_pa, kg_per_m3,
+    kilograms, m_per_s, m2_per_s, meter, square_meter, w_per_m_k, w_per_m2_k,
 };
 use hamt_core::uom::{
     DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT,
@@ -874,6 +874,166 @@ fn test_interpolation() {
     assert_eq!(x_values.len(), d_point_len, "Length mismatch");
     assert!(x_values[0] == 0.0, "First value should be 0.0");
     assert!(*x_values.last().unwrap() == 1.0, "Last value should be 1.0");
+}
+
+// =====================================================================
+// Timestep-invariance test for the total interior moisture flux integral.
+//
+// Purpose: with no TRNSYS-side air↔wall coupling and a constant interior
+// boundary RH held throughout the window, HAMT's per-cell mass-conservative
+// implicit Euler must yield the same TOTAL water mass exchanged at the
+// interior face for any choice of macro timestep, modulo iteration tolerance.
+//
+// • Test passes  → HAMT itself is timestep-invariant on this scenario; the
+//   sensitivity observed in the coupled TRNSYS run must come from the
+//   implicit-Euler-with-piecewise-constant-input air↔wall coupling, not HAMT.
+// • Test fails   → HAMT does NOT preserve total mass under timestep changes;
+//   a real bug somewhere in the conservation chain (warm-start, substep
+//   accumulator, or the cell mass balance).
+// =====================================================================
+
+fn run_total_release_with_timestep(timestep: Time<f64>) -> Result<f64> {
+    init_tracing();
+
+    // Thin single layer — keeps the diffusive timescale comparable to the
+    // simulation window so meaningful release happens within minutes/hours
+    // rather than days.
+    let library = create_library(20.0, 0.5, vec![0.005], vec![Some(20)]);
+    let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
+
+    let mut settings = HamtSettings::default();
+    settings.timestep = timestep;
+    settings.max_iterations = 1500;
+    // Use the project default convergence tolerances. Tighter (1e-6) tolerances
+    // amplify cell-level oscillation under sharp boundary gradients and force
+    // the stall-detection branch to fire spuriously, defeating the substep
+    // splitter even with very small sub-dt.
+    settings.temp_convergence_tolerance = 1e-3 * kelvin;
+    settings.rh_convergence_tolerance = 1e-4;
+    settings.min_div = 15;
+    settings.max_div = 30;
+    settings.min_relaxation_factor = 0.5;
+
+    // Effectively one-sided: the exterior face is sealed (≈0 transport
+    // coefficients) so all interior-face flux corresponds to wall storage
+    // change. This makes conservation straightforward to assert.
+    let bc_init = BoundaryCondition {
+        heat_transfer_coeff_ext: 1e-9 * w_per_m2_k,
+        heat_transfer_coeff_int: 5.0 * w_per_m2_k,
+        vapor_transport_coeff_ext: 1e-12 * kg_per_m2_s_pa,
+        vapor_transport_coeff_int: 1e-8 * kg_per_m2_s_pa,
+        temp_outside_air: celsius_to_kelvin(20.0),
+        temp_inside_air: celsius_to_kelvin(20.0),
+        temp_outside_air_moisture: celsius_to_kelvin(20.0),
+        temp_inside_air_moisture: celsius_to_kelvin(20.0),
+        rh_outside_air: 0.5 * dimensionless,
+        rh_inside_air: 0.5 * dimensionless,
+        ..Default::default()
+    };
+
+    let mut mgr = HamtManager::new(
+        Some(settings),
+        Some(bc_init),
+        construction,
+        "TimestepInvarianceTest".to_string(),
+        1.0 * square_meter,
+    )?;
+
+    // CRITICAL: `create_library` hardcodes `SurfaceVaporCoef { is_internal_const:
+    // true, internal_value: 1.0e10, .. }` (line 328-333). `HamtManager::new`
+    // imprints that onto `boundary_condition.vapor_transport_coeff_int`,
+    // overriding our chosen β with a near-infinite coefficient that makes the
+    // surface pathologically stiff (instant VP enforcement → spurious huge
+    // fluxes). Same on the exterior, which gets pinned to 0.0. Override both
+    // back to realistic values now that the manager has been built. β = 1e-8
+    // kg/(m²·s·Pa) is in the same range the deck produces from the Lewis
+    // analogy at typical HCONVI ≈ 1.4 W/(m²·K).
+    mgr.boundary_condition.vapor_transport_coeff_int = 1e-8 * kg_per_m2_s_pa;
+    mgr.boundary_condition.vapor_transport_coeff_ext = 1e-12 * kg_per_m2_s_pa;
+
+    // Step change: drop interior boundary RH from 0.5 to 0.4. Held constant
+    // for the full window so any cross-timestep total-mass difference must
+    // come from HAMT's discretisation, not from input-trajectory differences.
+    // A 10-pt RH drop is gentle enough that all timesteps in the test sweep
+    // converge without exhausting the substep budget.
+    mgr.boundary_condition.rh_inside_air = 0.4 * dimensionless;
+
+    let total_duration: Time<f64> = 6.0 * hours;
+    let mut total_release_kg: f64 = 0.0;
+    let mut max_split_factor_seen: i32 = 1;
+    let mut adap_state: AdaptiveState<()> = AdaptiveState::default();
+    adap_state.max_split_factor = 10;
+    let mut elapsed: Time<f64> = 0.0 * hours;
+
+    while elapsed < total_duration {
+        mgr.solve_timestep_adaptive(&mut adap_state, None)?;
+        mgr.tick_timestep()?;
+        if adap_state.split_factor > max_split_factor_seen {
+            max_split_factor_seen = adap_state.split_factor;
+        }
+        let area = mgr.surface_curr.area;
+        // m_int_dt = ∫ m_int dt over this macro-step  [kg/m²]; the m_int
+        // sign convention is flux INTO the wall, so a wall releasing
+        // moisture produces a negative integral. Flip the sign so the
+        // running total reads as released-mass.
+        // strip: extracting raw kg total from a typed integral for sum
+        let mass_in_kg =
+            (adap_state.flux_accumulator.m_int_dt * area).value_in(kilograms);
+        total_release_kg += -mass_in_kg;
+        elapsed += mgr.settings.timestep;
+    }
+
+    println!(
+        "  Δt = {:>9.4e} h: total released = {:>11.4e} kg | max split factor = {}",
+        timestep.value_in(hours),
+        total_release_kg,
+        max_split_factor_seen,
+    );
+
+    Ok(total_release_kg)
+}
+
+#[test]
+fn test_total_release_invariance_across_timesteps() -> Result<()> {
+    // Span ~30× — finest resolves transient, coarsest forces a near-quasi-
+    // -steady jump per step (and may trigger substepping internally).
+    let timesteps = [0.03 * hours, 0.25 * hours, 1.0 * hours];
+
+    println!("=== Timestep-invariance of total interior moisture release ===");
+    let mut totals: Vec<f64> = Vec::with_capacity(timesteps.len());
+    for ts in &timesteps {
+        totals.push(run_total_release_with_timestep(*ts)?);
+    }
+
+    // Treat the finest Δt as the reference truth.
+    let reference = totals[0];
+    let allowed_rel_err = 0.05; // 5 %
+
+    println!("\n=== Cross-timestep comparison (reference = finest Δt) ===");
+    for (ts, total) in timesteps.iter().zip(totals.iter()) {
+        let rel_err = ((total - reference) / reference).abs();
+        println!(
+            "  Δt = {:>9.4e} h: release = {:>11.4e} kg | rel err vs ref = {:>6.2}%",
+            ts.value_in(hours),
+            total,
+            rel_err * 100.0,
+        );
+    }
+
+    for (ts, total) in timesteps.iter().zip(totals.iter()) {
+        let rel_err = ((total - reference) / reference).abs();
+        assert!(
+            rel_err < allowed_rel_err,
+            "Δt={:.4e} h: total release {:.4e} kg differs from reference (Δt={:.4e} h, {:.4e} kg) by {:.2}% — \
+             exceeds {:.1}% tolerance. HAMT does NOT preserve total moisture mass under timestep changes — \
+             possible bug in implicit-Euler conservation, warm-start, or the substep flux accumulator.",
+            ts.value_in(hours), total,
+            timesteps[0].value_in(hours), reference,
+            rel_err * 100.0,
+            allowed_rel_err * 100.0,
+        );
+    }
+    Ok(())
 }
 
 static INIT: Once = Once::new();
