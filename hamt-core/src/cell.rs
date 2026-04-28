@@ -8,10 +8,10 @@ use crate::boundary::{celsius_to_kelvin, kelvin_to_celsius};
 use crate::uom::units::pascals;
 use crate::uom::dimensions::{
     Density, Dimensionless, HeatTransferCoeff, LiquidTransportCoeff, Power, Pressure,
-    SpecificEnergy, SpecificHeatCapacity, Temperature, ThermalConductivity, VaporTransportCoeff,
-    Volume,
+    PressurePerTemperature, SpecificEnergy, SpecificHeatCapacity, Temperature,
+    ThermalConductivity, VaporTransportCoeff, Volume,
 };
-use crate::uom::units::j_per_kg;
+use crate::uom::units::{j_per_kg, pa_per_k};
 use crate::{
     boundary::BoundaryCondition,
     hamt_manager::HamtSettings,
@@ -158,10 +158,10 @@ pub struct Cell {
 
     /// Derivative of saturation vapor pressure w.r.t. temperature [Pa/K] (Magnus approximation).
     ///
-    /// Stored as `Pressure<f64>` (the per-Kelvin factor is implicit; multiply by ΔT [K] to get ΔP [Pa]).
+    /// Multiply by a `Temperature` delta (K) to get a `Pressure` delta (Pa).
     ///
     /// Updated by [Cell::calc_dependent_state]
-    pub d_psat_d_t: Pressure<f64>,
+    pub d_psat_d_t: PressurePerTemperature<f64>,
 
     /// Volumetric water content [kg/m³ Material]. Updated each iteration.
     ///
@@ -268,12 +268,16 @@ impl Cell {
         self.vp_sat = vp_sat_pa;
 
         // Magnus-formula derivative: dP_sat/dT ≈ P_sat · 17.27 · 237.3 / (T_°C + 237.3)²
+        // strip: Magnus is an empirical fit with hard-coded °C constants; we compute
+        // the raw Pa/K magnitude and tag it back onto the typed field.
         let t_c = kelvin_to_celsius(t_self);
         let denom_magnus = t_c + 237.3;
         self.d_psat_d_t = if denom_magnus > physics::ECLIPSE {
-            vp_sat_pa * 17.27 * 237.3 / (denom_magnus * denom_magnus)
+            let raw_pa_per_k =
+                vp_sat_pa.value_in(pascals) * 17.27 * 237.3 / (denom_magnus * denom_magnus);
+            raw_pa_per_k * pa_per_k
         } else {
-            0.0 * pascals
+            0.0 * pa_per_k
         };
 
         // Boundary cells' cell_vp was already set by apply_boundary_coefficients
@@ -312,7 +316,7 @@ impl Cell {
             self.h_sorp_diff = match &mat.sorption_enthalpy {
                 Some(curve) => {
                     let (h, _) = curve.interpolate(rh_self);
-                    if h.value_in(j_per_kg) >= 0.0 { h } else { 0.0 * j_per_kg }
+                    h.max(0.0 * j_per_kg)
                 }
                 None => 0.0 * j_per_kg,
             };

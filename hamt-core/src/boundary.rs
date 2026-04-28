@@ -203,5 +203,7 @@ pub fn celsius_to_kelvin(temp_c: f64) -> Temperature<f64> {
 
 /// Convert K to °C.
 pub fn kelvin_to_celsius(temp_k: Temperature<f64>) -> f64 {
+    // strip: returns a raw Celsius scalar for external API boundaries
+    // (TRNSYS, IDF, °C-based empirical formulas); stays untyped by design.
     temp_k.value_in(units::kelvin) - KELVIN_CONV
 }

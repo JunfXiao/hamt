@@ -1,9 +1,9 @@
 use crate::{
     parallel::{par_or_seq, par_or_seq_mut}, uom::{
         Quantity, constants::{WATER_LATENT_HEAT, WATER_SPECIFIC_HEAT}, dimensions::{
-            HeatTransferCoeff, MassFlux, MassResistance, Power, ThermalConductance, VaporConductance, VaporTransportCoeff
+            HeatTransferCoeff, MassFlux, MassFluxPerTemperature, MassResistance, Power, SpecificEnergy, ThermalConductance, VaporConductance, VaporTransportCoeff
         }, units::{
-            dimensionless, j_per_k, j_per_kg, k_per_w, kelvin, kg_per_m2_s_pa, kg_per_m3, kg_per_s,
+            dimensionless, j_per_kg, k_per_w, kelvin, kg_per_m2_s_pa, kg_per_m3, kg_per_s,
             kilograms, m2_per_s, pa_s_per_kg, pascals, s_per_kg, seconds, w_per_k, w_per_m2_k, watts
         }
     }
@@ -159,6 +159,8 @@ impl Surface {
                             let h_rad = if bc.has_separate_radiant_int {
                                 let t_s = interior_mat_temp.unwrap_or(bc.temp_inside_mean_radiant);
                                 let t_m_k = (t_s + bc.temp_inside_mean_radiant) * 0.5;
+                                // strip: `.powi(3)` is only defined on the inner f64; the
+                                // result is re-tagged as HeatTransferCoeff via `* w_per_m2_k`.
                                 let t_m_cubed = t_m_k.value_in(kelvin).powi(3);
                                 4.0 * physics::SIGMA * physics::EPSILON * t_m_cubed * w_per_m2_k
                             } else {
@@ -325,88 +327,96 @@ impl Surface {
                     let (t_next, rh_next);
 
                     if settings.coupled_heat_moisture_enabled && is_material && settings.latent_heat_enabled {
-                        // ── Symmetric 2×2 block solve ─────────────────────────────────────────
+                        // ── Symmetric 2×2 block solve (typed) ─────────────────────────────────
                         //
-                        // Linearise P_v,i^{k+1} ≈ Psat(T^k)·φ^{k+1} + φ^k·(dPsat/dT)·(T^{k+1}−T^k)
-                        //
-                        // System (all quantities in SI, raw f64):
+                        // Linearise  P_v,i^{k+1} ≈ Psat(T^k)·φ^{k+1} + φ^k·(dPsat/dT)·(T^{k+1}−T^k)
                         //
                         //  ┌ A_tt  A_tp ┐ ┌ T_next ┐   ┌ b_t ┐
                         //  └ A_pt  A_pp ┘ └ φ_next ┘ = └ b_p ┘
                         //
-                        // where:
-                        //   A_tt = oorsum + tcap/dt + L_eff·vpoosum·φ_k·(dPsat/dT)  [W/K]
-                        //   A_tp = L_eff·vpoosum·Psat                                [W]
-                        //   A_pt = vpoosum·φ_k·(dPsat/dT)                           [kg/(s·K)]
-                        //   A_pp = phioosum + vpoosum·Psat + wcap/dt                 [kg/s]
-                        //   b_t  = torsum + q_adds + q_bnd + (tcap/dt)·T_prev
-                        //          + L_eff·(vporsum + A_pt·T_k)                      [W]
-                        //   b_p  = phiorsum + vporsum + (wcap/dt)·φ_prev + A_pt·T_k [kg/s]
+                        //   A_tt : ThermalConductance      [W/K]   = oorsum + tcap/dt + L_eff·cross
+                        //   A_tp : Power                   [W]     = L_eff · vpoosum · Psat
+                        //   A_pt : MassFluxPerTemperature  [kg/(s·K)] = cross
+                        //   A_pp : MassFlux                [kg/s]  = phioosum + vpoosum·Psat + wcap/dt
+                        //   b_t  : Power                   [W]
+                        //   b_p  : MassFlux                [kg/s]
+                        //   cross = vpoosum · φ_k · dPsat/dT       [kg/(s·K)]
+                        //   L_eff = L_v + H_diff(φ)                [J/kg]
                         //
-                        // L_eff = L_v + H_diff(φ) — see uom.rs constant WATER_LATENT_HEAT
-                        // (2,489,000 J/kg) plus the optional per-material sorption enthalpy.
+                        // Cramer's rule produces composite intermediate dimensions
+                        // (W·kg/s and W·kg/(s·K)); diman tracks them anonymously, and
+                        // the divisions resolve to Temperature and Dimensionless.
 
-                        // L_eff [J/kg] as a raw scalar
-                        // WATER_LATENT_HEAT = 2_489_000 J/kg (from uom::constants)
-                        let l_eff_f: f64 = 2_489_000.0
+                        // WATER_LATENT_HEAT is declared as a `constant` in unit_system!
+                        // and is therefore a Unit, not a Quantity — coerce via `1.0 *`.
+                        let l_eff: SpecificEnergy<f64> = 1.0 * WATER_LATENT_HEAT
                             + if settings.sorption_enthalpy_enabled {
-                                cell_curr.h_sorp_diff.value_in(j_per_kg)
+                                cell_curr.h_sorp_diff
                             } else {
-                                0.0
+                                0.0 * j_per_kg
                             };
 
-                        let oorsum_f  = oorsum.value_in(w_per_k);
-                        let torsum_f  = torsum.value_in(watts);
-                        let vpoosum_f = vpoosum.value_in(kg_per_s / pascals);
-                        let vporsum_f = vporsum.value_in(kg_per_s);
-                        let phioosum_f = phioosum.value_in(kg_per_s);
-                        let phiorsum_f = phiorsum.value_in(kg_per_s);
-                        let tcap_f    = tcap_j_per_k.value_in(j_per_k);
-                        let wcap_f    = wcap.value_in(kilograms);
-                        let dt_f      = dt_s.value_in(seconds);
-                        let psat_f    = vpsat_curr.value_in(pascals);
-                        let dpsat_f   = d_psat_d_t.value_in(pascals); // Pa/K (as Pa)
-                        let phi_k     = cell_curr.cell_rh.value();
-                        let phi_prev  = cell_prev.cell_rh.value();
-                        let t_k       = t_curr.value_in(kelvin);
-                        let t_prev_f  = cell_prev.cell_temp.value_in(kelvin);
-                        let q_adds_f  = q_adds.value_in(watts);
-                        let q_b_f     = q_boundary_energy.value_in(watts);
+                        let phi_k    = cell_curr.cell_rh;          // Dimensionless
+                        let phi_prev = cell_prev.cell_rh;          // Dimensionless
+                        let t_prev   = cell_prev.cell_temp;        // Temperature
 
-                        // cross = vpoosum · φ_k · dPsat/dT  [kg/(s·K)]
-                        let cross = vpoosum_f * phi_k * dpsat_f;
+                        // cross = vpoosum · φ_k · dPsat/dT  →  MassFluxPerTemperature
+                        let cross: MassFluxPerTemperature<f64> = vpoosum * phi_k * d_psat_d_t;
 
-                        let a_tt = oorsum_f + tcap_f / dt_f + l_eff_f * cross;
-                        let a_tp = l_eff_f * vpoosum_f * psat_f;
-                        let a_pt = cross;
-                        let a_pp = phioosum_f + vpoosum_f * psat_f + wcap_f / dt_f;
+                        // Explicit annotations force diman to reduce composite dimension
+                        // expressions to their canonical Dimension struct, which is what
+                        // the subsequent Cramer subtractions need to type-check.
+                        let a_tt: ThermalConductance<f64> =
+                            oorsum + tcap_j_per_k / dt_s + l_eff * cross;
+                        let a_tp: Power<f64> = l_eff * vpoosum * vpsat_curr;
+                        let a_pt: MassFluxPerTemperature<f64> = cross;
+                        let a_pp: MassFlux<f64> =
+                            phioosum + vpoosum * vpsat_curr + wcap / dt_s;
 
-                        let b_t = torsum_f + q_adds_f + q_b_f
-                            + (tcap_f / dt_f) * t_prev_f
-                            + l_eff_f * (vporsum_f + cross * t_k);
-                        let b_p = phiorsum_f + vporsum_f
-                            + (wcap_f / dt_f) * phi_prev
-                            + cross * t_k;
+                        let b_t: Power<f64> = torsum
+                            + q_adds
+                            + q_boundary_energy
+                            + tcap_j_per_k * t_prev / dt_s
+                            + l_eff * (vporsum + cross * t_curr);
+                        let b_p: MassFlux<f64> = phiorsum
+                            + vporsum
+                            + wcap * phi_prev / dt_s
+                            + cross * t_curr;
 
-                        let det = a_tt * a_pp - a_tp * a_pt;
+                        // ── Linear algebra kernel ─────────────────────────────────────
+                        // Cramer's rule mixes composite dimensions (W·kg/s and W·kg/(s·K))
+                        // that diman cannot canonicalise across the subtractions in the
+                        // determinant and numerators. We treat the 2×2 solve like a call
+                        // into a BLAS routine: enter with typed magnitudes (.0 = SI value),
+                        // do unit-agnostic arithmetic, re-tag the typed outputs on exit.
+                        // Inputs and outputs above this block are fully typed.
+                        let a_tt_v = a_tt.0;
+                        let a_tp_v = a_tp.0;
+                        let a_pt_v = a_pt.0;
+                        let a_pp_v = a_pp.0;
+                        let b_t_v  = b_t.0;
+                        let b_p_v  = b_p.0;
 
-                        let (t_k_next, phi_next) = if det.abs() > 1e-30 {
-                            let t_n = (b_t * a_pp - a_tp * b_p) / det;
-                            let p_n = (a_tt * b_p - a_pt * b_t) / det;
-                            (t_n, p_n)
-                        } else {
-                            // Near-singular (e.g. no vapor coupling): fall back to current state;
-                            // the outer relaxation loop will converge on next iteration.
-                            (t_k, phi_k)
-                        };
+                        let det_v = a_tt_v * a_pp_v - a_tp_v * a_pt_v;
 
-                        t_next = if t_k_next.is_finite() {
-                            t_k_next * kelvin
+                        let (t_n_typed, p_n_typed): (Temperature<f64>, Dimensionless<f64>) =
+                            if det_v.abs() > 1e-30 {
+                                let t_n_v = (b_t_v * a_pp_v - a_tp_v * b_p_v) / det_v;
+                                let p_n_v = (a_tt_v * b_p_v - a_pt_v * b_t_v) / det_v;
+                                (t_n_v * kelvin, p_n_v * dimensionless)
+                            } else {
+                                // Near-singular (e.g. no vapor coupling): fall back to current
+                                // state; the outer relaxation loop will converge next iteration.
+                                (t_curr, phi_k)
+                            };
+
+                        t_next = if t_n_typed.is_finite() {
+                            t_n_typed
                         } else {
                             t_curr
                         };
-                        rh_next = if phi_next.is_finite() {
-                            phi_next * dimensionless
+                        rh_next = if p_n_typed.is_finite() {
+                            p_n_typed
                         } else {
                             cell_curr.cell_rh
                         };
@@ -422,34 +432,39 @@ impl Surface {
                                 q_vapor += vapor_diffusion_net_flux * cell_curr.h_sorp_diff;
                             }
                             if q_vapor.abs() > settings.max_latent_heat {
+                                // strip: signum() is only defined on the inner f64;
+                                // we want a raw ±1.0 to re-tag the clamped magnitude.
                                 q_vapor =
                                     q_vapor.value_in(watts).signum() * settings.max_latent_heat;
                             }
                         }
 
-                        let denom_t = oorsum + tcap_j_per_k / dt_s;
-                        let t_next_s = if denom_t > 1e-10 * w_per_k {
+                        let denom_t: ThermalConductance<f64> = oorsum + tcap_j_per_k / dt_s;
+                        let t_next_s: Temperature<f64> = if denom_t > 1e-10 * w_per_k {
                             let inertial = tcap_j_per_k * cell_prev.cell_temp / dt_s;
                             (torsum + q_vapor + q_adds + q_boundary_energy + inertial) / denom_t
                         } else {
                             t_curr
                         };
-                        t_next = if t_next_s.value_in(kelvin).is_finite() {
+                        t_next = if t_next_s.is_finite() {
                             t_next_s
                         } else {
                             t_curr
                         };
 
-                        // Moisture: thermal correction uses the just-computed t_next
-                        let delta_t_val = (t_next - t_curr).value_in(kelvin);
+                        // Moisture: thermal correction uses the just-computed t_next.
+                        // delta_t : Temperature, d_psat_d_t : Pa/K, cell_rh : Dimensionless
+                        // → p_sat_thermal_correction : Pressure (Pa)
+                        // → thermal_source_term      : MassFlux (kg/s)
+                        let delta_t = t_next - t_curr;
                         let p_sat_thermal_correction =
-                            cell_curr.cell_rh.value() * d_psat_d_t * delta_t_val;
+                            cell_curr.cell_rh * d_psat_d_t * delta_t;
                         let thermal_source_term = vpoosum * p_sat_thermal_correction;
                         let denom_rh: MassFlux<f64> =
                             phioosum + vpoosum * vpsat_curr + wcap / dt_s;
 
-                        let rh_next_s = if denom_rh > 1e-20 * kg_per_s {
-                            (phiorsum + vporsum + (wcap * cell_prev.cell_rh.value()) / dt_s
+                        let rh_next_s: Dimensionless<f64> = if denom_rh > 1e-20 * kg_per_s {
+                            (phiorsum + vporsum + (wcap * cell_prev.cell_rh) / dt_s
                                 - thermal_source_term)
                                 / denom_rh
                         } else {
@@ -459,7 +474,7 @@ impl Surface {
                             );
                             cell_curr.cell_rh
                         };
-                        rh_next = if rh_next_s.value().is_finite() {
+                        rh_next = if rh_next_s.is_finite() {
                             rh_next_s
                         } else {
                             debug!(
@@ -502,13 +517,13 @@ impl Surface {
                 let curr_rh = surface_curr.cells[[i, 0, 0]].cell_rh;
                 let alpha = cell.relaxation_factor;
 
-                let relaxed_temp = if next_temp.value_in(kelvin).is_finite() {
+                let relaxed_temp = if next_temp.is_finite() {
                     next_temp * alpha + curr_temp * (1.0 - alpha)
                 } else {
                     curr_temp
                 };
 
-                let relaxed_rh = if next_rh.value().is_finite() {
+                let relaxed_rh = if next_rh.is_finite() {
                     next_rh * alpha + curr_rh * (1.0 - alpha)
                 } else {
                     curr_rh
@@ -526,13 +541,13 @@ impl Surface {
                 let curr_rh = surface_curr.cells[[i, 0, 0]].cell_rh;
                 let alpha = self.cells[[i, 0, 0]].relaxation_factor;
 
-                let relaxed_temp = if next_temp.value_in(kelvin).is_finite() {
+                let relaxed_temp = if next_temp.is_finite() {
                     next_temp * alpha + curr_temp * (1.0 - alpha)
                 } else {
                     curr_temp
                 };
 
-                let relaxed_rh = if next_rh.value().is_finite() {
+                let relaxed_rh = if next_rh.is_finite() {
                     next_rh * alpha + curr_rh * (1.0 - alpha)
                 } else {
                     curr_rh

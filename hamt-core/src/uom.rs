@@ -31,6 +31,8 @@ unit_system!(
     dimension EnergyFluxDensity = Power / Area; // W/m²
     dimension MassFluxDensity = Mass / Area / Time; // kg/m²·s
     dimension MassFlux = Mass / Time;
+    dimension MassFluxPerTemperature = MassFlux / Temperature; // kg/(s·K) — `a_pt` in the 2x2 block solve
+    dimension PressurePerTemperature = Pressure / Temperature; // Pa/K — Clausius–Clapeyron / Magnus dPsat/dT
     dimension HeatTransferCoeff = Power / (Area * Temperature); // W/(m²·K)
     dimension ThermalConductivity = Power / (Length * Temperature); // W/(m·K)
     dimension ThermalConductance = Power / Temperature;
@@ -88,6 +90,8 @@ unit_system!(
     unit kg_per_m2_s: MassFluxDensity = kilograms / (square_meter * seconds);
     unit kg_per_s: MassFlux = kilograms / seconds;
     unit kg_per_hr: MassFlux = kilograms / hours;
+    unit kg_per_s_k: MassFluxPerTemperature = kilograms / (seconds * kelvin);
+    unit pa_per_k: PressurePerTemperature = pascals / kelvin;
     unit w_per_m2_k: HeatTransferCoeff = watts / (square_meter * kelvin);
     unit w_per_k: ThermalConductance = watts / kelvin;
     unit kj_per_hr_m2_k: HeatTransferCoeff = kj_per_hr / (square_meter * kelvin);
@@ -213,6 +217,13 @@ pub const DIM_VAPOR_TRANSPORT_COEFF: Dimension = Dimension {
     mass: 1,
     temperature: 0,
 };
+
+// Typed finiteness helper — let solver guards stay inside the type system
+// instead of stripping to f64 just to call `.is_finite()`. (`is_nan` is
+// already provided by `diman::unit_system!`.)
+impl<const D: Dimension> Quantity<f64, D> {
+    pub fn is_finite(&self) -> bool { self.0.is_finite() }
+}
 
 
 #[cfg(test)]

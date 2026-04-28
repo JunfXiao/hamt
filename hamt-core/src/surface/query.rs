@@ -115,6 +115,8 @@ impl Surface {
                     .cells
                     .get(*idx)
                     .with_context(|| format!("Cell index {:?} is invalid", idx))?;
+                // strip: area used as a raw weight; sum is a Quantity of arbitrary D
+                // so we accumulate `f(cell) * area_scalar` rather than carry m² through.
                 let area = cell.size.area_along(0).value_in(square_meter);
                 sum += f(cell) * area;
                 sum_area += area;
@@ -173,6 +175,7 @@ impl Surface {
                 };
                 if let Some(cell) = cells.get(idx) {
                     if matches!(cell.cell_type, CellType::Material(_)) {
+                        // strip: trilinear interpolation tables index by raw f64 metres.
                         let coord = match axis {
                             0 => cell.origin.x().value_in(meter),
                             1 => cell.origin.y().value_in(meter),
@@ -222,6 +225,7 @@ impl Surface {
         let (yi, yc) = axis_coords(&self.cells, 1, ny);
         let (zi, zc) = axis_coords(&self.cells, 2, nz);
 
+        // strip: target coords stripped to f64 to match `xc/yc/zc` from `axis_coords` above.
         let tx_val = target.x().value_in(meter);
         let ty_val = target.y().value_in(meter);
         let tz_val = target.z().value_in(meter);

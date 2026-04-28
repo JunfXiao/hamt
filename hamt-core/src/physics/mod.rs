@@ -33,6 +33,8 @@ pub const EPSILON: f64 = 0.9;
 /// # Arguments
 /// * `t_celsius` - Dry-bulb temperature [°C].
 pub fn psy_psat_fn_temp(t: Temperature<f64>) -> Pressure<f64> {
+    // strip: Hyland–Wexler is an empirical polynomial in raw Kelvin; the constants
+    // C1..C13 carry hard-coded units. Re-tag the result as Pressure on return.
     let t_kelvin = t.value_in(units::kelvin);
 
     if t_kelvin < KELVIN_CONV {
@@ -88,6 +90,8 @@ pub fn water_vapor_permeability_coeff(
     temp: Temperature<f64>,
     amb_pressure: Pressure<f64>,
 ) -> VaporPermeability<f64> {
+    // strip: Schirmer empirical fit; coefficient assumes Kelvin and Pascals,
+    // and `.powf(0.81)` is only available on the inner f64. Re-tagged via `* kg_per_m_s_pa`.
     (1.97e-7 * temp.value_in(kelvin).powf(0.81)) / amb_pressure.value_in(pascals) * kg_per_m_s_pa
 }
 
