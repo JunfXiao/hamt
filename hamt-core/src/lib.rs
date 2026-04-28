@@ -1,6 +1,7 @@
 #![feature(adt_const_params, generic_const_exprs)]
 #![allow(incomplete_features)]
 
+pub mod anderson;
 pub mod boundary;
 pub mod cell;
 pub mod error;

@@ -35,10 +35,13 @@ impl Surface {
         // --- Apply latest boundary coefficients/conditions ---
         self.apply_boundary_coefficients(bc, settings)?;
 
-        // --- Update moisture-dependent properties for all cells ---
-        self.update_cell_properties(bc, settings)?;
-
         // --- Combined Heat and Moisture Step ---
+        // Note: a pre-step update_cell_properties call would be redundant.
+        // The solver reads dependent state (vp_sat, d_psat_d_t, w_thermal_c, mu, dw,
+        // dwd_phi, h_sorp_diff) from `surface_curr`, not from `self`. `surface_curr`
+        // was left in a consistent state by the previous iteration's post-step call
+        // (or by tick_timestep at iter=0). Boundary cells overwritten in
+        // apply_boundary_coefficients above are not read from `self` during the step.
         self.calculate_physics_step(settings, bc, surface_prev, surface_curr)?;
 
         // --- Update moisture-dependent properties for all cells ---

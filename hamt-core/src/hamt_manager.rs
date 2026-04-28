@@ -1,5 +1,6 @@
 //! The main orchestrator for the HAMT simulation.
 
+use crate::anderson::AndersonAccelerator;
 use crate::boundary::BoundaryCondition;
 use crate::cell::CellType;
 use crate::material::{Construction, Material};
@@ -42,6 +43,18 @@ pub struct HamtManager {
     pub settings: HamtSettings,
 
     pub last_report_time: Time<f64>,
+
+    /// Converged state from two macro-steps ago (t-2). Used together with
+    /// `surface_prev` (t-1) to seed the next macro-step's iteration with a
+    /// linear time extrapolation instead of the previous-step state.
+    /// `None` until two successful macro-steps have completed.
+    pub surface_prev_prev_macro: Option<Surface>,
+
+    /// Macro-timestep duration that just finished. Pairs with
+    /// `surface_prev_prev_macro` to scale the time-extrapolation guess to the
+    /// upcoming macro-step's Δt. `None` until at least one macro-step has been
+    /// solved successfully.
+    pub dt_prev_macro: Option<Time<f64>>,
 }
 
 impl HamtManager {
@@ -87,6 +100,8 @@ impl HamtManager {
             boundary_condition: boundary,
             materials: construction.layers.clone(),
             last_report_time: 0.0 * hours,
+            surface_prev_prev_macro: None,
+            dt_prev_macro: None,
         })
     }
 
@@ -121,6 +136,25 @@ impl HamtManager {
         let mut best_max_delta = f64::MAX;
         let mut stall_count = 0_i32;
         const STALL_PATIENCE: i32 = 50; // bail out if no improvement for this many iterations
+
+        // Anderson acceleration on the outer fixed-point loop. Reset per
+        // timestep so each macro-step starts with empty history (an old
+        // history from a different state would mislead AA). The per-cell α
+        // relaxation lives *inside* G; AA wraps G from outside without
+        // touching that logic.
+        let mut accelerator =
+            AndersonAccelerator::new(self.settings.anderson_history_depth);
+        accelerator.reset();
+        // Cached pre-iteration flattened state (raw SI scalars, material cells
+        // only). Built lazily on the first iteration after we know how many
+        // material cells there are. AA needs (x_curr, G(x_curr)) where x_curr
+        // is the state going *into* G, and G(x_curr) is the just-computed
+        // result of `calculate_iteration` after the per-cell α write-back.
+        let mut x_prev_iter: Option<Vec<f64>> = None;
+        // Cached material-cell linear indices into self.cells (in iteration
+        // order). Built once per call; the cell layout is fixed across the
+        // outer loop within one solve_timestep.
+        let mut material_indices: Option<Vec<usize>> = None;
 
         for iter in 0..self.settings.max_iterations {
             self.surface_next.calculate_iteration(
@@ -159,6 +193,91 @@ impl HamtManager {
             }
 
             mem::swap(&mut self.surface_curr, &mut self.surface_next);
+
+            // Anderson acceleration. After the swap, surface_curr holds
+            // G(x_prev) — the relaxed iterate produced by `calculate_iteration`
+            // plus the per-cell α write-back. We feed (x_prev, G(x_prev)) to
+            // the accelerator and, if it produces an extrapolated x_aa, we
+            // scatter it back into surface_curr in place of G(x_prev). The
+            // next iteration's calculate_iteration then reads x_aa as its
+            // current state (lagged neighbours), and the convergence test at
+            // the top of the next iteration sees the AA-corrected residual.
+            if self.settings.anderson_enabled {
+                // Build material-cell index list once.
+                if material_indices.is_none() {
+                    let mut idx = Vec::with_capacity(self.surface_curr.cells.len());
+                    for (linear_i, cell) in self.surface_curr.cells.iter().enumerate() {
+                        if matches!(cell.cell_type, CellType::Material(_)) {
+                            idx.push(linear_i);
+                        }
+                    }
+                    material_indices = Some(idx);
+                }
+                let mat_idx = material_indices.as_ref().unwrap();
+                let n_state = mat_idx.len() * 2;
+
+                // Flatten G(x_prev) = surface_curr post-swap.
+                // Linear-algebra-kernel boundary: strip typed quantities to
+                // raw SI f64 for the LS solve, re-tag on scatter below.
+                let mut g_x = Vec::with_capacity(n_state);
+                {
+                    let cells_slice = self.surface_curr.cells.as_slice().expect("cells contiguous");
+                    for &li in mat_idx.iter() {
+                        let c = &cells_slice[li];
+                        // strip: AA kernel works on raw f64 (kelvin, dimensionless)
+                        g_x.push(c.cell_temp.value_in(kelvin));
+                        // strip: AA kernel works on raw f64 (kelvin, dimensionless)
+                        g_x.push(c.cell_rh.value());
+                    }
+                }
+
+                if let Some(x_curr_vec) = x_prev_iter.as_ref() {
+                    if let Some(x_aa) = accelerator.accelerate(x_curr_vec, &g_x) {
+                        // Scatter x_aa back into surface_curr's material cells
+                        // and refresh dependent state so the next iteration
+                        // reads consistent (vp_sat, w, dwd_phi, ...).
+                        {
+                            let cells_slice =
+                                self.surface_curr.cells.as_slice_mut().expect("cells contiguous");
+                            for (k, &li) in mat_idx.iter().enumerate() {
+                                let t_new = x_aa[2 * k];
+                                let mut rh_new = x_aa[2 * k + 1];
+                                if !rh_new.is_finite() {
+                                    rh_new = cells_slice[li].cell_rh.value();
+                                }
+                                let rh_new = rh_new.clamp(0.0, 1.01);
+                                let cell = &mut cells_slice[li];
+                                // re-tag at kernel boundary
+                                cell.cell_temp = t_new * kelvin;
+                                cell.cell_rh = rh_new * uom::units::dimensionless;
+                                cell.calc_dependent_state(&self.boundary_condition, &self.settings);
+                            }
+                        }
+                        // Update x_prev_iter to the post-AA state for the
+                        // next iteration's diff.
+                        let cells_slice = self.surface_curr.cells.as_slice().expect("cells contiguous");
+                        let mut x_aa_actual = Vec::with_capacity(n_state);
+                        for &li in mat_idx.iter() {
+                            let c = &cells_slice[li];
+                            // strip: AA kernel boundary
+                            x_aa_actual.push(c.cell_temp.value_in(kelvin));
+                            // strip: AA kernel boundary
+                            x_aa_actual.push(c.cell_rh.value());
+                        }
+                        x_prev_iter = Some(x_aa_actual);
+                    } else {
+                        // AA skipped (gate, singular, or non-finite). Keep
+                        // surface_curr = G(x_prev) and advance the cached
+                        // x_prev_iter to it.
+                        x_prev_iter = Some(g_x);
+                    }
+                } else {
+                    // First iteration: no previous x to diff against. Seed
+                    // history with the current G(x) — the next iteration will
+                    // form the first ΔF column.
+                    x_prev_iter = Some(g_x);
+                }
+            }
 
             if stats.converged && stats.rh_converged {
                 if iter > 100 {
@@ -204,6 +323,54 @@ impl HamtManager {
         Ok(false) // Not converged
     }
 
+    /// Linear time-extrapolation warm start for the macro-step initial guess.
+    ///
+    /// Replaces material-cell `cell_temp` and `cell_rh` in `surface_curr` and
+    /// `surface_next` with `value_prev + (value_prev - value_prev_prev) * Δt_ratio`,
+    /// where `Δt_ratio = dt_macro_now / dt_prev_macro`. Boundary cells are left
+    /// untouched — `apply_boundary_coefficients` overwrites their state at the
+    /// start of every iteration. After the extrapolation, dependent state
+    /// (vp_sat, d_psat_d_t, volumetric_water, ...) is refreshed via
+    /// `update_cell_properties` so it stays consistent with the new (T, φ).
+    fn apply_warm_start(
+        &mut self,
+        prev_prev: &Surface,
+        dt_macro_now: Time<f64>,
+        dt_prev_macro: Time<f64>,
+    ) -> Result<()> {
+        use crate::uom::Quantity;
+        use crate::uom::dimensions::Dimensionless;
+        let ratio: Dimensionless<f64> = dt_macro_now / dt_prev_macro;
+
+        // surface_prev is the t-1 anchor; prev_prev is t-2. surface_curr was
+        // just sync'd to surface_prev by tick_timestep, so it carries t-1 too.
+        for ((cell_curr, cell_next), (cell_prev, cell_prev_prev)) in self
+            .surface_curr
+            .cells
+            .iter_mut()
+            .zip(self.surface_next.cells.iter_mut())
+            .zip(self.surface_prev.cells.iter().zip(prev_prev.cells.iter()))
+        {
+            if !matches!(cell_prev.cell_type, CellType::Material(_)) {
+                continue;
+            }
+            let dt_extrap = (cell_prev.cell_temp - cell_prev_prev.cell_temp) * ratio;
+            let drh_extrap = (cell_prev.cell_rh - cell_prev_prev.cell_rh) * ratio;
+            let t_init = cell_prev.cell_temp + dt_extrap;
+            let rh_init = (cell_prev.cell_rh + drh_extrap).clamp(Quantity(0.0), Quantity(1.01));
+            cell_curr.cell_temp = t_init;
+            cell_curr.cell_rh = rh_init;
+            cell_next.cell_temp = t_init;
+            cell_next.cell_rh = rh_init;
+        }
+
+        self.surface_curr
+            .update_cell_properties(&self.boundary_condition, &self.settings)?;
+        self.surface_next
+            .update_cell_properties(&self.boundary_condition, &self.settings)?;
+        Ok(())
+    }
+
     /// Resets all per-cell relaxation factors to 1.0.
     pub fn reset_relaxation_factors(&mut self) {
         for cell in self.surface_curr.cells.iter_mut() {
@@ -226,6 +393,16 @@ impl HamtManager {
         adaptive_state: &mut AdaptiveState<T>,
         mut callback_state_change: Option<Box<dyn FnMut(&AdaptiveState<T>) -> Result<()>>>,
     ) -> Result<()> {
+        // Time-extrapolation warm start. Skipped on the very first macro-step
+        // (before two converged states exist) and on any step following a
+        // failed solve (dt_prev_macro is only stamped on the success path).
+        if let (Some(prev_prev), Some(dt_prev)) = (
+            self.surface_prev_prev_macro.clone(),
+            self.dt_prev_macro,
+        ) {
+            self.apply_warm_start(&prev_prev, self.settings.timestep, dt_prev)?;
+        }
+
         adaptive_state.substep_time = 0.0 * hours;
         adaptive_state.flux_accumulator.reset();
         let orig_timestep = self.settings.timestep;
@@ -396,11 +573,23 @@ impl HamtManager {
             .sync_state_from(adaptive_state.prev_surface_state.as_ref().unwrap())?;
         self.settings.timestep = orig_timestep;
         adaptive_state.substep_time = orig_timestep;
+        // Stamp the macro Δt only on the success path: a failed step must not
+        // poison the next extrapolation.
+        self.dt_prev_macro = Some(orig_timestep);
         Ok(())
     }
 
     /// Executes after the timestep has been calculated.
     pub fn tick_timestep(&mut self) -> Result<()> {
+        // Capture the about-to-be-replaced t-1 state as the warm-start anchor
+        // for the *next* macro call (where it becomes t-2). Done here, before
+        // the swap, because afterwards `surface_prev` carries the just-converged
+        // state and the t-1 snapshot is no longer accessible.
+        match self.surface_prev_prev_macro {
+            Some(ref mut s) => { s.sync_state_from(&self.surface_prev)?; }
+            None => { self.surface_prev_prev_macro = Some(self.surface_prev.clone()); }
+        }
+
         // The converged state is in `surface_curr`. This becomes the previous state for the next timestep.
         mem::swap(&mut self.surface_prev, &mut self.surface_curr);
 
@@ -544,6 +733,16 @@ pub struct HamtSettings {
     /// latent heat used in the energy balance is `L_v + H_diff(φ)` instead of `L_v` alone.
     /// Has no effect if no material in the construction provides the curve.
     pub sorption_enthalpy_enabled: bool,
+
+    /// Enable Type-II Anderson acceleration on the outer fixed-point loop.
+    ///
+    /// When `true`, the solver wraps the per-iteration Picard map with an AA
+    /// extrapolation step using the last `anderson_history_depth` iterates.
+    /// When `false`, the loop is byte-identical to the unaccelerated baseline.
+    pub anderson_enabled: bool,
+
+    /// Maximum AA history depth (mixing parameter `m`). Typical values 3..=5.
+    pub anderson_history_depth: usize,
 }
 
 impl Default for HamtSettings {
@@ -566,6 +765,8 @@ impl Default for HamtSettings {
             min_relaxation_factor: 0.5,
             coupled_heat_moisture_enabled: true,
             sorption_enthalpy_enabled: true,
+            anderson_enabled: true,
+            anderson_history_depth: 3,
         }
     }
 }
