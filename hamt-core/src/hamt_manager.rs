@@ -145,12 +145,13 @@ impl HamtManager {
         let mut accelerator =
             AndersonAccelerator::new(self.settings.anderson_history_depth);
         accelerator.reset();
-        // Cached pre-iteration flattened state (raw SI scalars, material cells
-        // only). Built lazily on the first iteration after we know how many
-        // material cells there are. AA needs (x_curr, G(x_curr)) where x_curr
-        // is the state going *into* G, and G(x_curr) is the just-computed
-        // result of `calculate_iteration` after the per-cell α write-back.
-        let mut x_prev_iter: Option<Vec<f64>> = None;
+        // Cached pre-iteration state for AA: one (T_kelvin, φ) pair per material
+        // cell, in `material_indices` order. Built lazily on the first iteration.
+        // AA needs (x_curr, G(x_curr)) where x_curr is the state going *into* G
+        // and G(x_curr) is the just-computed result of `calculate_iteration`
+        // after the per-cell α write-back. The AA kernel itself works on flat
+        // `&[f64]`; the conversion happens at the call site below.
+        let mut x_prev_iter: Option<Vec<(f64, f64)>> = None;
         // Cached material-cell linear indices into self.cells (in iteration
         // order). Built once per call; the cell layout is fixed across the
         // outer loop within one solve_timestep.
@@ -214,38 +215,49 @@ impl HamtManager {
                     material_indices = Some(idx);
                 }
                 let mat_idx = material_indices.as_ref().unwrap();
-                let n_state = mat_idx.len() * 2;
 
-                // Flatten G(x_prev) = surface_curr post-swap.
-                // Linear-algebra-kernel boundary: strip typed quantities to
-                // raw SI f64 for the LS solve, re-tag on scatter below.
-                let mut g_x = Vec::with_capacity(n_state);
+                // Gather G(x_prev) = surface_curr post-swap as one (T_kelvin, φ)
+                // pair per material cell. Linear-algebra-kernel boundary: strip
+                // typed quantities to raw SI f64; re-tag on scatter below.
+                let mut g_x: Vec<(f64, f64)> = Vec::with_capacity(mat_idx.len());
                 {
                     let cells_slice = self.surface_curr.cells.as_slice().expect("cells contiguous");
                     for &li in mat_idx.iter() {
                         let c = &cells_slice[li];
                         // strip: AA kernel works on raw f64 (kelvin, dimensionless)
-                        g_x.push(c.cell_temp.value_in(kelvin));
-                        // strip: AA kernel works on raw f64 (kelvin, dimensionless)
-                        g_x.push(c.cell_rh.value());
+                        g_x.push((c.cell_temp.value_in(kelvin), c.cell_rh.value()));
                     }
                 }
 
-                if let Some(x_curr_vec) = x_prev_iter.as_ref() {
-                    if let Some(x_aa) = accelerator.accelerate(x_curr_vec, &g_x) {
-                        // Scatter x_aa back into surface_curr's material cells
-                        // and refresh dependent state so the next iteration
-                        // reads consistent (vp_sat, w, dwd_phi, ...).
+                if let Some(x_curr_pairs) = x_prev_iter.as_ref() {
+                    // Flatten the (T, φ) pairs into the interleaved layout the
+                    // AA kernel expects.
+                    let x_curr_flat: Vec<f64> =
+                        x_curr_pairs.iter().flat_map(|&(t, rh)| [t, rh]).collect();
+                    let g_x_flat: Vec<f64> =
+                        g_x.iter().flat_map(|&(t, rh)| [t, rh]).collect();
+
+                    if let Some(x_aa) = accelerator.accelerate(&x_curr_flat, &g_x_flat) {
+                        // Reshape AA output back into (T, φ) pairs for the scatter.
+                        let x_aa_pairs: Vec<(f64, f64)> = x_aa
+                            .chunks_exact(2)
+                            .map(|c| (c[0], c[1]))
+                            .collect();
+
+                        // Scatter into surface_curr's material cells and refresh
+                        // dependent state so the next iteration reads consistent
+                        // (vp_sat, w, dwd_phi, ...).
                         {
                             let cells_slice =
                                 self.surface_curr.cells.as_slice_mut().expect("cells contiguous");
-                            for (k, &li) in mat_idx.iter().enumerate() {
-                                let t_new = x_aa[2 * k];
-                                let mut rh_new = x_aa[2 * k + 1];
-                                if !rh_new.is_finite() {
-                                    rh_new = cells_slice[li].cell_rh.value();
-                                }
-                                let rh_new = rh_new.clamp(0.0, 1.01);
+                            for (&li, &(t_new, rh_new_raw)) in
+                                mat_idx.iter().zip(x_aa_pairs.iter())
+                            {
+                                let rh_new = if rh_new_raw.is_finite() {
+                                    rh_new_raw.clamp(0.0, 1.01)
+                                } else {
+                                    cells_slice[li].cell_rh.value()
+                                };
                                 let cell = &mut cells_slice[li];
                                 // re-tag at kernel boundary
                                 cell.cell_temp = t_new * kelvin;
@@ -253,28 +265,26 @@ impl HamtManager {
                                 cell.calc_dependent_state(&self.boundary_condition, &self.settings);
                             }
                         }
-                        // Update x_prev_iter to the post-AA state for the
-                        // next iteration's diff.
+
+                        // Cache the post-AA state (post-clamp, as the cells now
+                        // hold it) for the next iteration's diff.
                         let cells_slice = self.surface_curr.cells.as_slice().expect("cells contiguous");
-                        let mut x_aa_actual = Vec::with_capacity(n_state);
+                        let mut x_aa_actual: Vec<(f64, f64)> = Vec::with_capacity(mat_idx.len());
                         for &li in mat_idx.iter() {
                             let c = &cells_slice[li];
                             // strip: AA kernel boundary
-                            x_aa_actual.push(c.cell_temp.value_in(kelvin));
-                            // strip: AA kernel boundary
-                            x_aa_actual.push(c.cell_rh.value());
+                            x_aa_actual.push((c.cell_temp.value_in(kelvin), c.cell_rh.value()));
                         }
                         x_prev_iter = Some(x_aa_actual);
                     } else {
                         // AA skipped (gate, singular, or non-finite). Keep
-                        // surface_curr = G(x_prev) and advance the cached
-                        // x_prev_iter to it.
+                        // surface_curr = G(x_prev) and advance the cache to it.
                         x_prev_iter = Some(g_x);
                     }
                 } else {
-                    // First iteration: no previous x to diff against. Seed
-                    // history with the current G(x) — the next iteration will
-                    // form the first ΔF column.
+                    // First iteration: no previous x to diff against. Seed the
+                    // cache with the current G(x); the next iteration forms the
+                    // first ΔF column.
                     x_prev_iter = Some(g_x);
                 }
             }
