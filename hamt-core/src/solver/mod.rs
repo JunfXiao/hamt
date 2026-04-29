@@ -16,3 +16,4 @@
 //! linear-algebra-kernel exception.
 
 pub mod block_2x2;
+pub mod block_tridiag;
