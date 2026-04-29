@@ -47,6 +47,28 @@ impl Block2x2 {
             d: self.d - rhs.d,
         }
     }
+
+    #[inline]
+    pub fn det(&self) -> f64 {
+        self.a * self.d - self.b * self.c
+    }
+
+    /// Returns `M^-1` if `|det| > eps`, else `None`. The caller is expected
+    /// to fall back to a scalar/decoupled path on near-singularity (the
+    /// existing solver does this when vapor coupling vanishes).
+    pub fn try_inv(&self, eps: f64) -> Option<Block2x2> {
+        let det = self.det();
+        if det.abs() <= eps || !det.is_finite() {
+            return None;
+        }
+        let inv_det = 1.0 / det;
+        Some(Block2x2 {
+            a:  self.d * inv_det,
+            b: -self.b * inv_det,
+            c: -self.c * inv_det,
+            d:  self.a * inv_det,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -120,5 +142,58 @@ mod tests {
     fn sub_self_is_zero() {
         let m = Block2x2 { a: 4.0, b: 5.0, c: 6.0, d: 7.0 };
         assert!(approx_block(&m.sub(&m), &Block2x2::zero(), 1e-12));
+    }
+
+    /// det((1,2,3,4)) = 1·4 − 2·3 = −2.  One concrete textbook value.
+    #[test]
+    fn det_textbook_reference() {
+        let m = Block2x2 { a: 1.0, b: 2.0, c: 3.0, d: 4.0 };
+        assert!(approx(m.det(), -2.0, 1e-12));
+    }
+
+    /// Property: det of identity is 1; det of zero is 0.
+    #[test]
+    fn det_of_identity_and_zero() {
+        assert!(approx(Block2x2::identity().det(), 1.0, 1e-12));
+        assert!(approx(Block2x2::zero().det(), 0.0, 1e-12));
+    }
+
+    /// Property: M · M⁻¹ = I  AND  M⁻¹ · M = I  for invertible M.
+    /// Tested on a small set of generic matrices.
+    #[test]
+    fn inv_is_two_sided() {
+        let cases = [
+            Block2x2 { a: 4.0, b: 7.0, c: 2.0, d: 6.0 },
+            Block2x2 { a: -1.5, b: 0.5, c: 0.25, d: 3.0 },
+            Block2x2 { a: 1.0, b: 0.0, c: 0.0, d: 1.0 },
+        ];
+        for m in cases {
+            let inv = m.try_inv(1e-12).expect("invertible");
+            assert!(approx_block(&m.mul(&inv), &Block2x2::identity(), 1e-9));
+            assert!(approx_block(&inv.mul(&m), &Block2x2::identity(), 1e-9));
+        }
+    }
+
+    /// Property: try_inv returns None when det is exactly zero or below eps.
+    #[test]
+    fn singular_or_near_singular_returns_none() {
+        // Exactly singular: rows are linearly dependent.
+        let m1 = Block2x2 { a: 2.0, b: 4.0, c: 1.0, d: 2.0 };
+        assert!(m1.try_inv(1e-12).is_none());
+        // Near-singular: det = 1e-15 < eps = 1e-12.
+        let m2 = Block2x2 { a: 1.0, b: 1.0, c: 1.0, d: 1.0 + 1e-15 };
+        assert!(m2.try_inv(1e-12).is_none());
+        // Just barely above eps: det = 1e-9 > eps = 1e-12 → Some.
+        let m3 = Block2x2 { a: 1.0, b: 1.0, c: 1.0, d: 1.0 + 1e-9 };
+        assert!(m3.try_inv(1e-12).is_some());
+    }
+
+    /// Property: NaN / inf in det propagates as None (no panic, no garbage).
+    #[test]
+    fn non_finite_det_returns_none() {
+        let m = Block2x2 { a: f64::INFINITY, b: 0.0, c: 0.0, d: 1.0 };
+        assert!(m.try_inv(1e-12).is_none());
+        let m = Block2x2 { a: f64::NAN, b: 0.0, c: 0.0, d: 1.0 };
+        assert!(m.try_inv(1e-12).is_none());
     }
 }
