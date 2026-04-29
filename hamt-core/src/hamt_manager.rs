@@ -15,7 +15,7 @@ use crate::{error, uom};
 use anyhow::{Context, Ok, Result};
 use std::mem;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use uom::dimensions::Area;
 use uom::dimensions::Length;
 use uom::units;
@@ -136,6 +136,45 @@ impl HamtManager {
         let mut best_max_delta = f64::MAX;
         let mut stall_count = 0_i32;
         const STALL_PATIENCE: i32 = 50; // bail out if no improvement for this many iterations
+
+        // Option-(2) adaptive min-iteration guard. Picard with neighbour lagging
+        // propagates a BC perturbation exactly one material cell per iteration,
+        // so the per-iter δ-tolerance test can fire long before the disturbance
+        // has reached the back of the wall — leaving the implicit-Euler equations
+        // under-converged at deep cells.
+        //
+        // Three exit gates work together:
+        //   * Soft floor `n_mat`     — at least a full forward sweep so the wave
+        //                              reaches the back of the wall once.
+        //   * Stability check (`consecutive_met >= n_mat`) — criterion has held
+        //     uninterrupted for one full additional sweep, indicating the back
+        //     wave has propagated forward without breaking the residual.
+        //   * Hard cap `2·n_mat`     — guaranteed exit even if stability never
+        //     accumulates (e.g. slow oscillation), preserving the previous
+        //     forward-plus-backward worst-case behaviour.
+        //
+        // Steady-state steps where the criterion is tight from the start exit
+        // around `iter ≈ n_mat`. Stiff transients with late-firing criterion
+        // ride the hard cap up to `2·n_mat`. Avoids paying the full forward+
+        // backward cost on the 90+% of timesteps that don't need it.
+        let n_mat: i32 = self
+            .surface_curr
+            .cells
+            .iter()
+            .filter(|c| matches!(c.cell_type, CellType::Material(_)))
+            .count() as i32;
+
+        // Counter of consecutive iterations where the per-iter δ criterion held.
+        // Reset to 0 whenever the criterion fails. Once it reaches `n_mat` AND
+        // the soft floor is satisfied, we treat the iteration as truly converged.
+        let mut consecutive_met: i32 = 0;
+
+        // Track when the per-iter δ criterion FIRST fires. The gap between that
+        // and the actual exit iter is `min_iter_extension`; if it is large, the
+        // criterion was firing prematurely and the guard is doing useful work.
+        let mut premature_iter: Option<i32> = None;
+        let mut premature_max_dt_k: f64 = 0.0;
+        let mut premature_max_drh: f64 = 0.0;
 
         // Anderson acceleration on the outer fixed-point loop. Reset per
         // timestep so each macro-step starts with empty history (an old
@@ -289,48 +328,110 @@ impl HamtManager {
                 }
             }
 
-            if stats.converged && stats.rh_converged {
-                if iter > 100 {
-                    debug!(
+            let criterion_met = stats.converged && stats.rh_converged;
+
+            // Record the first iteration where the per-iter δ criterion fires
+            // — to be compared against the actual exit iter below.
+            if criterion_met && premature_iter.is_none() {
+                premature_iter = Some(iter);
+                premature_max_dt_k = stats.max_delta_t_k;
+                premature_max_drh = stats.max_delta_rh;
+            }
+
+            // Track stability: consecutive iters where the criterion held.
+            if criterion_met {
+                consecutive_met += 1;
+            } else {
+                consecutive_met = 0;
+            }
+
+            // Adaptive exit. Two ways to declare converged once the soft floor
+            // is reached:
+            //   (1) `consecutive_met >= n_mat`  — back wave settled cleanly,
+            //                                     exits early on easy steps.
+            //   (2) `iter + 1 >= 2 · n_mat`     — hard cap, guarantees the
+            //                                     previous forward+backward
+            //                                     worst case as upper bound.
+            // `iter + 1` because `iter` is 0-indexed.
+            let soft_floor_met = iter + 1 >= n_mat;
+            let stable_exit = consecutive_met >= n_mat;
+            let hard_cap_hit = iter + 1 >= 2 * n_mat;
+            if criterion_met && soft_floor_met && (stable_exit || hard_cap_hit) {
+                let extension = premature_iter.map_or(0, |pi| iter - pi);
+                if iter > 50 || extension > 0 {
+                    info!(
                         iter,
-                        max_delta_t_k = stats.max_delta_t_k,
-                        max_delta_rh = stats.max_delta_rh,
-                        "solve_timestep converged (slow)"
+                        max_dt_k = stats.max_delta_t_k,
+                        max_drh = stats.max_delta_rh,
+                        pinned_t_cell = ?stats.max_temp_cell,
+                        pinned_rh_cell = ?stats.max_rh_cell,
+                        n_cells = self.surface_curr.cells.len(),
+                        n_mat,
+                        consecutive_met,
+                        premature_iter = ?premature_iter,
+                        premature_max_dt_k,
+                        premature_max_drh,
+                        min_iter_extension = extension,
+                        dt_hours = self.settings.timestep.value_in(hours),
+                        exit_via = if stable_exit { "stable" } else { "hard_cap" },
+                        exit_reason = "converged",
+                        "solve_timestep exit"
                     );
                 }
                 return Ok(true);
             }
 
-            // Early termination: detect stall/oscillation
-            let current_max = stats.max_delta_t_k.max(stats.max_delta_rh * 1000.0);
-            if current_max < best_max_delta * 0.99 {
-                // Meaningful improvement (>1%) — reset stall counter
-                best_max_delta = current_max;
-                stall_count = 0;
-            } else {
-                stall_count += 1;
-                if stall_count >= STALL_PATIENCE {
-                    debug!(
-                        iter,
-                        max_delta_t_k = stats.max_delta_t_k,
-                        max_delta_rh = stats.max_delta_rh,
-                        "solve_timestep: early termination — residual stalled"
-                    );
-                    break;
+            // Stall / oscillation detection. Suppressed while the criterion is
+            // met — the iteration is intentionally being held open by the
+            // min-iter guard, so treating that as a "stall" would defeat it.
+            if !criterion_met {
+                let current_max = stats.max_delta_t_k.max(stats.max_delta_rh * 1000.0);
+                if current_max < best_max_delta * 0.99 {
+                    // Meaningful improvement (>1%) — reset stall counter
+                    best_max_delta = current_max;
+                    stall_count = 0;
+                } else {
+                    stall_count += 1;
+                    if stall_count >= STALL_PATIENCE {
+                        info!(
+                            iter,
+                            max_dt_k = stats.max_delta_t_k,
+                            max_drh = stats.max_delta_rh,
+                            pinned_t_cell = ?stats.max_temp_cell,
+                            pinned_rh_cell = ?stats.max_rh_cell,
+                            n_cells = self.surface_curr.cells.len(),
+                            n_mat,
+                            consecutive_met,
+                            premature_iter = ?premature_iter,
+                            premature_max_dt_k,
+                            premature_max_drh,
+                            dt_hours = self.settings.timestep.value_in(hours),
+                            exit_reason = "stalled",
+                            "solve_timestep exit"
+                        );
+                        return Ok(false);
+                    }
                 }
             }
         }
 
-        debug!(
-            max_iter = self.settings.max_iterations,
-            max_delta_t_k = stats.max_delta_t_k,
-            max_delta_rh = stats.max_delta_rh,
-            max_temp_cell = ?stats.max_temp_cell,
-            max_rh_cell = ?stats.max_rh_cell,
+        info!(
+            iter = self.settings.max_iterations,
+            max_dt_k = stats.max_delta_t_k,
+            max_drh = stats.max_delta_rh,
+            pinned_t_cell = ?stats.max_temp_cell,
+            pinned_rh_cell = ?stats.max_rh_cell,
+            n_cells = self.surface_curr.cells.len(),
+            n_mat,
+            consecutive_met,
+            premature_iter = ?premature_iter,
+            premature_max_dt_k,
+            premature_max_drh,
             dt_hours = self.settings.timestep.value_in(hours),
-            "solve_timestep did NOT converge"
+            exit_reason = "max_iter",
+            "solve_timestep exit"
         );
-        Ok(false) // Not converged
+        Ok(false)
     }
 
     /// Linear time-extrapolation warm start for the macro-step initial guess.

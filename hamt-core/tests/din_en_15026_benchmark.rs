@@ -992,7 +992,7 @@ fn run_total_release_with_timestep(timestep: Time<f64>) -> Result<f64> {
 
     Ok(total_release_kg)
 }
-
+ 
 #[test]
 fn test_total_release_invariance_across_timesteps() -> Result<()> {
     // Span ~30× — finest resolves transient, coarsest forces a near-quasi-
