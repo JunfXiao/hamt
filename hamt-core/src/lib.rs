@@ -10,5 +10,6 @@ pub mod io;
 pub mod material;
 pub mod parallel;
 pub mod physics;
+pub mod solver;
 pub mod surface;
 pub mod uom;
