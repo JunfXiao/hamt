@@ -70,8 +70,41 @@ pub fn solve(
         return Ok(vec![inv.mul_vec(rhs[0])]);
     }
 
-    // Forward + back-sub implemented in subsequent tasks.
-    todo!("forward sweep (Task 2.2)")
+    // Working buffers. We could overwrite `diag`/`rhs` but the API is
+    // by-reference, so allocate locals.
+    let mut d_prime: Vec<Block2x2> = diag.to_vec();
+    let mut b_prime: Vec<(f64, f64)> = rhs.to_vec();
+
+    // ── Forward sweep: eliminate sub-diagonal ──
+    for i in 1..n {
+        let inv_prev = d_prime[i - 1]
+            .try_inv(DEFAULT_SINGULARITY_EPS)
+            .ok_or(SolverError::Singular { row: i - 1 })?;
+        // M_i = L_i · D'_{i-1}^-1
+        let m = lower[i].mul(&inv_prev);
+        // D'_i = D_i − M_i · U_{i-1}
+        d_prime[i] = d_prime[i].sub(&m.mul(&upper[i - 1]));
+        // b'_i = b_i − M_i · b'_{i-1}
+        let m_b = m.mul_vec(b_prime[i - 1]);
+        b_prime[i] = (b_prime[i].0 - m_b.0, b_prime[i].1 - m_b.1);
+    }
+
+    // ── Back-substitution ──
+    let mut x: Vec<(f64, f64)> = vec![(0.0, 0.0); n];
+    let inv_last = d_prime[n - 1]
+        .try_inv(DEFAULT_SINGULARITY_EPS)
+        .ok_or(SolverError::Singular { row: n - 1 })?;
+    x[n - 1] = inv_last.mul_vec(b_prime[n - 1]);
+    for i in (0..n - 1).rev() {
+        let inv_i = d_prime[i]
+            .try_inv(DEFAULT_SINGULARITY_EPS)
+            .ok_or(SolverError::Singular { row: i })?;
+        let ux = upper[i].mul_vec(x[i + 1]);
+        let r = (b_prime[i].0 - ux.0, b_prime[i].1 - ux.1);
+        x[i] = inv_i.mul_vec(r);
+    }
+
+    Ok(x)
 }
 
 #[cfg(test)]
@@ -106,5 +139,157 @@ mod tests {
     fn empty_input_errors() {
         let res = solve(&[], &[], &[], &[]);
         assert!(matches!(res, Err(SolverError::Empty)));
+    }
+
+    /// Helper: assemble residual r_i = L·x_{i-1} + D·x_i + U·x_{i+1} − b_i.
+    /// Used by tests to verify the SOLVED x satisfies the system.
+    fn residual_norm(
+        l: &[Block2x2], d: &[Block2x2], u: &[Block2x2],
+        x: &[(f64, f64)], b: &[(f64, f64)],
+    ) -> f64 {
+        let n = d.len();
+        let mut max_r = 0.0_f64;
+        for i in 0..n {
+            let dx = d[i].mul_vec(x[i]);
+            let lx = if i == 0 { (0.0, 0.0) } else { l[i].mul_vec(x[i - 1]) };
+            let ux = if i + 1 == n { (0.0, 0.0) } else { u[i].mul_vec(x[i + 1]) };
+            let r0 = dx.0 + lx.0 + ux.0 - b[i].0;
+            let r1 = dx.1 + lx.1 + ux.1 - b[i].1;
+            max_r = max_r.max(r0.abs()).max(r1.abs());
+        }
+        max_r
+    }
+
+    /// Helper: build b consistent with x_true so we can round-trip.
+    fn build_b(
+        l: &[Block2x2], d: &[Block2x2], u: &[Block2x2], x_true: &[(f64, f64)],
+    ) -> Vec<(f64, f64)> {
+        let n = d.len();
+        (0..n).map(|i| {
+            let dx = d[i].mul_vec(x_true[i]);
+            let lx = if i == 0 { (0.0, 0.0) } else { l[i].mul_vec(x_true[i - 1]) };
+            let ux = if i + 1 == n { (0.0, 0.0) } else { u[i].mul_vec(x_true[i + 1]) };
+            (dx.0 + lx.0 + ux.0, dx.1 + lx.1 + ux.1)
+        }).collect()
+    }
+
+    /// Property (decoupled): when L = U = 0, each block solves independently.
+    #[test]
+    fn diagonal_only_system_decouples() {
+        let d = vec![
+            Block2x2 { a: 2.0, b: 0.0, c: 0.0, d: 4.0 },
+            Block2x2 { a: 1.0, b: 0.0, c: 0.0, d: 2.0 },
+            Block2x2 { a: 5.0, b: 0.0, c: 0.0, d: 1.0 },
+        ];
+        let l = vec![Block2x2::zero(); 3];
+        let u = vec![Block2x2::zero(); 3];
+        let x_true: Vec<(f64, f64)> = vec![(2.0, 2.0), (1.0, 3.0), (2.0, 3.0)];
+        let b = build_b(&l, &d, &u, &x_true);
+        let x = solve(&l, &d, &u, &b).unwrap();
+        for i in 0..3 {
+            assert!(
+                approx_pair(x[i], x_true[i], 1e-12),
+                "row {i}: got {:?}, want {:?}", x[i], x_true[i]
+            );
+        }
+    }
+
+    /// Property (round-trip): for an arbitrary diagonally-dominant block-
+    /// tridiag system, b = system · x_true ⟹ solve(b) ≈ x_true.
+    #[test]
+    fn round_trip_recovers_x_dense_blocks() {
+        let l = vec![
+            Block2x2::zero(),
+            Block2x2 { a: -0.4, b: 0.1, c: -0.05, d: -0.3 },
+            Block2x2 { a: -0.6, b: -0.1, c: 0.0, d: -0.5 },
+        ];
+        let d = vec![
+            Block2x2 { a: 3.0, b: 0.2, c: 0.1, d: 4.0 },
+            Block2x2 { a: 2.5, b: 0.0, c: 0.05, d: 3.5 },
+            Block2x2 { a: 4.0, b: -0.1, c: 0.0, d: 5.0 },
+        ];
+        let u = vec![
+            Block2x2 { a: -0.5, b: 0.0, c: 0.05, d: -0.4 },
+            Block2x2 { a: -0.6, b: -0.05, c: 0.0, d: -0.5 },
+            Block2x2::zero(),
+        ];
+        let x_true = vec![(1.0, 0.5), (-0.3, 0.7), (2.0, -0.4)];
+        let b = build_b(&l, &d, &u, &x_true);
+        let x = solve(&l, &d, &u, &b).unwrap();
+        for i in 0..3 {
+            assert!(approx_pair(x[i], x_true[i], 1e-9));
+        }
+        // Residual must be at floating-point noise.
+        assert!(residual_norm(&l, &d, &u, &x, &b) < 1e-9);
+    }
+
+    /// Property: same round-trip on a longer system. Length-related index
+    /// bugs (off-by-one in forward / back loops) survive N=3 but not N=10.
+    #[test]
+    fn round_trip_length_10() {
+        use std::f64::consts::PI;
+        let n = 10;
+        let mut l = vec![Block2x2::zero(); n];
+        let mut d = vec![Block2x2::zero(); n];
+        let mut u = vec![Block2x2::zero(); n];
+        for i in 0..n {
+            let s = (i as f64 + 1.0) * 0.1;
+            d[i] = Block2x2 { a: 5.0 + s, b: 0.2 * s, c: 0.1 * s, d: 6.0 + s };
+            if i > 0 {
+                l[i] = Block2x2 { a: -1.0 - 0.1*s, b: 0.05*s, c: 0.0, d: -1.5 };
+            }
+            if i + 1 < n {
+                u[i] = Block2x2 { a: -1.0 - 0.1*s, b: 0.0, c: 0.05*s, d: -1.5 };
+            }
+        }
+        let x_true: Vec<(f64, f64)> = (0..n)
+            .map(|i| ((PI * i as f64 / n as f64).sin(), 0.3 + 0.05 * i as f64))
+            .collect();
+        let b = build_b(&l, &d, &u, &x_true);
+        let x = solve(&l, &d, &u, &b).unwrap();
+        let r = residual_norm(&l, &d, &u, &x, &b);
+        assert!(r < 1e-8, "residual {r} too large");
+        for i in 0..n {
+            assert!(approx_pair(x[i], x_true[i], 1e-7), "row {i}");
+        }
+    }
+
+    /// Edge case: N=2 with strictly diagonal blocks reduces to two
+    /// independent scalar tridiag-of-length-2 problems with hand-checkable
+    /// answers.   2 −1 ┐ ┌ x ┐   ┌ 1 ┐
+    ///          −1  2 ┘ └ y ┘ = └ 1 ┘   →  x = y = 1.
+    #[test]
+    fn n2_scalar_reduction_hand_check() {
+        let d = vec![
+            Block2x2 { a: 2.0, b: 0.0, c: 0.0, d: 2.0 },
+            Block2x2 { a: 2.0, b: 0.0, c: 0.0, d: 2.0 },
+        ];
+        let l = vec![
+            Block2x2::zero(),
+            Block2x2 { a: -1.0, b: 0.0, c: 0.0, d: -1.0 },
+        ];
+        let u = vec![
+            Block2x2 { a: -1.0, b: 0.0, c: 0.0, d: -1.0 },
+            Block2x2::zero(),
+        ];
+        let b = vec![(1.0, 1.0), (1.0, 1.0)];
+        let x = solve(&l, &d, &u, &b).unwrap();
+        assert!(approx_pair(x[0], (1.0, 1.0), 1e-12));
+        assert!(approx_pair(x[1], (1.0, 1.0), 1e-12));
+    }
+
+    /// Edge case: a singular intermediate D' must surface as Singular(row).
+    #[test]
+    fn singular_diagonal_reports_row() {
+        let d = vec![
+            Block2x2::identity(),
+            Block2x2::zero(),  // becomes singular after elimination too
+        ];
+        let l = vec![Block2x2::zero(), Block2x2::zero()];
+        let u = vec![Block2x2::zero(), Block2x2::zero()];
+        let b = vec![(1.0, 1.0), (1.0, 1.0)];
+        let res = solve(&l, &d, &u, &b);
+        assert!(matches!(res, Err(SolverError::Singular { row: 1 })),
+                "expected Singular {{ row: 1 }}, got {:?}", res);
     }
 }
