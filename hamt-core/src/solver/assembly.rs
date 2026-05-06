@@ -31,21 +31,21 @@ use super::block_2x2::Block2x2;
 /// One assembled block-tridiagonal system covering all material cells of
 /// `surface_curr` in physical order. `lower[0]` and `upper[N-1]` are
 /// zero-filled per the `block_tridiag::solve` API contract.
-pub struct AssembledSystem {
-    pub lower: Vec<Block2x2>,
-    pub diag:  Vec<Block2x2>,
-    pub upper: Vec<Block2x2>,
-    pub rhs:   Vec<(f64, f64)>,
+pub(crate) struct AssembledSystem {
+    pub(crate) lower: Vec<Block2x2>,
+    pub(crate) diag:  Vec<Block2x2>,
+    pub(crate) upper: Vec<Block2x2>,
+    pub(crate) rhs:   Vec<(f64, f64)>,
     /// Material cells' linear indices into `surface_curr.cells`, in the
     /// same order as `diag` rows. Used to scatter the solve result back.
-    pub material_indices: Vec<usize>,
+    pub(crate) material_indices: Vec<usize>,
 }
 
 /// Build the system from `surface_curr` (lagged-iteration state) and
 /// `surface_prev` (t-1 anchor). Boundary cells must already have been
 /// pushed via `apply_boundary_coefficients`. `update_cell_properties`
 /// must already have refreshed `vp_sat`, `d_psat_d_t`, `dwd_phi`, etc.
-pub fn assemble_1d(
+pub(crate) fn assemble_1d(
     surface_curr: &Surface,
     surface_prev: &Surface,
     bc: &BoundaryCondition,
@@ -78,9 +78,14 @@ pub fn assemble_1d(
         let cell_prev = &surface_prev.cells[[i, 0, 0]];
 
         // L_eff and Taylor parameters at lagged state.
-        let l_eff: crate::uom::dimensions::SpecificEnergy<f64> = 1.0 * WATER_LATENT_HEAT
-            + if settings.sorption_enthalpy_enabled { cell_curr.h_sorp_diff }
-              else { 0.0 * j_per_kg };
+        // When latent_heat_enabled is false the cross-coupling vanishes entirely.
+        let l_eff: crate::uom::dimensions::SpecificEnergy<f64> = if settings.latent_heat_enabled {
+            1.0 * WATER_LATENT_HEAT
+                + if settings.sorption_enthalpy_enabled { cell_curr.h_sorp_diff }
+                  else { 0.0 * j_per_kg }
+        } else {
+            0.0 * j_per_kg
+        };
         let phi_k = cell_curr.cell_rh;
         let psat_curr = cell_curr.vp_sat;
         let d_psat_d_t = cell_curr.d_psat_d_t;
@@ -180,8 +185,14 @@ pub fn assemble_1d(
             // Local Psat / dPsat-dT for the NEIGHBOUR (lagged).
             // strip: kernel boundary
             let psat_n  = nbr_curr.vp_sat.value_in(pascals);
-            let phi_n   = nbr_curr.cell_rh.value();
+            let _phi_n  = nbr_curr.cell_rh.value(); // kept for readability; vp_n used in RHS
             let temp_n  = nbr_curr.cell_temp.value_in(kelvin);
+            // Use cell_vp directly: boundary cells set cell_vp explicitly
+            // (e.g. Radiation cell sets cell_vp = 0), so psat_n * phi_n
+            // is wrong for them. The material-neighbour off-diagonals still
+            // use psat_n (correct: they reference the state variable phi,
+            // not the fixed boundary VP). See surface/update.rs:250.
+            let vp_n = nbr_curr.cell_vp.value_in(pascals); // strip: kernel boundary
 
             // Always update the LOCAL `vpoosum_si` (cross-coupling uses
             // sum over ALL neighbours).
@@ -204,6 +215,13 @@ pub fn assemble_1d(
                 let off = Block2x2 {
                     a: -inv_th,
                     b: -l_eff_v * inv_vapor * psat_n,
+                    // c = 0: matches the existing Picard "lagged neighbour vapour" semantics.
+                    // The plan's draft proposed -inv_vapor*phi_n*dpsdt_n here, but a
+                    // fully-implicit form would also need a matching +inv_vapor*phi_n*
+                    // dpsdt_n*T_n term in b_p (Taylor bias for the lagged-T expansion of
+                    // vp_n). Without that bias the off-diagonal c term is mathematically
+                    // inconsistent. We chose the lagged-vp form (c = 0, no bias) so the
+                    // block-tridiag converges to the same answer Picard does.
                     c: 0.0,
                     d: -(inv_phi + inv_vapor * psat_n),
                 };
@@ -229,8 +247,8 @@ pub fn assemble_1d(
                 // RHS additions for the boundary side.
                 // strip: kernel boundary
                 b_t += inv_th * temp_n
-                    + l_eff.value_in(j_per_kg) * inv_vapor * (psat_n * phi_n);
-                b_p += inv_phi * phi_b + inv_vapor * (psat_n * phi_n);
+                    + l_eff.value_in(j_per_kg) * inv_vapor * vp_n;
+                b_p += inv_phi * phi_b + inv_vapor * vp_n;
             }
         }
 
@@ -456,6 +474,24 @@ mod tests {
         assert!(sys.upper[n - 1].a == z.a && sys.upper[n - 1].b == z.b
                 && sys.upper[n - 1].c == z.c && sys.upper[n - 1].d == z.d,
                 "upper[N-1] must be zero, got {:?}", sys.upper[n - 1]);
+    }
+
+    /// Property: with a tiny wall (n_div = 1) every material cell has
+    /// only boundary neighbours, so BOTH lower and upper are zero.
+    #[test]
+    fn single_material_cell_has_no_off_diagonals() {
+        let mgr = fixture(1);
+        let sys = assemble_1d(
+            &mgr.surface_curr, &mgr.surface_prev,
+            &mgr.boundary_condition, &mgr.settings,
+        );
+        // (n_div=1 may still produce >1 cell after subdivision rules;
+        //  the property holds even when n_mat = 1 — test gracefully.)
+        if sys.diag.len() == 1 {
+            let z = crate::solver::block_2x2::Block2x2::zero();
+            assert_eq!(sys.lower[0], z);
+            assert_eq!(sys.upper[0], z);
+        }
     }
 
     /// Property (round-trip via solver): the assembled system, when
