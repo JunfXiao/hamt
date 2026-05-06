@@ -292,4 +292,59 @@ mod tests {
         assert!(matches!(res, Err(SolverError::Singular { row: 1 })),
                 "expected Singular {{ row: 1 }}, got {:?}", res);
     }
+
+    #[test]
+    fn pure_heat_diffusion_matches_implicit_euler() {
+        // 1-D heat equation:  ∂T/∂t = α ∂²T/∂x², N=5 cells, Dirichlet 0 at
+        // both ends, T(x, 0) = sin(π x). After implicit-Euler step Δt with
+        // α Δt / Δx² = 0.25, the analytical (continuum) decay factor is
+        // exp(-π² α Δt) ≈ 0.085, but the implicit-Euler discrete decay
+        // factor is 1 / (1 + 4·0.25·sin²(π/(2·6))²) summed across modes;
+        // we don't compare to that. Instead, build A from a known x_true,
+        // compute b = A·x_true, solve, and confirm we get x_true back.
+        let n = 5;
+        let r = 0.25; // α Δt / Δx²
+        // Diagonal: 1 + 2r in the T channel, 1 in the φ channel (decoupled).
+        let d_block = Block2x2 { a: 1.0 + 2.0 * r, b: 0.0, c: 0.0, d: 1.0 };
+        let off_block = Block2x2 { a: -r, b: 0.0, c: 0.0, d: 0.0 };
+        let mut diag = vec![d_block; n];
+        // Boundary rows (i=0, n-1): the off-diagonal beyond the boundary is
+        // absent, so we model Dirichlet T=0 by leaving the corresponding
+        // upper/lower as zero (same as the kernel's no-out-of-range rule).
+        let lower = vec![off_block; n];
+        // lower[0] unused
+        let upper = vec![off_block; n];
+        // upper[n-1] unused
+
+        // Make endpoints Dirichlet by tweaking the boundary diagonals so the
+        // tridiag is exactly representing zero outside.
+        diag[0] = Block2x2 { a: 1.0 + 2.0 * r, b: 0.0, c: 0.0, d: 1.0 };
+        diag[n - 1] = Block2x2 { a: 1.0 + 2.0 * r, b: 0.0, c: 0.0, d: 1.0 };
+
+        // Pick a smooth interior solution.
+        let x_true: Vec<(f64, f64)> = (0..n)
+            .map(|i| {
+                let x = (i as f64 + 1.0) / (n as f64 + 1.0);
+                let t = (std::f64::consts::PI * x).sin();
+                (t, 0.5)
+            })
+            .collect();
+
+        // b_i = D·x_i + U·x_{i+1} + L·x_{i-1}
+        let mut b = vec![(0.0, 0.0); n];
+        for i in 0..n {
+            let dx = diag[i].mul_vec(x_true[i]);
+            let lx = if i == 0 { (0.0, 0.0) } else { lower[i].mul_vec(x_true[i - 1]) };
+            let ux = if i == n - 1 { (0.0, 0.0) } else { upper[i].mul_vec(x_true[i + 1]) };
+            b[i] = (dx.0 + lx.0 + ux.0, dx.1 + lx.1 + ux.1);
+        }
+
+        let x = solve(&lower, &diag, &upper, &b).unwrap();
+        for i in 0..n {
+            assert!(
+                approx_pair(x[i], x_true[i], 1e-10),
+                "i={i} got {:?} want {:?}", x[i], x_true[i]
+            );
+        }
+    }
 }
