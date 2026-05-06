@@ -586,34 +586,75 @@ impl Surface {
         self.sync_state_from(surface_curr)?;
         self.apply_boundary_coefficients(bc, settings)?;
 
-        // Virtual cells aren't updated by `apply_boundary_coefficients`. In the
-        // Picard path, `calculate_physics_step` runs the per-cell 2×2 solve on
-        // every non-boundary cell (including Virtual), so they pick up the BC's
-        // moisture-side state as a side-effect. The BlockTridiagonal scatter
-        // writes back only material cells, leaving Virtual cells at their default
-        // (zero) state. The assembler then treats them as phantom boundary
-        // neighbours with phi=0, vp=0, dragging adjacent material cells toward
-        // zero RH and corrupting the implicit-Euler step.
-        //
-        // Push the BC's moisture-side state into every Virtual cell explicitly
-        // so the assembler sees consistent boundary values. update_cell_properties
-        // (called next) refreshes vp_sat / dPsat/dT so derived state stays
-        // consistent with cell_temp.
-        for cell in self.cells.iter_mut() {
-            if let crate::cell::CellType::Virtual(loc) = &cell.cell_type {
-                let (rh, t) = match loc {
-                    crate::cell::BoundaryLocation::Interior => {
-                        (bc.rh_inside_air, bc.temp_inside_air_moisture)
-                    }
-                    crate::cell::BoundaryLocation::Exterior => {
-                        (bc.rh_outside_air, bc.temp_outside_air_moisture)
-                    }
-                };
-                cell.cell_rh = rh;
-                cell.cell_temp = t;
-                let psat = crate::physics::psy_psat_fn_temp(t);
-                cell.cell_vp = rh * psat;
+        // Virtual cells aren't updated by `apply_boundary_coefficients`. Picard's
+        // per-cell 2×2 solve covers them as a side-effect of iterating over all
+        // non-boundary cells, but BlockTridiag's scatter writes only material
+        // cells. Compute Virtual cells here as the conductance-weighted average
+        // of their non-Virtual neighbours' state — the implicit-Euler answer
+        // for a cell with negligible capacity. This produces a non-zero
+        // Virtual ↔ Conv gradient that the moisture-flux query relies on.
+        let nx = self.cells.raw_dim()[0];
+        // Collect (virtual_li, [nbr_li, ...]) before any cell borrows to avoid
+        // simultaneous &self and &self.cells conflicts in the inner loop.
+        let virtual_nbr_pairs: Vec<(usize, Vec<usize>)> = (0..self.cells.len())
+            .filter(|&li| matches!(self.cells[[li, 0, 0]].cell_type, crate::cell::CellType::Virtual(_)))
+            .map(|li| {
+                let nbrs: Vec<usize> = self.neighbor_indices(li, nx).collect();
+                (li, nbrs)
+            })
+            .collect();
+
+        let mut virtual_updates: Vec<(usize, f64, f64, f64)> = Vec::new();
+        for (li, nbr_indices) in virtual_nbr_pairs {
+            let cell = &self.cells[[li, 0, 0]];
+
+            // strip: linear-algebra kernel boundary
+            let mut sum_inv_v: f64 = 0.0;
+            let mut sum_inv_v_vp: f64 = 0.0;
+            let mut sum_inv_t: f64 = 0.0;
+            let mut sum_inv_t_t: f64 = 0.0;
+
+            for nbr_li in nbr_indices {
+                let nbr = &self.cells[[nbr_li, 0, 0]];
+                let (therm_r, vapor_r) = Surface::calculate_resistance_pair(
+                    cell, nbr, bc.pressure_air,
+                );
+                if vapor_r > 1e-12 * pa_s_per_kg {
+                    let inv_v = 1.0 / vapor_r.value_in(pa_s_per_kg);
+                    sum_inv_v += inv_v;
+                    sum_inv_v_vp += inv_v * nbr.cell_vp.value_in(pascals);
+                }
+                if therm_r > 1e-12 * k_per_w {
+                    let inv_t = 1.0 / therm_r.value_in(k_per_w);
+                    sum_inv_t += inv_t;
+                    sum_inv_t_t += inv_t * nbr.cell_temp.value_in(kelvin);
+                }
             }
+
+            // Fall back to current values when no neighbour has non-zero coupling
+            // (degenerate; should not happen for the standard 1-D wall layout).
+            let new_t = if sum_inv_t > 0.0 {
+                sum_inv_t_t / sum_inv_t
+            } else {
+                cell.cell_temp.value_in(kelvin)
+            };
+            let new_vp = if sum_inv_v > 0.0 {
+                sum_inv_v_vp / sum_inv_v
+            } else {
+                cell.cell_vp.value_in(pascals)
+            };
+            let psat = crate::physics::psy_psat_fn_temp(new_t * kelvin)
+                .value_in(pascals);
+            let new_rh = if psat > 0.0 { (new_vp / psat).max(0.0).min(1.01) } else { 0.0 };
+            virtual_updates.push((li, new_vp, new_t, new_rh));
+        }
+
+        for (li, vp, t, rh) in virtual_updates {
+            let cell = &mut self.cells[[li, 0, 0]];
+            // re-tag at kernel boundary
+            cell.cell_vp = vp * pascals;
+            cell.cell_temp = t * kelvin;
+            cell.cell_rh = rh * dimensionless;
         }
 
         self.update_cell_properties(bc, settings)?;
