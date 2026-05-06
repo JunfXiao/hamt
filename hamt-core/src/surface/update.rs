@@ -85,7 +85,7 @@ impl Surface {
     }
 
     /// Push boundary htc/vtc/temp/rh/vp into boundary cells before property updates.
-    fn apply_boundary_coefficients(
+    pub(crate) fn apply_boundary_coefficients(
         &mut self,
         bc: &BoundaryCondition,
         _settings: &HamtSettings,
@@ -565,7 +565,7 @@ impl Surface {
     }
 
     /// Get neighbor indices for a 1D cell.
-    fn neighbor_indices(&self, i: usize, nx: usize) -> impl Iterator<Item = usize> {
+    pub(crate) fn neighbor_indices(&self, i: usize, nx: usize) -> impl Iterator<Item = usize> {
         let self_cell = self.cells.get([i, 0, 0]).unwrap();
 
         let left: Vec<usize> = if i > 0 {
