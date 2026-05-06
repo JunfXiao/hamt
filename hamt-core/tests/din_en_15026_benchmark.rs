@@ -363,7 +363,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
 
         let mut settings = HamtSettings::default();
         settings.timestep = time_step;
-        settings.max_iterations = 300;
+        settings.max_iterations = 3000;
         settings.temp_convergence_tolerance = 1e-6 * kelvin;
         settings.rh_convergence_tolerance = 1e-4;
         settings.max_div = 50;
