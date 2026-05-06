@@ -5,7 +5,7 @@ use crate::trnsys::*;
 use anyhow::{Context, Ok, Result};
 use csv::Writer;
 use hamt_core::boundary::{celsius_to_kelvin, kelvin_to_celsius};
-use hamt_core::hamt_manager::{HamtManager, HamtSettings};
+use hamt_core::hamt_manager::{HamtManager, HamtSettings, SolverMethod};
 use hamt_core::io::load_hamt_by_path;
 use hamt_core::uom::units::{
     dimensionless, hours, kg_per_hr, kg_per_m3, kg_per_m2_s_pa, kj_per_hr, kj_per_hr_m2_k, meter, pascals, seconds, square_meter, w_per_m2_k,
@@ -42,10 +42,10 @@ impl TrnSysType {
 
     /// Validate parameters.
     pub fn validate_parameters(&self, state: &mut TrnSysState) -> Result<()> {
-        if state.params.len() < 8 || state.params.len() > 9 {
+        if state.params.len() < 8 || state.params.len() > 10 {
             return Err(InputError::BadParameter {
                 index: 1,
-                message: "8 or 9 parameters are required.".to_string(),
+                message: "8, 9, or 10 parameters are required.".to_string(),
             }
             .into());
         }
@@ -123,6 +123,27 @@ impl TrnSysType {
                 .into());
             }
             settings.min_div = n_div_value;
+        }
+
+        // Optional param 10: inner solver selector. 0 = Picard, 1 = BlockTridiagonal.
+        if let Some(p) = state.params.get(9) {
+            let v: i32 = p.try_into().map_err(|_| InputError::BadParameter {
+                index: 10,
+                message: "Solver method must be 0 (Picard) or 1 (BlockTridiagonal)".to_string(),
+            })?;
+            settings.solver_method = match v {
+                0 => SolverMethod::Picard,
+                1 => SolverMethod::BlockTridiagonal,
+                _ => {
+                    return Err(InputError::BadParameter {
+                        index: 10,
+                        message: "Solver method must be 0 (Picard) or 1 (BlockTridiagonal)"
+                            .to_string(),
+                    }
+                    .into());
+                }
+            };
+            info!("Selected solver_method = {:?}", settings.solver_method);
         }
 
         settings.min_relaxation_factor = 0.01; // allow more aggressive refinement for better convergence in TRNSYS
