@@ -659,8 +659,15 @@ impl Surface {
 
         self.update_cell_properties(bc, settings)?;
 
+        // Assemble from `self`, not `surface_curr`: the BC and Virtual cells on
+        // `self` were just refreshed against the current iterate's surface
+        // temperature, while the same cells on `surface_curr` still reflect the
+        // previous iterate. Material-cell coefficients are identical between the
+        // two (sync_state_from copied them and update_cell_properties is idempotent
+        // on that data), so this only swaps lagged BC/Virtual coefficients for
+        // current-iter ones — restoring near-Newton convergence.
         let system = crate::solver::assembly::assemble_1d(
-            surface_curr, surface_prev, bc, settings,
+            self, surface_prev, bc, settings,
         );
         let solution = crate::solver::block_tridiag::solve(
             &system.lower, &system.diag, &system.upper, &system.rhs,
@@ -847,6 +854,126 @@ mod block_tridiag_tests {
             let t_new = cell.cell_temp.value_in(crate::uom::units::kelvin);
             assert!(t_new <= t_wall.value_in(crate::uom::units::kelvin) + 1e-3,
                     "T_next {t_new} K > T_curr 298.15 K — wrong direction");
+        }
+    }
+
+    /// Property: one orchestrator iteration must read BC and Virtual cell
+    /// state from `self` (just refreshed via `apply_boundary_coefficients`
+    /// and the virtual-cell update against the current-iterate material
+    /// state) — NOT from `surface_curr` (where those cells still reflect
+    /// the previous outer iteration). At convergence the two are equal,
+    /// but mid-iteration the lag matters: if the assembly reads
+    /// `surface_curr`, stale BC/Virtual coefficients leak into the linear
+    /// system and convergence drops from near-Newton to slow Picard.
+    ///
+    /// Test: build two runs that differ ONLY in the Virtual(Interior)
+    /// cell state of `surface_curr` (the Virtual cell sits between
+    /// material and the Convection/Radiation BC cells; its `cell_temp`
+    /// enters the resistance walk via the assembler's neighbour stencil
+    /// over the interior-most material cell). With the fix, the
+    /// orchestrator's virtual-cell update step rewrites the Virtual cell
+    /// on `self` from current-iterate neighbours, so what was on
+    /// `surface_curr` is irrelevant — the two runs must agree to
+    /// floating-point noise. Without the fix, the assembler reads the
+    /// poked Virtual cell from `surface_curr` and the runs disagree.
+    #[test]
+    fn iteration_uses_current_iter_state_not_stale_surface_curr() {
+        use crate::boundary::celsius_to_kelvin;
+        let mut mgr = fixture(6);
+        mgr.boundary_condition.has_separate_radiant_int = true;
+        // 5 K gap between wall and TMR / air, so a stale BC/Virtual state
+        // would visibly disagree with a fresh one.
+        let t_wall = celsius_to_kelvin(25.0);
+        mgr.boundary_condition.temp_inside_mean_radiant = celsius_to_kelvin(20.0);
+        mgr.boundary_condition.temp_inside_air = celsius_to_kelvin(20.0);
+        mgr.boundary_condition.temp_inside_air_moisture = celsius_to_kelvin(20.0);
+        mgr.boundary_condition.temp_outside_air = celsius_to_kelvin(20.0);
+        mgr.boundary_condition.temp_outside_air_moisture = celsius_to_kelvin(20.0);
+
+        for s in [&mut mgr.surface_curr, &mut mgr.surface_prev] {
+            for cell in s.cells.iter_mut() {
+                if matches!(cell.cell_type, crate::cell::CellType::Material(_)) {
+                    cell.cell_temp = t_wall;
+                }
+            }
+            s.apply_boundary_coefficients(&mgr.boundary_condition, &mgr.settings)
+                .unwrap();
+            s.update_cell_properties(&mgr.boundary_condition, &mgr.settings)
+                .unwrap();
+        }
+
+        // Baseline: surface_curr is consistent with its material-cell state.
+        let mut next_fresh = mgr.surface_curr.clone();
+        next_fresh
+            .calculate_iteration_block_tridiag(
+                &mgr.settings,
+                &mgr.boundary_condition,
+                &mgr.surface_prev,
+                &mgr.surface_curr,
+            )
+            .unwrap();
+
+        // Stale variant: poke surface_curr's BC + Virtual interior cells
+        // to deliberately-wrong values. The orchestrator must overwrite
+        // them on `self` before assembly, so the result must be
+        // unchanged.
+        let mut surface_curr_stale = mgr.surface_curr.clone();
+        let mut poked_rad = false;
+        let mut poked_conv = false;
+        let mut poked_virt = false;
+        let bogus_t = celsius_to_kelvin(80.0);
+        for cell in surface_curr_stale.cells.iter_mut() {
+            match &cell.cell_type {
+                crate::cell::CellType::Boundary(
+                    crate::cell::Boundary::Radiation,
+                    crate::cell::BoundaryLocation::Interior,
+                ) => {
+                    cell.htc = cell.htc * 10.0;
+                    cell.cell_temp = bogus_t;
+                    poked_rad = true;
+                }
+                crate::cell::CellType::Boundary(
+                    crate::cell::Boundary::Convection,
+                    crate::cell::BoundaryLocation::Interior,
+                ) => {
+                    cell.htc = cell.htc * 10.0;
+                    cell.cell_temp = bogus_t;
+                    poked_conv = true;
+                }
+                crate::cell::CellType::Virtual(
+                    crate::cell::BoundaryLocation::Interior,
+                ) => {
+                    cell.cell_temp = bogus_t;
+                    poked_virt = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            poked_rad && poked_conv && poked_virt,
+            "fixture missing one of: interior Rad / Conv / Virtual cell"
+        );
+
+        let mut next_stale = mgr.surface_curr.clone();
+        next_stale
+            .calculate_iteration_block_tridiag(
+                &mgr.settings,
+                &mgr.boundary_condition,
+                &mgr.surface_prev,
+                &surface_curr_stale,
+            )
+            .unwrap();
+
+        for (cf, cs) in next_fresh.cells.iter().zip(next_stale.cells.iter()) {
+            if !matches!(cf.cell_type, crate::cell::CellType::Material(_)) { continue; }
+            let dt = (cf.cell_temp - cs.cell_temp)
+                .value_in(crate::uom::units::kelvin)
+                .abs();
+            let drh = (cf.cell_rh - cs.cell_rh).value().abs();
+            assert!(
+                dt < 1e-9 && drh < 1e-9,
+                "stale surface_curr leaked into orchestrator result: ΔT={dt} K, Δφ={drh}"
+            );
         }
     }
 }

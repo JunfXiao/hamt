@@ -29,36 +29,39 @@ use crate::uom::units::{
 use super::block_2x2::Block2x2;
 
 /// One assembled block-tridiagonal system covering all material cells of
-/// `surface_curr` in physical order. `lower[0]` and `upper[N-1]` are
+/// the source `surface` in physical order. `lower[0]` and `upper[N-1]` are
 /// zero-filled per the `block_tridiag::solve` API contract.
 pub(crate) struct AssembledSystem {
     pub(crate) lower: Vec<Block2x2>,
     pub(crate) diag:  Vec<Block2x2>,
     pub(crate) upper: Vec<Block2x2>,
     pub(crate) rhs:   Vec<(f64, f64)>,
-    /// Material cells' linear indices into `surface_curr.cells`, in the
+    /// Material cells' linear indices into `surface.cells`, in the
     /// same order as `diag` rows. Used to scatter the solve result back.
     pub(crate) material_indices: Vec<usize>,
 }
 
-/// Build the system from `surface_curr` (lagged-iteration state) and
-/// `surface_prev` (t-1 anchor). Boundary cells must already have been
-/// pushed via `apply_boundary_coefficients`. `update_cell_properties`
-/// must already have refreshed `vp_sat`, `d_psat_d_t`, `dwd_phi`, etc.
+/// Build the system from `surface` (the freshly-prepared iteration state:
+/// material cells hold the current iterate's (T, φ); boundary and virtual
+/// cells were just refreshed against that same iterate by
+/// `apply_boundary_coefficients` and the orchestrator's virtual-cell update)
+/// and `surface_prev` (t-1 anchor for the inertial term).
+/// `update_cell_properties` must already have refreshed `vp_sat`,
+/// `d_psat_d_t`, `dwd_phi`, etc. on `surface`.
 pub(crate) fn assemble_1d(
-    surface_curr: &Surface,
+    surface: &Surface,
     surface_prev: &Surface,
     bc: &BoundaryCondition,
     settings: &HamtSettings,
 ) -> AssembledSystem {
-    let mat_idx = surface_curr.material_cell_indices();
+    let mat_idx = surface.material_cell_indices();
     let n = mat_idx.len();
     // Lookup table to recognise material-material vs material-boundary
     // neighbours during assembly.
-    let mut is_material_at = vec![false; surface_curr.cells.len()];
+    let mut is_material_at = vec![false; surface.cells.len()];
     for &li in &mat_idx { is_material_at[li] = true; }
     // Map material-cell linear-index → row in the tridiag system.
-    let mut row_of = vec![usize::MAX; surface_curr.cells.len()];
+    let mut row_of = vec![usize::MAX; surface.cells.len()];
     for (row, &li) in mat_idx.iter().enumerate() {
         row_of[li] = row;
     }
@@ -69,12 +72,12 @@ pub(crate) fn assemble_1d(
     let mut rhs   = vec![(0.0, 0.0); n];
 
     let dt_s = settings.timestep;
-    let nx = surface_curr.cells.raw_dim()[0];
+    let nx = surface.cells.raw_dim()[0];
 
     for (row, &li) in mat_idx.iter().enumerate() {
         // For a 1-D wall (ny=1, nz=1) the linear index equals the x-axis index.
         let i = li;
-        let cell_curr = &surface_curr.cells[[i, 0, 0]];
+        let cell_curr = &surface.cells[[i, 0, 0]];
         let cell_prev = &surface_prev.cells[[i, 0, 0]];
 
         // L_eff and Taylor parameters at lagged state.
@@ -115,15 +118,15 @@ pub(crate) fn assemble_1d(
         b_p  += wcap_per_dt * cell_prev.cell_rh.value();
 
         // Boundary-deposit and user-defined source on cell i.
-        let q_weight = surface_curr
+        let q_weight = surface
             .user_defined_cell_idx
             .as_ref()
             .map(|w| w.iter().filter(|(idx, _)| idx[0] == i).map(|(_, w)| w).sum::<f64>())
             .unwrap_or(0.0);
         let q_adds = bc.q_addition_userdef * q_weight;
-        let q_boundary_energy = if Some(i) == surface_curr.interior_surface_material_idx {
+        let q_boundary_energy = if Some(i) == surface.interior_surface_material_idx {
             bc.additional_energy_int
-        } else if Some(i) == surface_curr.exterior_surface_material_idx {
+        } else if Some(i) == surface.exterior_surface_material_idx {
             bc.additional_energy_ext
         } else { 0.0 * watts };
         // strip: kernel boundary
@@ -145,8 +148,8 @@ pub(crate) fn assemble_1d(
         // conductances. Boundary neighbours contribute only to diagonal + RHS.
 
         // Walk the neighbour stencil.
-        for nbr_li in surface_curr.neighbor_indices(i, nx) {
-            let nbr_curr = &surface_curr.cells[[nbr_li, 0, 0]];
+        for nbr_li in surface.neighbor_indices(i, nx) {
+            let nbr_curr = &surface.cells[[nbr_li, 0, 0]];
 
             // Resistance pair using the lagged state.
             let (therm_r, vapor_r) = Surface::calculate_resistance_pair(
