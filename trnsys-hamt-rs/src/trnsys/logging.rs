@@ -208,8 +208,11 @@ pub fn init_tracing(file_name: Option<String>) {
 
     let local_time = OffsetTime::local_rfc_3339().expect("Failed to get local time offset");
 
-    // Set up the filter (can be controlled via the RUST_LOG environment variable)
-    let filter = EnvFilter::from_env("TRNSYS_HAMT_RS").add_directive("info".parse().unwrap());
+    // Filter set via the TRNSYS_HAMT_RS environment variable; falls back to
+    // "info" only when the variable is unset/empty. Note that crate names use
+    // underscores, e.g. `TRNSYS_HAMT_RS=trnsys_hamt_rs=debug,hamt_core=debug`.
+    let filter = EnvFilter::try_from_env("TRNSYS_HAMT_RS")
+        .unwrap_or_else(|_| EnvFilter::new("info"));
 
     // Formatting Layer: output to both file and stdout
     let fmt_layer = fmt::layer()
