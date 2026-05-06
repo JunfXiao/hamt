@@ -106,7 +106,31 @@ impl HamtManager {
     }
 
     /// Solves for the current timestep by iterating until convergence.
+    /// Dispatches to the configured inner solver.
     pub fn solve_timestep(&mut self) -> Result<bool> {
+        match self.settings.solver_method {
+            SolverMethod::Picard => self.solve_timestep_picard(),
+            SolverMethod::BlockTridiagonal => {
+                if !self.settings.coupled_heat_moisture_enabled {
+                    warn!(
+                        "BlockTridiagonal requires coupled_heat_moisture_enabled=true; \
+                         falling back to Picard for this step"
+                    );
+                    return self.solve_timestep_picard();
+                }
+                self.solve_timestep_block_tridiag()
+            }
+        }
+    }
+
+    /// Direct block-tridiagonal solve. See `solver::block_tridiag` for the
+    /// kernel and `surface::update::solve_step_block_tridiag` for the 1-D
+    /// wall assembly.
+    fn solve_timestep_block_tridiag(&mut self) -> Result<bool> {
+        todo!("implemented in Phase 4")
+    }
+
+    fn solve_timestep_picard(&mut self) -> Result<bool> {
         // Reapply surface vapor coefficients if not using constant value.
         // When mass_convection_coeff is non-zero it represents h_mass [m/s] and β is derived
         // via β = h_mass / (R_v·T).  When it is zero the caller has set vapor_transport_coeff
