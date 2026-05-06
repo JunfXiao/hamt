@@ -903,6 +903,13 @@ fn test_interpolation() {
 // =====================================================================
 
 fn run_total_release_with_timestep(timestep: Time<f64>) -> Result<f64> {
+    run_total_release_with_timestep_and_solver(timestep, SolverMethod::Picard)
+}
+
+fn run_total_release_with_timestep_and_solver(
+    timestep: Time<f64>,
+    method: SolverMethod,
+) -> Result<f64> {
     init_tracing();
 
     // Thin single layer — keeps the diffusive timescale comparable to the
@@ -923,6 +930,7 @@ fn run_total_release_with_timestep(timestep: Time<f64>) -> Result<f64> {
     settings.min_div = 15;
     settings.max_div = 30;
     settings.min_relaxation_factor = 0.5;
+    settings.solver_method = method;
 
     // Effectively one-sided: the exterior face is sealed (≈0 transport
     // coefficients) so all interior-face flux corresponds to wall storage
@@ -1037,6 +1045,51 @@ fn test_total_release_invariance_across_timesteps() -> Result<()> {
             "Δt={:.4e} h: total release {:.4e} kg differs from reference (Δt={:.4e} h, {:.4e} kg) by {:.2}% — \
              exceeds {:.1}% tolerance. HAMT does NOT preserve total moisture mass under timestep changes — \
              possible bug in implicit-Euler conservation, warm-start, or the substep flux accumulator.",
+            ts.value_in(hours), total,
+            timesteps[0].value_in(hours), reference,
+            rel_err * 100.0,
+            allowed_rel_err * 100.0,
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn test_total_release_invariance_block_tridiag() -> Result<()> {
+    // Same timestep sweep as the Picard variant — span ~30× to verify
+    // the BlockTridiagonal solver also preserves total release across
+    // a wide range of macro-step choices.
+    let timesteps = [0.03 * hours, 0.25 * hours, 1.0 * hours];
+
+    println!("=== Timestep-invariance with BlockTridiagonal solver ===");
+    let mut totals: Vec<f64> = Vec::with_capacity(timesteps.len());
+    for ts in &timesteps {
+        totals.push(run_total_release_with_timestep_and_solver(
+            *ts,
+            SolverMethod::BlockTridiagonal,
+        )?);
+    }
+
+    let reference = totals[0];
+    let allowed_rel_err = 0.05; // 5 %
+
+    println!("\n=== Cross-timestep comparison (reference = finest Δt) ===");
+    for (ts, total) in timesteps.iter().zip(totals.iter()) {
+        let rel_err = ((total - reference) / reference).abs();
+        println!(
+            "  Δt = {:>9.4e} h: release = {:>11.4e} kg | rel err vs ref = {:>6.2}%",
+            ts.value_in(hours),
+            total,
+            rel_err * 100.0,
+        );
+    }
+
+    for (ts, total) in timesteps.iter().zip(totals.iter()) {
+        let rel_err = ((total - reference) / reference).abs();
+        assert!(
+            rel_err < allowed_rel_err,
+            "Δt={:.4e} h: total release {:.4e} kg differs from reference (Δt={:.4e} h, {:.4e} kg) by {:.2}% — \
+             exceeds {:.1}% tolerance.",
             ts.value_in(hours), total,
             timesteps[0].value_in(hours), reference,
             rel_err * 100.0,
