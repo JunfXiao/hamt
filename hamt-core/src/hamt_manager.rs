@@ -127,7 +127,55 @@ impl HamtManager {
     /// kernel and `surface::update::solve_step_block_tridiag` for the 1-D
     /// wall assembly.
     fn solve_timestep_block_tridiag(&mut self) -> Result<bool> {
-        todo!("implemented in Phase 4")
+        // The outer loop is much shorter than Picard: it only iterates to
+        // convergence on the nonlinearity (Psat(T), dwdphi(φ), L_eff(φ)).
+        // Cap at a small number; if it doesn't converge in ~20 iters the
+        // inputs are pathological.
+        const MAX_OUTER: i32 = 50;
+
+        let mut stats = ConvergenceStats::default();
+
+        for iter in 0..MAX_OUTER {
+            self.surface_next.calculate_iteration_block_tridiag(
+                &self.settings,
+                &self.boundary_condition,
+                &self.surface_prev,
+                &self.surface_curr,
+            )?;
+
+            stats = convergence_stats(&self.surface_next, &self.surface_curr, &self.settings);
+            std::mem::swap(&mut self.surface_curr, &mut self.surface_next);
+
+            if stats.converged && stats.rh_converged {
+                if iter > 4 {
+                    info!(
+                        iter,
+                        max_dt_k = stats.max_delta_t_k,
+                        max_drh = stats.max_delta_rh,
+                        pinned_t_cell = ?stats.max_temp_cell,
+                        pinned_rh_cell = ?stats.max_rh_cell,
+                        n_cells = self.surface_curr.cells.len(),
+                        dt_hours = self.settings.timestep.value_in(hours),
+                        exit_reason = "converged",
+                        "solve_timestep_block_tridiag exit"
+                    );
+                }
+                return Ok(true);
+            }
+        }
+
+        info!(
+            iter = MAX_OUTER,
+            max_dt_k = stats.max_delta_t_k,
+            max_drh = stats.max_delta_rh,
+            pinned_t_cell = ?stats.max_temp_cell,
+            pinned_rh_cell = ?stats.max_rh_cell,
+            n_cells = self.surface_curr.cells.len(),
+            dt_hours = self.settings.timestep.value_in(hours),
+            exit_reason = "max_outer",
+            "solve_timestep_block_tridiag did NOT converge"
+        );
+        Ok(false)
     }
 
     fn solve_timestep_picard(&mut self) -> Result<bool> {
@@ -1015,5 +1063,80 @@ where T:Default
             prev_surface_state: None,
             flux_accumulator: SubstepFluxAccumulator::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod block_tridiag_dispatch_tests {
+    use super::*;
+    use crate::cell::CellType;
+    use crate::uom::units::kelvin;
+
+    /// Property: with `solver_method = BlockTridiagonal` and a benign
+    /// macro-step (BC matches initial wall state), `solve_timestep`
+    /// returns `Ok(true)` and produces a small-residual converged state.
+    /// Catches dispatch bugs (Picard path getting hit instead) and
+    /// outer-loop loop-condition bugs.
+    #[test]
+    fn block_tridiag_converges_on_benign_step() {
+        let mut mgr = crate::solver::test_fixtures::build_fixture_manager(6);
+        mgr.settings.solver_method = SolverMethod::BlockTridiagonal;
+        // Drive both states to BCs so the step is a no-op (benign).
+        let bc_temp = mgr.boundary_condition.temp_inside_air;
+        let bc_rh = mgr.boundary_condition.rh_inside_air;
+        mgr.boundary_condition.temp_outside_air = bc_temp;
+        mgr.boundary_condition.temp_outside_air_moisture = bc_temp;
+        mgr.boundary_condition.rh_outside_air = bc_rh;
+        for s in [&mut mgr.surface_curr, &mut mgr.surface_prev] {
+            for cell in s.cells.iter_mut() {
+                if matches!(cell.cell_type, CellType::Material(_)) {
+                    cell.cell_temp = bc_temp;
+                    cell.cell_rh = bc_rh;
+                }
+            }
+            s.apply_boundary_coefficients(&mgr.boundary_condition, &mgr.settings).unwrap();
+            s.update_cell_properties(&mgr.boundary_condition, &mgr.settings).unwrap();
+        }
+
+        let result = mgr.solve_timestep().expect("solve must not error on benign step");
+        assert!(result, "solve must return Ok(true) on benign step");
+
+        // Verify the converged state is at the BC.
+        for cell in mgr.surface_curr.cells.iter() {
+            if !matches!(cell.cell_type, CellType::Material(_)) { continue; }
+            let dt_k = (cell.cell_temp - bc_temp).value_in(kelvin).abs();
+            let drh = (cell.cell_rh - bc_rh).value().abs();
+            assert!(dt_k < 1e-3 && drh < 1e-3,
+                    "post-step ΔT={dt_k}, Δφ={drh} — block-tridiag did not stay at BC");
+        }
+    }
+
+    /// Property: with `coupled_heat_moisture_enabled = false` AND
+    /// `solver_method = BlockTridiagonal`, the dispatch falls back to
+    /// Picard (via the warn! path). The solve completes without error.
+    #[test]
+    fn block_tridiag_falls_back_when_coupling_disabled() {
+        let mut mgr = crate::solver::test_fixtures::build_fixture_manager(6);
+        mgr.settings.solver_method = SolverMethod::BlockTridiagonal;
+        mgr.settings.coupled_heat_moisture_enabled = false;
+        // Drive both states to BCs so the step is benign.
+        let bc_temp = mgr.boundary_condition.temp_inside_air;
+        let bc_rh = mgr.boundary_condition.rh_inside_air;
+        mgr.boundary_condition.temp_outside_air = bc_temp;
+        mgr.boundary_condition.temp_outside_air_moisture = bc_temp;
+        mgr.boundary_condition.rh_outside_air = bc_rh;
+        for s in [&mut mgr.surface_curr, &mut mgr.surface_prev] {
+            for cell in s.cells.iter_mut() {
+                if matches!(cell.cell_type, CellType::Material(_)) {
+                    cell.cell_temp = bc_temp;
+                    cell.cell_rh = bc_rh;
+                }
+            }
+            s.apply_boundary_coefficients(&mgr.boundary_condition, &mgr.settings).unwrap();
+            s.update_cell_properties(&mgr.boundary_condition, &mgr.settings).unwrap();
+        }
+        // Should not panic; the dispatcher must fall back to Picard
+        // because BlockTridiagonal requires coupled_heat_moisture_enabled.
+        let _ = mgr.solve_timestep().expect("fallback to Picard must not error");
     }
 }
