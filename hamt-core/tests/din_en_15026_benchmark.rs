@@ -28,7 +28,7 @@ use hamt_core::{
 };
 use hamt_core::{
     cell::CellType,
-    hamt_manager::{AdaptiveState, HamtManager, HamtSettings},
+    hamt_manager::{AdaptiveState, HamtManager, HamtSettings, SolverMethod},
 };
 use hamt_core::{
     surface::Surface,
@@ -342,6 +342,10 @@ const INTERPOLATION_DELTA: f64 = 0.6;
 const DIAGNOSTIC_SAMPLE: bool = true;
 
 fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
+    run_benchmark_test_with_solver(time_step, SolverMethod::Picard)
+}
+
+fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) -> Result<()> {
     let start_time = Instant::now();
 
     init_tracing();
@@ -371,6 +375,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         settings.div_length = 1e-5 * meter;
         settings.adj_length = 1e-4 * meter;
         settings.min_relaxation_factor = 1.0;
+        settings.solver_method = method;
 
         let boundary_coeff = BoundaryCondition {
             heat_transfer_coeff_ext: 9e9 * w_per_m2_k,
@@ -861,6 +866,11 @@ fn test_din_en_15026_timestep_0_5h() -> Result<()> {
 // #[ignore = "Please manually test the DIN EN 15026 benchmark"]
 fn test_din_en_15026_timestep_0_1h() -> Result<()> {
     run_benchmark_test(0.1 * hours)
+}
+
+#[test]
+fn test_din_en_15026_block_tridiag_2h() -> Result<()> {
+    run_benchmark_test_with_solver(2.0 * hours, SolverMethod::BlockTridiagonal)
 }
 
 #[test]
