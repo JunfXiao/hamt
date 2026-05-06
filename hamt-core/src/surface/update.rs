@@ -585,6 +585,37 @@ impl Surface {
     ) -> Result<()> {
         self.sync_state_from(surface_curr)?;
         self.apply_boundary_coefficients(bc, settings)?;
+
+        // Virtual cells aren't updated by `apply_boundary_coefficients`. In the
+        // Picard path, `calculate_physics_step` runs the per-cell 2×2 solve on
+        // every non-boundary cell (including Virtual), so they pick up the BC's
+        // moisture-side state as a side-effect. The BlockTridiagonal scatter
+        // writes back only material cells, leaving Virtual cells at their default
+        // (zero) state. The assembler then treats them as phantom boundary
+        // neighbours with phi=0, vp=0, dragging adjacent material cells toward
+        // zero RH and corrupting the implicit-Euler step.
+        //
+        // Push the BC's moisture-side state into every Virtual cell explicitly
+        // so the assembler sees consistent boundary values. update_cell_properties
+        // (called next) refreshes vp_sat / dPsat/dT so derived state stays
+        // consistent with cell_temp.
+        for cell in self.cells.iter_mut() {
+            if let crate::cell::CellType::Virtual(loc) = &cell.cell_type {
+                let (rh, t) = match loc {
+                    crate::cell::BoundaryLocation::Interior => {
+                        (bc.rh_inside_air, bc.temp_inside_air_moisture)
+                    }
+                    crate::cell::BoundaryLocation::Exterior => {
+                        (bc.rh_outside_air, bc.temp_outside_air_moisture)
+                    }
+                };
+                cell.cell_rh = rh;
+                cell.cell_temp = t;
+                let psat = crate::physics::psy_psat_fn_temp(t);
+                cell.cell_vp = rh * psat;
+            }
+        }
+
         self.update_cell_properties(bc, settings)?;
 
         let system = crate::solver::assembly::assemble_1d(
