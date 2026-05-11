@@ -129,7 +129,7 @@ impl TrnSysType {
         if let Some(p) = state.params.get(9) {
             let v: i32 = p.try_into().map_err(|_| InputError::BadParameter {
                 index: 10,
-                message: "Solver method must be 0 (Picard) or 1 (BlockTridiagonal)".to_string(),
+                message: format!("Solver method must be 0 (Picard) or 1 (BlockTridiagonal). Got: {:?}", p),
             })?;
             settings.solver_method = match v {
                 0 => SolverMethod::Picard,
@@ -137,8 +137,7 @@ impl TrnSysType {
                 _ => {
                     return Err(InputError::BadParameter {
                         index: 10,
-                        message: "Solver method must be 0 (Picard) or 1 (BlockTridiagonal)"
-                            .to_string(),
+                  message: format!("Solver method must be 0 (Picard) or 1 (BlockTridiagonal). Got: {:?}", p),
                     }
                     .into());
                 }

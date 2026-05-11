@@ -114,7 +114,6 @@ fn main(mut state: &mut TrnSysState) -> Result<()> {
     state.outputs.iter().enumerate().for_each(|(i, val)| {
         // attention: TRNSYS/Fortran is 1-indexed
         set_output_value(i as i32, val.value);
-        debug!("Output {}: {}", i + 1, val.value);
     });
 
     Ok(())

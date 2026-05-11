@@ -131,7 +131,7 @@ impl HamtManager {
         // convergence on the nonlinearity (Psat(T), dwdphi(φ), L_eff(φ)).
         // Cap at a small number; if it doesn't converge in ~20 iters the
         // inputs are pathological.
-        const MAX_OUTER: i32 = 50;
+        const MAX_OUTER: i32 = 200;
 
         let mut stats = ConvergenceStats::default();
 
@@ -148,7 +148,7 @@ impl HamtManager {
 
             if stats.converged && stats.rh_converged {
                 if iter > 4 {
-                    info!(
+                    debug!(
                         iter,
                         max_dt_k = stats.max_delta_t_k,
                         max_drh = stats.max_delta_rh,
@@ -164,7 +164,7 @@ impl HamtManager {
             }
         }
 
-        info!(
+        debug!(
             iter = MAX_OUTER,
             max_dt_k = stats.max_delta_t_k,
             max_drh = stats.max_delta_rh,
@@ -431,7 +431,7 @@ impl HamtManager {
             if criterion_met && soft_floor_met && (stable_exit || hard_cap_hit) {
                 let extension = premature_iter.map_or(0, |pi| iter - pi);
                 if iter > 50 || extension > 0 {
-                    info!(
+                    debug!(
                         iter,
                         max_dt_k = stats.max_delta_t_k,
                         max_drh = stats.max_delta_rh,
@@ -465,7 +465,7 @@ impl HamtManager {
                 } else {
                     stall_count += 1;
                     if stall_count >= STALL_PATIENCE {
-                        info!(
+                        debug!(
                             iter,
                             max_dt_k = stats.max_delta_t_k,
                             max_drh = stats.max_delta_rh,
@@ -487,7 +487,7 @@ impl HamtManager {
             }
         }
 
-        info!(
+        debug!(
             iter = self.settings.max_iterations,
             max_dt_k = stats.max_delta_t_k,
             max_drh = stats.max_delta_rh,
@@ -973,7 +973,7 @@ impl Default for HamtSettings {
             sorption_enthalpy_enabled: true,
             anderson_enabled: true,
             anderson_history_depth: 3,
-            solver_method: SolverMethod::Picard,
+            solver_method: SolverMethod::BlockTridiagonal,
         }
     }
 }
