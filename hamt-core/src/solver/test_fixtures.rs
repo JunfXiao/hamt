@@ -14,7 +14,7 @@ use crate::hamt_manager::HamtManager;
 pub(crate) fn build_fixture_manager(n_div: usize) -> HamtManager {
     use crate::boundary::{BoundaryCondition, celsius_to_kelvin};
     use crate::material::{Material, MaterialLibrary, SurfaceVaporCoef};
-    use crate::physics::Curve;
+    use crate::physics::{Curve, LogY};
     use crate::uom::units::{
         dimensionless, j_per_kg_k, kg_per_m3, m2_per_s, meter, square_meter,
         w_per_m_k, w_per_m2_k,
@@ -54,8 +54,8 @@ pub(crate) fn build_fixture_manager(n_div: usize) -> HamtManager {
 
     // Liquid transport coefficient Dw (constant = 1e-10 m²/s).
     let dw_y: Vec<_> = wc_x.iter().map(|_| 1.0e-10 * m2_per_s).collect();
-    let liquid_tc: Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF> =
-        Curve::new(wc_x.clone(), dw_y);
+    let liquid_tc: Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF, LogY> =
+        Curve::<_, _, LogY>::try_new(wc_x.clone(), dw_y).expect("valid fixture Dw curve");
 
     let mat = Material {
         name: "FixtureMat".to_string(),

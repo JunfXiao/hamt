@@ -9,7 +9,7 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use hamt_core::material::{Material, MaterialLibrary, SurfaceVaporCoef};
-use hamt_core::physics::Curve;
+use hamt_core::physics::{Curve, CurveScale, LogY};
 use hamt_core::uom::dimensions::{
     Density, Dimensionless, SpecificHeatCapacity, Temperature, Time, VolumetricHeatCapacity,
     WaterContent,
@@ -126,11 +126,11 @@ fn water_sat() -> Quantity<f64, DIM_WATER_CONTENT> {
     146.0 * kg_per_m3
 }
 
-fn curve_by_func<const DX: Dimension, const DY: Dimension>(
+fn curve_by_func<const DX: Dimension, const DY: Dimension, S: CurveScale>(
     func: fn(Quantity<f64, DX>) -> Quantity<f64, DY>,
     x_range: (Quantity<f64, DX>, Quantity<f64, DX>),
     delta: Quantity<f64, DX>,
-) -> Curve<DX, DY>
+) -> Curve<DX, DY, S>
 where
     Quantity<f64, DX>: Div<Quantity<f64, DX>, Output = Dimensionless<f64>>,
     Quantity<f64, { DY.sub(DX) }>: Sized,
@@ -142,17 +142,18 @@ where
     curve_by_func_and_x_values(func, x_series)
 }
 
-fn curve_by_func_and_x_values<const DX: Dimension, const DY: Dimension>(
+fn curve_by_func_and_x_values<const DX: Dimension, const DY: Dimension, S: CurveScale>(
     func: fn(Quantity<f64, DX>) -> Quantity<f64, DY>,
     x_values: impl IntoIterator<Item = Quantity<f64, DX>>,
-) -> Curve<DX, DY>
+) -> Curve<DX, DY, S>
 where
     Quantity<f64, DX>: Div<Quantity<f64, DX>, Output = Dimensionless<f64>>,
     Quantity<f64, { DY.sub(DX) }>: Sized,
 {
     let x_values: Vec<_> = x_values.into_iter().collect();
     let y_series: Vec<Quantity<f64, DY>> = x_values.iter().map(|x| func(*x)).collect();
-    Curve::new(x_values.into_iter().collect(), y_series)
+    Curve::<DX, DY, S>::try_new(x_values.into_iter().collect(), y_series)
+        .expect("benchmark curve well-formed")
 }
 
 fn sorption_isotherm(rh: Dimensionless<f64>) -> Quantity<f64, DIM_WATER_CONTENT> {
@@ -239,7 +240,8 @@ fn get_thermal_conductivity_curve() -> Curve<DIM_WATER_CONTENT, DIM_THERMAL_COND
     )
 }
 
-fn get_liquid_transport_coeff_curve() -> Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF> {
+fn get_liquid_transport_coeff_curve() -> Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF, LogY>
+{
     let x_values: Vec<WaterContent<f64>> = interpolate_data_points(
         0.0 * water_sat().value_in(kg_per_m3),
         0.95 * water_sat().value_in(kg_per_m3),
