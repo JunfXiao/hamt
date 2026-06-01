@@ -650,7 +650,7 @@ impl HamtManager {
                     return Err(error::Error::Other(format!(
                         "Convergence failed with splitting factor {} at {:.2} hours",
                         adaptive_state.split_factor,
-                        (adaptive_state.current_time / hours).value()
+                        adaptive_state.current_time.value_in(hours)
                     ))
                     .into());
                 }
