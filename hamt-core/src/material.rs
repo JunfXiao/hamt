@@ -10,7 +10,7 @@ use std::{
 use crate::{
     boundary::celsius_to_kelvin,
     error::{Error, InvalidInputReason},
-    physics::Curve,
+    physics::{Curve, LogY},
     uom::{
         DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_SPECIFIC_ENERGY, DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT,
         Quantity,
@@ -66,13 +66,17 @@ pub struct Material {
     ///
     /// - X: Water Content [kg/m³]
     /// - Y: Liquid Transport Coefficient [m²/s]
-    pub suction: Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF>,
+    ///
+    /// Uses log-y PCHIP per WUFI convention because D_w spans ~6 decades.
+    pub suction: Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF, LogY>,
 
     /// Water Transport Coefficient Redistribution curve (Liquid Transport Coefficient vs. Water Content for drying).
     ///
     /// - X: Water Content [kg/m³]
     /// - Y: Liquid Transport Coefficient [m²/s]
-    pub redistribution: Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF>,
+    ///
+    /// Uses log-y PCHIP per WUFI convention because D_w spans ~6 decades.
+    pub redistribution: Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF, LogY>,
 
     /// Vapor Diffusion Resistance curve (mu vs. RH).
     ///

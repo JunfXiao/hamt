@@ -5,17 +5,22 @@ use crate::boundary::BoundaryCondition;
 use crate::cell::CellType;
 use crate::material::{Construction, Material};
 
+use crate::cell::BoundaryLocation;
 use crate::physics::geometry::{Pt3D, Size3D};
 use crate::surface::Surface;
 use crate::uom::constants::VAPOR_GAS_CONSTANT;
-use crate::uom::dimensions::{ArealEnergyDensity, ArealMassDensity, EnergyFluxDensity, MassFluxDensity, Power, Temperature, Time};
-use crate::cell::BoundaryLocation;
-use crate::uom::units::{hours, j_per_m2, kelvin, kg_per_m2, kg_per_m2_s, m_per_s, seconds, w_per_m2};
+use crate::uom::dimensions::{
+    ArealEnergyDensity, ArealMassDensity, EnergyFluxDensity, MassFluxDensity, Power, Temperature,
+    Time,
+};
+use crate::uom::units::{
+    hours, j_per_m2, kelvin, kg_per_m2, kg_per_m2_s, m_per_s, seconds, w_per_m2,
+};
 use crate::{error, uom};
 use anyhow::{Context, Ok, Result};
 use std::mem;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use uom::dimensions::Area;
 use uom::dimensions::Length;
 use uom::units;
@@ -106,20 +111,124 @@ impl HamtManager {
     }
 
     /// Solves for the current timestep by iterating until convergence.
+    /// Dispatches to the configured inner solver.
     pub fn solve_timestep(&mut self) -> Result<bool> {
+        match self.settings.solver_method {
+            SolverMethod::Picard => self.solve_timestep_picard(),
+            SolverMethod::BlockTridiagonal => {
+                if !self.settings.coupled_heat_moisture_enabled {
+                    warn!(
+                        "BlockTridiagonal requires coupled_heat_moisture_enabled=true; \
+                         falling back to Picard for this step"
+                    );
+                    return self.solve_timestep_picard();
+                }
+                self.solve_timestep_block_tridiag()
+            }
+        }
+    }
+
+    /// Direct block-tridiagonal solve. See `solver::block_tridiag` for the
+    /// kernel and `surface::update::solve_step_block_tridiag` for the 1-D
+    /// wall assembly.
+    fn solve_timestep_block_tridiag(&mut self) -> Result<bool> {
+        // The outer loop is much shorter than Picard: it only iterates to
+        // convergence on the nonlinearity (Psat(T), dwdphi(φ), L_eff(φ)).
+        // Cap at a small number; if it doesn't converge in ~20 iters the
+        // inputs are pathological.
+        const MAX_OUTER: i32 = 200;
+
+        let mut stats = ConvergenceStats::default();
+
+        for iter in 0..MAX_OUTER {
+            self.surface_next.calculate_iteration_block_tridiag(
+                &self.settings,
+                &self.boundary_condition,
+                &self.surface_prev,
+                &self.surface_curr,
+            )?;
+
+            stats = convergence_stats(&self.surface_next, &self.surface_curr, &self.settings);
+
+            // Adaptive per-cell relaxation: reduce α for cells with large residuals
+            let temp_tol = self.settings.temp_convergence_tolerance;
+            let rh_tol = self.settings.rh_convergence_tolerance;
+            for (cell_next, cell_curr) in self
+                .surface_next
+                .cells
+                .iter_mut()
+                .zip(self.surface_curr.cells.iter())
+            {
+                if !matches!(cell_next.cell_type, CellType::Material(_)) {
+                    continue;
+                }
+                let delta_t = (cell_next.cell_temp - cell_curr.cell_temp).abs();
+                let delta_rh = (cell_next.cell_rh - cell_curr.cell_rh).abs();
+
+                if delta_t > temp_tol * 10.0 || delta_rh > rh_tol * 10.0 {
+                    cell_next.relaxation_factor = (cell_next.relaxation_factor * 0.9)
+                        .max(self.settings.min_relaxation_factor);
+                } else if delta_t < temp_tol && delta_rh < rh_tol {
+                    cell_next.relaxation_factor = (cell_next.relaxation_factor * 1.02).min(1.0);
+                }
+            }
+
+            std::mem::swap(&mut self.surface_curr, &mut self.surface_next);
+
+            if stats.converged && stats.rh_converged {
+                if iter > 4 {
+                    debug!(
+                        iter,
+                        max_dt_k = stats.max_delta_t_k,
+                        max_drh = stats.max_delta_rh,
+                        pinned_t_cell = ?stats.max_temp_cell,
+                        pinned_rh_cell = ?stats.max_rh_cell,
+                        n_cells = self.surface_curr.cells.len(),
+                        dt_hours = self.settings.timestep.value_in(hours),
+                        exit_reason = "converged",
+                        "solve_timestep_block_tridiag exit"
+                    );
+                }
+                return Ok(true);
+            }
+        }
+
+        debug!(
+            iter = MAX_OUTER,
+            max_dt_k = stats.max_delta_t_k,
+            max_drh = stats.max_delta_rh,
+            pinned_t_cell = ?stats.max_temp_cell,
+            pinned_rh_cell = ?stats.max_rh_cell,
+            n_cells = self.surface_curr.cells.len(),
+            dt_hours = self.settings.timestep.value_in(hours),
+            exit_reason = "max_outer",
+            "solve_timestep_block_tridiag did NOT converge"
+        );
+        Ok(false)
+    }
+
+    fn solve_timestep_picard(&mut self) -> Result<bool> {
         // Reapply surface vapor coefficients if not using constant value.
         // When mass_convection_coeff is non-zero it represents h_mass [m/s] and β is derived
         // via β = h_mass / (R_v·T).  When it is zero the caller has set vapor_transport_coeff
         // directly as β [kg/(m²·s·Pa)] and no conversion is needed.
         if !self.construction.surface_vapor_coef.is_external_const
-            && self.boundary_condition.mass_convection_coeff_ext.value_in(m_per_s) != 0.0
+            && self
+                .boundary_condition
+                .mass_convection_coeff_ext
+                .value_in(m_per_s)
+                != 0.0
         {
             self.boundary_condition.vapor_transport_coeff_ext =
                 self.boundary_condition.mass_convection_coeff_ext
                     / (VAPOR_GAS_CONSTANT * self.boundary_condition.temp_outside_air);
         }
         if !self.construction.surface_vapor_coef.is_internal_const
-            && self.boundary_condition.mass_convection_coeff_int.value_in(m_per_s) != 0.0
+            && self
+                .boundary_condition
+                .mass_convection_coeff_int
+                .value_in(m_per_s)
+                != 0.0
         {
             self.boundary_condition.vapor_transport_coeff_int =
                 self.boundary_condition.mass_convection_coeff_int
@@ -137,13 +246,51 @@ impl HamtManager {
         let mut stall_count = 0_i32;
         const STALL_PATIENCE: i32 = 50; // bail out if no improvement for this many iterations
 
+        // Option-(2) adaptive min-iteration guard. Picard with neighbour lagging
+        // propagates a BC perturbation exactly one material cell per iteration,
+        // so the per-iter δ-tolerance test can fire long before the disturbance
+        // has reached the back of the wall — leaving the implicit-Euler equations
+        // under-converged at deep cells.
+        //
+        // Three exit gates work together:
+        //   * Soft floor `n_mat`     — at least a full forward sweep so the wave
+        //                              reaches the back of the wall once.
+        //   * Stability check (`consecutive_met >= n_mat`) — criterion has held
+        //     uninterrupted for one full additional sweep, indicating the back
+        //     wave has propagated forward without breaking the residual.
+        //   * Hard cap `2·n_mat`     — guaranteed exit even if stability never
+        //     accumulates (e.g. slow oscillation), preserving the previous
+        //     forward-plus-backward worst-case behaviour.
+        //
+        // Steady-state steps where the criterion is tight from the start exit
+        // around `iter ≈ n_mat`. Stiff transients with late-firing criterion
+        // ride the hard cap up to `2·n_mat`. Avoids paying the full forward+
+        // backward cost on the 90+% of timesteps that don't need it.
+        let n_mat: i32 = self
+            .surface_curr
+            .cells
+            .iter()
+            .filter(|c| matches!(c.cell_type, CellType::Material(_)))
+            .count() as i32;
+
+        // Counter of consecutive iterations where the per-iter δ criterion held.
+        // Reset to 0 whenever the criterion fails. Once it reaches `n_mat` AND
+        // the soft floor is satisfied, we treat the iteration as truly converged.
+        let mut consecutive_met: i32 = 0;
+
+        // Track when the per-iter δ criterion FIRST fires. The gap between that
+        // and the actual exit iter is `min_iter_extension`; if it is large, the
+        // criterion was firing prematurely and the guard is doing useful work.
+        let mut premature_iter: Option<i32> = None;
+        let mut premature_max_dt_k: f64 = 0.0;
+        let mut premature_max_drh: f64 = 0.0;
+
         // Anderson acceleration on the outer fixed-point loop. Reset per
         // timestep so each macro-step starts with empty history (an old
         // history from a different state would mislead AA). The per-cell α
         // relaxation lives *inside* G; AA wraps G from outside without
         // touching that logic.
-        let mut accelerator =
-            AndersonAccelerator::new(self.settings.anderson_history_depth);
+        let mut accelerator = AndersonAccelerator::new(self.settings.anderson_history_depth);
         accelerator.reset();
         // Cached pre-iteration state for AA: one (T_kelvin, φ) pair per material
         // cell, in `material_indices` order. Built lazily on the first iteration.
@@ -183,13 +330,18 @@ impl HamtManager {
                 let delta_rh = (cell_next.cell_rh - cell_curr.cell_rh).value().abs();
 
                 // If residual is large (>10× tolerance), tighten relaxation
-                if delta_t > temp_tol * 10.0 * (STALL_PATIENCE-stall_count) as f64 / STALL_PATIENCE as f64 || delta_rh > rh_tol * 10.0 * (STALL_PATIENCE-stall_count) as f64 / STALL_PATIENCE as f64 {
+                if delta_t
+                    > temp_tol * 10.0 * (STALL_PATIENCE - stall_count) as f64
+                        / STALL_PATIENCE as f64
+                    || delta_rh
+                        > rh_tol * 10.0 * (STALL_PATIENCE - stall_count) as f64
+                            / STALL_PATIENCE as f64
+                {
                     cell_next.relaxation_factor =
                         (cell_next.relaxation_factor * 0.9).max(min_alpha);
                 } else if delta_t < temp_tol && delta_rh < rh_tol {
                     // Cell is converged — slowly recover toward 1.0
-                    cell_next.relaxation_factor =
-                        (cell_next.relaxation_factor * 1.02).min(1.0);
+                    cell_next.relaxation_factor = (cell_next.relaxation_factor * 1.02).min(1.0);
                 }
             }
 
@@ -221,7 +373,11 @@ impl HamtManager {
                 // typed quantities to raw SI f64; re-tag on scatter below.
                 let mut g_x: Vec<(f64, f64)> = Vec::with_capacity(mat_idx.len());
                 {
-                    let cells_slice = self.surface_curr.cells.as_slice().expect("cells contiguous");
+                    let cells_slice = self
+                        .surface_curr
+                        .cells
+                        .as_slice()
+                        .expect("cells contiguous");
                     for &li in mat_idx.iter() {
                         let c = &cells_slice[li];
                         // strip: AA kernel works on raw f64 (kelvin, dimensionless)
@@ -234,24 +390,23 @@ impl HamtManager {
                     // AA kernel expects.
                     let x_curr_flat: Vec<f64> =
                         x_curr_pairs.iter().flat_map(|&(t, rh)| [t, rh]).collect();
-                    let g_x_flat: Vec<f64> =
-                        g_x.iter().flat_map(|&(t, rh)| [t, rh]).collect();
+                    let g_x_flat: Vec<f64> = g_x.iter().flat_map(|&(t, rh)| [t, rh]).collect();
 
                     if let Some(x_aa) = accelerator.accelerate(&x_curr_flat, &g_x_flat) {
                         // Reshape AA output back into (T, φ) pairs for the scatter.
-                        let x_aa_pairs: Vec<(f64, f64)> = x_aa
-                            .chunks_exact(2)
-                            .map(|c| (c[0], c[1]))
-                            .collect();
+                        let x_aa_pairs: Vec<(f64, f64)> =
+                            x_aa.chunks_exact(2).map(|c| (c[0], c[1])).collect();
 
                         // Scatter into surface_curr's material cells and refresh
                         // dependent state so the next iteration reads consistent
                         // (vp_sat, w, dwd_phi, ...).
                         {
-                            let cells_slice =
-                                self.surface_curr.cells.as_slice_mut().expect("cells contiguous");
-                            for (&li, &(t_new, rh_new_raw)) in
-                                mat_idx.iter().zip(x_aa_pairs.iter())
+                            let cells_slice = self
+                                .surface_curr
+                                .cells
+                                .as_slice_mut()
+                                .expect("cells contiguous");
+                            for (&li, &(t_new, rh_new_raw)) in mat_idx.iter().zip(x_aa_pairs.iter())
                             {
                                 let rh_new = if rh_new_raw.is_finite() {
                                     rh_new_raw.clamp(0.0, 1.01)
@@ -268,7 +423,11 @@ impl HamtManager {
 
                         // Cache the post-AA state (post-clamp, as the cells now
                         // hold it) for the next iteration's diff.
-                        let cells_slice = self.surface_curr.cells.as_slice().expect("cells contiguous");
+                        let cells_slice = self
+                            .surface_curr
+                            .cells
+                            .as_slice()
+                            .expect("cells contiguous");
                         let mut x_aa_actual: Vec<(f64, f64)> = Vec::with_capacity(mat_idx.len());
                         for &li in mat_idx.iter() {
                             let c = &cells_slice[li];
@@ -289,48 +448,110 @@ impl HamtManager {
                 }
             }
 
-            if stats.converged && stats.rh_converged {
-                if iter > 100 {
+            let criterion_met = stats.converged && stats.rh_converged;
+
+            // Record the first iteration where the per-iter δ criterion fires
+            // — to be compared against the actual exit iter below.
+            if criterion_met && premature_iter.is_none() {
+                premature_iter = Some(iter);
+                premature_max_dt_k = stats.max_delta_t_k;
+                premature_max_drh = stats.max_delta_rh;
+            }
+
+            // Track stability: consecutive iters where the criterion held.
+            if criterion_met {
+                consecutive_met += 1;
+            } else {
+                consecutive_met = 0;
+            }
+
+            // Adaptive exit. Two ways to declare converged once the soft floor
+            // is reached:
+            //   (1) `consecutive_met >= n_mat`  — back wave settled cleanly,
+            //                                     exits early on easy steps.
+            //   (2) `iter + 1 >= 2 · n_mat`     — hard cap, guarantees the
+            //                                     previous forward+backward
+            //                                     worst case as upper bound.
+            // `iter + 1` because `iter` is 0-indexed.
+            let soft_floor_met = iter + 1 >= n_mat;
+            let stable_exit = consecutive_met >= n_mat;
+            let hard_cap_hit = iter + 1 >= 2 * n_mat;
+            if criterion_met && soft_floor_met && (stable_exit || hard_cap_hit) {
+                let extension = premature_iter.map_or(0, |pi| iter - pi);
+                if iter > 50 || extension > 0 {
                     debug!(
                         iter,
-                        max_delta_t_k = stats.max_delta_t_k,
-                        max_delta_rh = stats.max_delta_rh,
-                        "solve_timestep converged (slow)"
+                        max_dt_k = stats.max_delta_t_k,
+                        max_drh = stats.max_delta_rh,
+                        pinned_t_cell = ?stats.max_temp_cell,
+                        pinned_rh_cell = ?stats.max_rh_cell,
+                        n_cells = self.surface_curr.cells.len(),
+                        n_mat,
+                        consecutive_met,
+                        premature_iter = ?premature_iter,
+                        premature_max_dt_k,
+                        premature_max_drh,
+                        min_iter_extension = extension,
+                        dt_hours = self.settings.timestep.value_in(hours),
+                        exit_via = if stable_exit { "stable" } else { "hard_cap" },
+                        exit_reason = "converged",
+                        "solve_timestep exit"
                     );
                 }
                 return Ok(true);
             }
 
-            // Early termination: detect stall/oscillation
-            let current_max = stats.max_delta_t_k.max(stats.max_delta_rh * 1000.0);
-            if current_max < best_max_delta * 0.99 {
-                // Meaningful improvement (>1%) — reset stall counter
-                best_max_delta = current_max;
-                stall_count = 0;
-            } else {
-                stall_count += 1;
-                if stall_count >= STALL_PATIENCE {
-                    debug!(
-                        iter,
-                        max_delta_t_k = stats.max_delta_t_k,
-                        max_delta_rh = stats.max_delta_rh,
-                        "solve_timestep: early termination — residual stalled"
-                    );
-                    break;
+            // Stall / oscillation detection. Suppressed while the criterion is
+            // met — the iteration is intentionally being held open by the
+            // min-iter guard, so treating that as a "stall" would defeat it.
+            if !criterion_met {
+                let current_max = stats.max_delta_t_k.max(stats.max_delta_rh * 1000.0);
+                if current_max < best_max_delta * 0.99 {
+                    // Meaningful improvement (>1%) — reset stall counter
+                    best_max_delta = current_max;
+                    stall_count = 0;
+                } else {
+                    stall_count += 1;
+                    if stall_count >= STALL_PATIENCE {
+                        debug!(
+                            iter,
+                            max_dt_k = stats.max_delta_t_k,
+                            max_drh = stats.max_delta_rh,
+                            pinned_t_cell = ?stats.max_temp_cell,
+                            pinned_rh_cell = ?stats.max_rh_cell,
+                            n_cells = self.surface_curr.cells.len(),
+                            n_mat,
+                            consecutive_met,
+                            premature_iter = ?premature_iter,
+                            premature_max_dt_k,
+                            premature_max_drh,
+                            dt_hours = self.settings.timestep.value_in(hours),
+                            exit_reason = "stalled",
+                            "solve_timestep exit"
+                        );
+                        return Ok(false);
+                    }
                 }
             }
         }
 
         debug!(
-            max_iter = self.settings.max_iterations,
-            max_delta_t_k = stats.max_delta_t_k,
-            max_delta_rh = stats.max_delta_rh,
-            max_temp_cell = ?stats.max_temp_cell,
-            max_rh_cell = ?stats.max_rh_cell,
+            iter = self.settings.max_iterations,
+            max_dt_k = stats.max_delta_t_k,
+            max_drh = stats.max_delta_rh,
+            pinned_t_cell = ?stats.max_temp_cell,
+            pinned_rh_cell = ?stats.max_rh_cell,
+            n_cells = self.surface_curr.cells.len(),
+            n_mat,
+            consecutive_met,
+            premature_iter = ?premature_iter,
+            premature_max_dt_k,
+            premature_max_drh,
             dt_hours = self.settings.timestep.value_in(hours),
-            "solve_timestep did NOT converge"
+            exit_reason = "max_iter",
+            "solve_timestep exit"
         );
-        Ok(false) // Not converged
+        Ok(false)
     }
 
     /// Linear time-extrapolation warm start for the macro-step initial guess.
@@ -394,9 +615,8 @@ impl HamtManager {
         }
     }
 
-
     /// Solves for the current timestep using adaptive substepping.
-    /// 
+    ///
     /// Warning: This function won't tick timestep after solving.
     pub fn solve_timestep_adaptive<T>(
         &mut self,
@@ -406,10 +626,9 @@ impl HamtManager {
         // Time-extrapolation warm start. Skipped on the very first macro-step
         // (before two converged states exist) and on any step following a
         // failed solve (dt_prev_macro is only stamped on the success path).
-        if let (Some(prev_prev), Some(dt_prev)) = (
-            self.surface_prev_prev_macro.clone(),
-            self.dt_prev_macro,
-        ) {
+        if let (Some(prev_prev), Some(dt_prev)) =
+            (self.surface_prev_prev_macro.clone(), self.dt_prev_macro)
+        {
             self.apply_warm_start(&prev_prev, self.settings.timestep, dt_prev)?;
         }
 
@@ -417,8 +636,8 @@ impl HamtManager {
         adaptive_state.flux_accumulator.reset();
         let orig_timestep = self.settings.timestep;
 
-        // Reset relaxation factors once at the start of each macro-timestep
-        self.reset_relaxation_factors();
+        // // Reset relaxation factors once at the start of each macro-timestep
+        // self.reset_relaxation_factors();
 
         if adaptive_state.split_factor < 1 {
             adaptive_state.split_factor = 1;
@@ -477,7 +696,7 @@ impl HamtManager {
                     return Err(error::Error::Other(format!(
                         "Convergence failed with splitting factor {} at {:.2} hours",
                         adaptive_state.split_factor,
-                        (adaptive_state.current_time / hours).value()
+                        adaptive_state.current_time.value_in(hours)
                     ))
                     .into());
                 }
@@ -507,10 +726,8 @@ impl HamtManager {
                     .map(|c| c.relaxation_factor)
                     .collect();
 
-                self.surface_curr
-                    .sync_state_from(&self.surface_prev.clone())?;
-                self.surface_next
-                    .sync_state_from(&self.surface_prev.clone())?;
+                self.surface_curr.sync_state_from(&self.surface_prev)?;
+                self.surface_next.sync_state_from(&self.surface_prev)?;
 
                 // Restore learned relaxation factors
                 for (cell, &alpha) in self.surface_curr.cells.iter_mut().zip(saved_alphas.iter()) {
@@ -526,19 +743,22 @@ impl HamtManager {
             adaptive_state.current_time += actual_step;
             rounds_remaining -= 1;
             total_substeps += 1;
-            self.tick_timestep()?;
+            // Don't call tick_timestep here - it will overwrite the "surface_prev_prev_macro" and break the warm start for the next macro step. Instead, just swap the surfaces and sync, so surface_prev holds the just-converged state for the flux accumulation below, and surface_curr is ready for the next iteration.
+            std::mem::swap(&mut self.surface_prev, &mut self.surface_curr);
+
+            self.surface_curr.sync_state_from(&self.surface_prev)?;
 
             // Accumulate time-weighted fluxes for this substep.
             // After tick_timestep, surface_prev holds the just-converged state.
             {
                 let sub_dt = actual_step;
-                let q_int = self.surface_prev
-                    .heat_flux(BoundaryLocation::Interior)?;
-                let q_ext = self.surface_prev
-                    .heat_flux(BoundaryLocation::Exterior)?;
-                let m_int = self.surface_prev
+                let q_int = self.surface_prev.heat_flux(BoundaryLocation::Interior)?;
+                let q_ext = self.surface_prev.heat_flux(BoundaryLocation::Exterior)?;
+                let m_int = self
+                    .surface_prev
                     .moisture_flux(BoundaryLocation::Interior, &self.boundary_condition)?;
-                let m_ext = self.surface_prev
+                let m_ext = self
+                    .surface_prev
                     .moisture_flux(BoundaryLocation::Exterior, &self.boundary_condition)?;
 
                 adaptive_state.flux_accumulator.q_int_dt += q_int * sub_dt;
@@ -596,8 +816,12 @@ impl HamtManager {
         // the swap, because afterwards `surface_prev` carries the just-converged
         // state and the t-1 snapshot is no longer accessible.
         match self.surface_prev_prev_macro {
-            Some(ref mut s) => { s.sync_state_from(&self.surface_prev)?; }
-            None => { self.surface_prev_prev_macro = Some(self.surface_prev.clone()); }
+            Some(ref mut s) => {
+                s.sync_state_from(&self.surface_prev)?;
+            }
+            None => {
+                self.surface_prev_prev_macro = Some(self.surface_prev.clone());
+            }
         }
 
         // The converged state is in `surface_curr`. This becomes the previous state for the next timestep.
@@ -688,6 +912,26 @@ fn convergence_stats(
     }
 }
 
+/// Selects the inner linear solver used by `solve_timestep`.
+///
+/// The legacy `Picard` path runs block-Jacobi sweeps until per-iter δ
+/// falls below tolerance (with the option-2 min-iter guard for
+/// correctness). The `BlockTridiagonal` path assembles the implicit-Euler
+/// step into a block-tridiagonal system and solves it directly via the
+/// Thomas algorithm — O(N) per outer iteration and free of the
+/// premature-convergence pathology (see `solver::block_tridiag`).
+///
+/// `BlockTridiagonal` requires `coupled_heat_moisture_enabled = true`.
+/// If false, `solve_timestep` falls back to `Picard` and emits a warn!.
+///
+/// Future 2-D / 3-D wall extensions will add an `Adi` variant that
+/// reuses the same block-Thomas kernel direction-by-direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolverMethod {
+    Picard,
+    BlockTridiagonal,
+}
+
 /// Global settings for the HAMT simulation.
 #[derive(Debug, Clone)]
 pub struct HamtSettings {
@@ -753,6 +997,9 @@ pub struct HamtSettings {
 
     /// Maximum AA history depth (mixing parameter `m`). Typical values 3..=5.
     pub anderson_history_depth: usize,
+
+    /// Inner linear-solver method. See `SolverMethod`.
+    pub solver_method: SolverMethod,
 }
 
 impl Default for HamtSettings {
@@ -777,6 +1024,7 @@ impl Default for HamtSettings {
             sorption_enthalpy_enabled: true,
             anderson_enabled: true,
             anderson_history_depth: 3,
+            solver_method: SolverMethod::BlockTridiagonal,
         }
     }
 }
@@ -817,27 +1065,42 @@ impl SubstepFluxAccumulator {
 
     /// Time-averaged interior heat flux [W/m²].
     pub fn avg_q_int(&self) -> EnergyFluxDensity<f64> {
-        if self.total_time > 0.0 * seconds { self.q_int_dt / self.total_time } else { 0.0 * w_per_m2 }
+        if self.total_time > 0.0 * seconds {
+            self.q_int_dt / self.total_time
+        } else {
+            0.0 * w_per_m2
+        }
     }
 
     /// Time-averaged exterior heat flux [W/m²].
     pub fn avg_q_ext(&self) -> EnergyFluxDensity<f64> {
-        if self.total_time > 0.0 * seconds { self.q_ext_dt / self.total_time } else { 0.0 * w_per_m2 }
+        if self.total_time > 0.0 * seconds {
+            self.q_ext_dt / self.total_time
+        } else {
+            0.0 * w_per_m2
+        }
     }
 
     /// Time-averaged interior moisture flux [kg/(m²·s)].
     pub fn avg_m_int(&self) -> MassFluxDensity<f64> {
-        if self.total_time > 0.0 * seconds { self.m_int_dt / self.total_time } else { 0.0 * kg_per_m2_s }
+        if self.total_time > 0.0 * seconds {
+            self.m_int_dt / self.total_time
+        } else {
+            0.0 * kg_per_m2_s
+        }
     }
 
     /// Time-averaged exterior moisture flux [kg/(m²·s)].
     pub fn avg_m_ext(&self) -> MassFluxDensity<f64> {
-        if self.total_time > 0.0 * seconds { self.m_ext_dt / self.total_time } else { 0.0 * kg_per_m2_s }
+        if self.total_time > 0.0 * seconds {
+            self.m_ext_dt / self.total_time
+        } else {
+            0.0 * kg_per_m2_s
+        }
     }
 }
 
-pub struct AdaptiveState<T>
-{
+pub struct AdaptiveState<T> {
     pub substep_time: Time<f64>,
     pub current_time: Time<f64>,
     pub split_factor: i32,
@@ -851,7 +1114,8 @@ pub struct AdaptiveState<T>
 }
 
 impl<T> Default for AdaptiveState<T>
-where T:Default
+where
+    T: Default,
 {
     fn default() -> Self {
         Self {
@@ -866,5 +1130,92 @@ where T:Default
             prev_surface_state: None,
             flux_accumulator: SubstepFluxAccumulator::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod block_tridiag_dispatch_tests {
+    use super::*;
+    use crate::cell::CellType;
+    use crate::uom::units::kelvin;
+
+    /// Property: with `solver_method = BlockTridiagonal` and a benign
+    /// macro-step (BC matches initial wall state), `solve_timestep`
+    /// returns `Ok(true)` and produces a small-residual converged state.
+    /// Catches dispatch bugs (Picard path getting hit instead) and
+    /// outer-loop loop-condition bugs.
+    #[test]
+    fn block_tridiag_converges_on_benign_step() {
+        let mut mgr = crate::solver::test_fixtures::build_fixture_manager(6);
+        mgr.settings.solver_method = SolverMethod::BlockTridiagonal;
+        // Drive both states to BCs so the step is a no-op (benign).
+        let bc_temp = mgr.boundary_condition.temp_inside_air;
+        let bc_rh = mgr.boundary_condition.rh_inside_air;
+        mgr.boundary_condition.temp_outside_air = bc_temp;
+        mgr.boundary_condition.temp_outside_air_moisture = bc_temp;
+        mgr.boundary_condition.rh_outside_air = bc_rh;
+        for s in [&mut mgr.surface_curr, &mut mgr.surface_prev] {
+            for cell in s.cells.iter_mut() {
+                if matches!(cell.cell_type, CellType::Material(_)) {
+                    cell.cell_temp = bc_temp;
+                    cell.cell_rh = bc_rh;
+                }
+            }
+            s.apply_boundary_coefficients(&mgr.boundary_condition, &mgr.settings)
+                .unwrap();
+            s.update_cell_properties(&mgr.boundary_condition, &mgr.settings)
+                .unwrap();
+        }
+
+        let result = mgr
+            .solve_timestep()
+            .expect("solve must not error on benign step");
+        assert!(result, "solve must return Ok(true) on benign step");
+
+        // Verify the converged state is at the BC.
+        for cell in mgr.surface_curr.cells.iter() {
+            if !matches!(cell.cell_type, CellType::Material(_)) {
+                continue;
+            }
+            let dt_k = (cell.cell_temp - bc_temp).value_in(kelvin).abs();
+            let drh = (cell.cell_rh - bc_rh).value().abs();
+            assert!(
+                dt_k < 1e-3 && drh < 1e-3,
+                "post-step ΔT={dt_k}, Δφ={drh} — block-tridiag did not stay at BC"
+            );
+        }
+    }
+
+    /// Property: with `coupled_heat_moisture_enabled = false` AND
+    /// `solver_method = BlockTridiagonal`, the dispatch falls back to
+    /// Picard (via the warn! path). The solve completes without error.
+    #[test]
+    fn block_tridiag_falls_back_when_coupling_disabled() {
+        let mut mgr = crate::solver::test_fixtures::build_fixture_manager(6);
+        mgr.settings.solver_method = SolverMethod::BlockTridiagonal;
+        mgr.settings.coupled_heat_moisture_enabled = false;
+        // Drive both states to BCs so the step is benign.
+        let bc_temp = mgr.boundary_condition.temp_inside_air;
+        let bc_rh = mgr.boundary_condition.rh_inside_air;
+        mgr.boundary_condition.temp_outside_air = bc_temp;
+        mgr.boundary_condition.temp_outside_air_moisture = bc_temp;
+        mgr.boundary_condition.rh_outside_air = bc_rh;
+        for s in [&mut mgr.surface_curr, &mut mgr.surface_prev] {
+            for cell in s.cells.iter_mut() {
+                if matches!(cell.cell_type, CellType::Material(_)) {
+                    cell.cell_temp = bc_temp;
+                    cell.cell_rh = bc_rh;
+                }
+            }
+            s.apply_boundary_coefficients(&mgr.boundary_condition, &mgr.settings)
+                .unwrap();
+            s.update_cell_properties(&mgr.boundary_condition, &mgr.settings)
+                .unwrap();
+        }
+        // Should not panic; the dispatcher must fall back to Picard
+        // because BlockTridiagonal requires coupled_heat_moisture_enabled.
+        let _ = mgr
+            .solve_timestep()
+            .expect("fallback to Picard must not error");
     }
 }

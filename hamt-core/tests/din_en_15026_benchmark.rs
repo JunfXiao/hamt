@@ -9,7 +9,7 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use hamt_core::material::{Material, MaterialLibrary, SurfaceVaporCoef};
-use hamt_core::physics::Curve;
+use hamt_core::physics::{Curve, CurveScale, LogY};
 use hamt_core::uom::dimensions::{
     Density, Dimensionless, SpecificHeatCapacity, Temperature, Time, VolumetricHeatCapacity,
     WaterContent,
@@ -28,7 +28,7 @@ use hamt_core::{
 };
 use hamt_core::{
     cell::CellType,
-    hamt_manager::{AdaptiveState, HamtManager, HamtSettings},
+    hamt_manager::{AdaptiveState, HamtManager, HamtSettings, SolverMethod},
 };
 use hamt_core::{
     surface::Surface,
@@ -126,11 +126,11 @@ fn water_sat() -> Quantity<f64, DIM_WATER_CONTENT> {
     146.0 * kg_per_m3
 }
 
-fn curve_by_func<const DX: Dimension, const DY: Dimension>(
+fn curve_by_func<const DX: Dimension, const DY: Dimension, S: CurveScale>(
     func: fn(Quantity<f64, DX>) -> Quantity<f64, DY>,
     x_range: (Quantity<f64, DX>, Quantity<f64, DX>),
     delta: Quantity<f64, DX>,
-) -> Curve<DX, DY>
+) -> Curve<DX, DY, S>
 where
     Quantity<f64, DX>: Div<Quantity<f64, DX>, Output = Dimensionless<f64>>,
     Quantity<f64, { DY.sub(DX) }>: Sized,
@@ -142,17 +142,18 @@ where
     curve_by_func_and_x_values(func, x_series)
 }
 
-fn curve_by_func_and_x_values<const DX: Dimension, const DY: Dimension>(
+fn curve_by_func_and_x_values<const DX: Dimension, const DY: Dimension, S: CurveScale>(
     func: fn(Quantity<f64, DX>) -> Quantity<f64, DY>,
     x_values: impl IntoIterator<Item = Quantity<f64, DX>>,
-) -> Curve<DX, DY>
+) -> Curve<DX, DY, S>
 where
     Quantity<f64, DX>: Div<Quantity<f64, DX>, Output = Dimensionless<f64>>,
     Quantity<f64, { DY.sub(DX) }>: Sized,
 {
     let x_values: Vec<_> = x_values.into_iter().collect();
     let y_series: Vec<Quantity<f64, DY>> = x_values.iter().map(|x| func(*x)).collect();
-    Curve::new(x_values.into_iter().collect(), y_series)
+    Curve::<DX, DY, S>::try_new(x_values.into_iter().collect(), y_series)
+        .expect("benchmark curve well-formed")
 }
 
 fn sorption_isotherm(rh: Dimensionless<f64>) -> Quantity<f64, DIM_WATER_CONTENT> {
@@ -239,7 +240,8 @@ fn get_thermal_conductivity_curve() -> Curve<DIM_WATER_CONTENT, DIM_THERMAL_COND
     )
 }
 
-fn get_liquid_transport_coeff_curve() -> Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF> {
+fn get_liquid_transport_coeff_curve() -> Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF, LogY>
+{
     let x_values: Vec<WaterContent<f64>> = interpolate_data_points(
         0.0 * water_sat().value_in(kg_per_m3),
         0.95 * water_sat().value_in(kg_per_m3),
@@ -342,6 +344,10 @@ const INTERPOLATION_DELTA: f64 = 0.6;
 const DIAGNOSTIC_SAMPLE: bool = true;
 
 fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
+    run_benchmark_test_with_solver(time_step, SolverMethod::Picard)
+}
+
+fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) -> Result<()> {
     let start_time = Instant::now();
 
     init_tracing();
@@ -363,7 +369,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
 
         let mut settings = HamtSettings::default();
         settings.timestep = time_step;
-        settings.max_iterations = 300;
+        settings.max_iterations = 3000;
         settings.temp_convergence_tolerance = 1e-6 * kelvin;
         settings.rh_convergence_tolerance = 1e-4;
         settings.max_div = 50;
@@ -371,6 +377,7 @@ fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
         settings.div_length = 1e-5 * meter;
         settings.adj_length = 1e-4 * meter;
         settings.min_relaxation_factor = 1.0;
+        settings.solver_method = method;
 
         let boundary_coeff = BoundaryCondition {
             heat_transfer_coeff_ext: 9e9 * w_per_m2_k,
@@ -864,6 +871,11 @@ fn test_din_en_15026_timestep_0_1h() -> Result<()> {
 }
 
 #[test]
+fn test_din_en_15026_block_tridiag_2h() -> Result<()> {
+    run_benchmark_test_with_solver(2.0 * hours, SolverMethod::BlockTridiagonal)
+}
+
+#[test]
 fn test_interpolation() {
     let start = 0.0;
     let end = 1.0;
@@ -893,6 +905,13 @@ fn test_interpolation() {
 // =====================================================================
 
 fn run_total_release_with_timestep(timestep: Time<f64>) -> Result<f64> {
+    run_total_release_with_timestep_and_solver(timestep, SolverMethod::Picard)
+}
+
+fn run_total_release_with_timestep_and_solver(
+    timestep: Time<f64>,
+    method: SolverMethod,
+) -> Result<f64> {
     init_tracing();
 
     // Thin single layer — keeps the diffusive timescale comparable to the
@@ -913,6 +932,7 @@ fn run_total_release_with_timestep(timestep: Time<f64>) -> Result<f64> {
     settings.min_div = 15;
     settings.max_div = 30;
     settings.min_relaxation_factor = 0.5;
+    settings.solver_method = method;
 
     // Effectively one-sided: the exterior face is sealed (≈0 transport
     // coefficients) so all interior-face flux corresponds to wall storage
@@ -992,7 +1012,7 @@ fn run_total_release_with_timestep(timestep: Time<f64>) -> Result<f64> {
 
     Ok(total_release_kg)
 }
-
+ 
 #[test]
 fn test_total_release_invariance_across_timesteps() -> Result<()> {
     // Span ~30× — finest resolves transient, coarsest forces a near-quasi-
@@ -1027,6 +1047,51 @@ fn test_total_release_invariance_across_timesteps() -> Result<()> {
             "Δt={:.4e} h: total release {:.4e} kg differs from reference (Δt={:.4e} h, {:.4e} kg) by {:.2}% — \
              exceeds {:.1}% tolerance. HAMT does NOT preserve total moisture mass under timestep changes — \
              possible bug in implicit-Euler conservation, warm-start, or the substep flux accumulator.",
+            ts.value_in(hours), total,
+            timesteps[0].value_in(hours), reference,
+            rel_err * 100.0,
+            allowed_rel_err * 100.0,
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn test_total_release_invariance_block_tridiag() -> Result<()> {
+    // Same timestep sweep as the Picard variant — span ~30× to verify
+    // the BlockTridiagonal solver also preserves total release across
+    // a wide range of macro-step choices.
+    let timesteps = [0.03 * hours, 0.25 * hours, 1.0 * hours];
+
+    println!("=== Timestep-invariance with BlockTridiagonal solver ===");
+    let mut totals: Vec<f64> = Vec::with_capacity(timesteps.len());
+    for ts in &timesteps {
+        totals.push(run_total_release_with_timestep_and_solver(
+            *ts,
+            SolverMethod::BlockTridiagonal,
+        )?);
+    }
+
+    let reference = totals[0];
+    let allowed_rel_err = 0.05; // 5 %
+
+    println!("\n=== Cross-timestep comparison (reference = finest Δt) ===");
+    for (ts, total) in timesteps.iter().zip(totals.iter()) {
+        let rel_err = ((total - reference) / reference).abs();
+        println!(
+            "  Δt = {:>9.4e} h: release = {:>11.4e} kg | rel err vs ref = {:>6.2}%",
+            ts.value_in(hours),
+            total,
+            rel_err * 100.0,
+        );
+    }
+
+    for (ts, total) in timesteps.iter().zip(totals.iter()) {
+        let rel_err = ((total - reference) / reference).abs();
+        assert!(
+            rel_err < allowed_rel_err,
+            "Δt={:.4e} h: total release {:.4e} kg differs from reference (Δt={:.4e} h, {:.4e} kg) by {:.2}% — \
+             exceeds {:.1}% tolerance.",
             ts.value_in(hours), total,
             timesteps[0].value_in(hours), reference,
             rel_err * 100.0,

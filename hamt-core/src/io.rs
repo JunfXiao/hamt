@@ -5,7 +5,7 @@ use tracing::warn;
 
 use crate::error::{self, Error, InvalidInputReason};
 use crate::material::{Material, MaterialLibrary, SurfaceVaporCoef};
-use crate::physics::Curve;
+use crate::physics::{Curve, CurveScale};
 use crate::uom::{Dimension, Quantity};
 use anyhow::{Context, Result};
 use std::any;
@@ -238,15 +238,21 @@ fn parse_number<T: FromStr>(input: &str, field_name: &str) -> Result<T, Error> {
 }
 
 /// Helper to parse curve data (count, x, y pairs).
-fn parse_curve<const DX: Dimension, const DY: Dimension>(
+///
+/// Generic over the interpolation scale `S`. Rust function-item generics cannot
+/// carry defaults, so the assignment LHS (e.g. `mat.suction = parse_curve(..)`)
+/// must drive inference; a bare `let c = parse_curve(..)?` would fail to
+/// resolve `S`. All current call sites assign to `Material` fields, so
+/// inference succeeds.
+fn parse_curve<const DX: Dimension, const DY: Dimension, S: CurveScale>(
     params: &[String],
     name: &str,
-) -> Result<Curve<DX, DY>, Error>
+) -> Result<Curve<DX, DY, S>, Error>
 where
     Quantity<f64, { DY.sub(DX) }>: Sized,
 {
     if params.is_empty() {
-        return Ok(Curve::<DX, DY>::new(Vec::new(), Vec::new()));
+        return Ok(Curve::<DX, DY, S>::default());
     }
 
     let count: usize = parse_number(&params[0], &format!("{} point count", name))?;
@@ -275,7 +281,13 @@ where
         y.push(Quantity::<f64, DY>(y_val));
     }
 
-    Ok(Curve::new(x, y))
+    Curve::<DX, DY, S>::try_new(x, y).map_err(|e| {
+        Error::InvalidInput(
+            "Curve".to_string(),
+            name.to_string(),
+            InvalidInputReason::Other(e.to_string()),
+        )
+    })
 }
 
 /// Parses the text content into a structured HashMap.

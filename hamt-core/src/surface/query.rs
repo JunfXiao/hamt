@@ -505,6 +505,21 @@ impl Surface {
         true
     }
 
+    /// Linear indices into `self.cells` of every material cell, in
+    /// `cells.indexed_iter()` order. Used by the block-tridiagonal
+    /// assembler to walk the wall in physical order without having to
+    /// re-filter on every iteration. Cached state is intentionally not
+    /// stored here — the caller can memoize across an outer iteration.
+    pub fn material_cell_indices(&self) -> Vec<usize> {
+        let mut idx = Vec::new();
+        for (lin, cell) in self.cells.iter().enumerate() {
+            if matches!(cell.cell_type, CellType::Material(_)) {
+                idx.push(lin);
+            }
+        }
+        idx
+    }
+
     /// Calculate thermal and vapor resistance between two cells.
     ///
     /// # Returns
