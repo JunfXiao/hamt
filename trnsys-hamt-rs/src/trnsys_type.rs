@@ -774,6 +774,9 @@ impl TrnSysType {
             );
 
             // let solve_start = std::time::Instant::now();
+            
+            // Set the current time in the adaptive state for use in substepping. This ensures that any time-dependent
+            state.adaptive_state.current_time = get_simulation_time() * hours;
             manager
                 .solve_timestep_adaptive(&mut state.adaptive_state, None)
                 .with_context(|| {

@@ -5,12 +5,17 @@ use crate::boundary::BoundaryCondition;
 use crate::cell::CellType;
 use crate::material::{Construction, Material};
 
+use crate::cell::BoundaryLocation;
 use crate::physics::geometry::{Pt3D, Size3D};
 use crate::surface::Surface;
 use crate::uom::constants::VAPOR_GAS_CONSTANT;
-use crate::uom::dimensions::{ArealEnergyDensity, ArealMassDensity, EnergyFluxDensity, MassFluxDensity, Power, Temperature, Time};
-use crate::cell::BoundaryLocation;
-use crate::uom::units::{hours, j_per_m2, kelvin, kg_per_m2, kg_per_m2_s, m_per_s, seconds, w_per_m2};
+use crate::uom::dimensions::{
+    ArealEnergyDensity, ArealMassDensity, EnergyFluxDensity, MassFluxDensity, Power, Temperature,
+    Time,
+};
+use crate::uom::units::{
+    hours, j_per_m2, kelvin, kg_per_m2, kg_per_m2_s, m_per_s, seconds, w_per_m2,
+};
 use crate::{error, uom};
 use anyhow::{Context, Ok, Result};
 use std::mem;
@@ -144,6 +149,30 @@ impl HamtManager {
             )?;
 
             stats = convergence_stats(&self.surface_next, &self.surface_curr, &self.settings);
+
+            // Adaptive per-cell relaxation: reduce α for cells with large residuals
+            let temp_tol = self.settings.temp_convergence_tolerance;
+            let rh_tol = self.settings.rh_convergence_tolerance;
+            for (cell_next, cell_curr) in self
+                .surface_next
+                .cells
+                .iter_mut()
+                .zip(self.surface_curr.cells.iter())
+            {
+                if !matches!(cell_next.cell_type, CellType::Material(_)) {
+                    continue;
+                }
+                let delta_t = (cell_next.cell_temp - cell_curr.cell_temp).abs();
+                let delta_rh = (cell_next.cell_rh - cell_curr.cell_rh).abs();
+
+                if delta_t > temp_tol * 10.0 || delta_rh > rh_tol * 10.0 {
+                    cell_next.relaxation_factor = (cell_next.relaxation_factor * 0.9)
+                        .max(self.settings.min_relaxation_factor);
+                } else if delta_t < temp_tol && delta_rh < rh_tol {
+                    cell_next.relaxation_factor = (cell_next.relaxation_factor * 1.02).min(1.0);
+                }
+            }
+
             std::mem::swap(&mut self.surface_curr, &mut self.surface_next);
 
             if stats.converged && stats.rh_converged {
@@ -184,14 +213,22 @@ impl HamtManager {
         // via β = h_mass / (R_v·T).  When it is zero the caller has set vapor_transport_coeff
         // directly as β [kg/(m²·s·Pa)] and no conversion is needed.
         if !self.construction.surface_vapor_coef.is_external_const
-            && self.boundary_condition.mass_convection_coeff_ext.value_in(m_per_s) != 0.0
+            && self
+                .boundary_condition
+                .mass_convection_coeff_ext
+                .value_in(m_per_s)
+                != 0.0
         {
             self.boundary_condition.vapor_transport_coeff_ext =
                 self.boundary_condition.mass_convection_coeff_ext
                     / (VAPOR_GAS_CONSTANT * self.boundary_condition.temp_outside_air);
         }
         if !self.construction.surface_vapor_coef.is_internal_const
-            && self.boundary_condition.mass_convection_coeff_int.value_in(m_per_s) != 0.0
+            && self
+                .boundary_condition
+                .mass_convection_coeff_int
+                .value_in(m_per_s)
+                != 0.0
         {
             self.boundary_condition.vapor_transport_coeff_int =
                 self.boundary_condition.mass_convection_coeff_int
@@ -253,8 +290,7 @@ impl HamtManager {
         // history from a different state would mislead AA). The per-cell α
         // relaxation lives *inside* G; AA wraps G from outside without
         // touching that logic.
-        let mut accelerator =
-            AndersonAccelerator::new(self.settings.anderson_history_depth);
+        let mut accelerator = AndersonAccelerator::new(self.settings.anderson_history_depth);
         accelerator.reset();
         // Cached pre-iteration state for AA: one (T_kelvin, φ) pair per material
         // cell, in `material_indices` order. Built lazily on the first iteration.
@@ -294,13 +330,18 @@ impl HamtManager {
                 let delta_rh = (cell_next.cell_rh - cell_curr.cell_rh).value().abs();
 
                 // If residual is large (>10× tolerance), tighten relaxation
-                if delta_t > temp_tol * 10.0 * (STALL_PATIENCE-stall_count) as f64 / STALL_PATIENCE as f64 || delta_rh > rh_tol * 10.0 * (STALL_PATIENCE-stall_count) as f64 / STALL_PATIENCE as f64 {
+                if delta_t
+                    > temp_tol * 10.0 * (STALL_PATIENCE - stall_count) as f64
+                        / STALL_PATIENCE as f64
+                    || delta_rh
+                        > rh_tol * 10.0 * (STALL_PATIENCE - stall_count) as f64
+                            / STALL_PATIENCE as f64
+                {
                     cell_next.relaxation_factor =
                         (cell_next.relaxation_factor * 0.9).max(min_alpha);
                 } else if delta_t < temp_tol && delta_rh < rh_tol {
                     // Cell is converged — slowly recover toward 1.0
-                    cell_next.relaxation_factor =
-                        (cell_next.relaxation_factor * 1.02).min(1.0);
+                    cell_next.relaxation_factor = (cell_next.relaxation_factor * 1.02).min(1.0);
                 }
             }
 
@@ -332,7 +373,11 @@ impl HamtManager {
                 // typed quantities to raw SI f64; re-tag on scatter below.
                 let mut g_x: Vec<(f64, f64)> = Vec::with_capacity(mat_idx.len());
                 {
-                    let cells_slice = self.surface_curr.cells.as_slice().expect("cells contiguous");
+                    let cells_slice = self
+                        .surface_curr
+                        .cells
+                        .as_slice()
+                        .expect("cells contiguous");
                     for &li in mat_idx.iter() {
                         let c = &cells_slice[li];
                         // strip: AA kernel works on raw f64 (kelvin, dimensionless)
@@ -345,24 +390,23 @@ impl HamtManager {
                     // AA kernel expects.
                     let x_curr_flat: Vec<f64> =
                         x_curr_pairs.iter().flat_map(|&(t, rh)| [t, rh]).collect();
-                    let g_x_flat: Vec<f64> =
-                        g_x.iter().flat_map(|&(t, rh)| [t, rh]).collect();
+                    let g_x_flat: Vec<f64> = g_x.iter().flat_map(|&(t, rh)| [t, rh]).collect();
 
                     if let Some(x_aa) = accelerator.accelerate(&x_curr_flat, &g_x_flat) {
                         // Reshape AA output back into (T, φ) pairs for the scatter.
-                        let x_aa_pairs: Vec<(f64, f64)> = x_aa
-                            .chunks_exact(2)
-                            .map(|c| (c[0], c[1]))
-                            .collect();
+                        let x_aa_pairs: Vec<(f64, f64)> =
+                            x_aa.chunks_exact(2).map(|c| (c[0], c[1])).collect();
 
                         // Scatter into surface_curr's material cells and refresh
                         // dependent state so the next iteration reads consistent
                         // (vp_sat, w, dwd_phi, ...).
                         {
-                            let cells_slice =
-                                self.surface_curr.cells.as_slice_mut().expect("cells contiguous");
-                            for (&li, &(t_new, rh_new_raw)) in
-                                mat_idx.iter().zip(x_aa_pairs.iter())
+                            let cells_slice = self
+                                .surface_curr
+                                .cells
+                                .as_slice_mut()
+                                .expect("cells contiguous");
+                            for (&li, &(t_new, rh_new_raw)) in mat_idx.iter().zip(x_aa_pairs.iter())
                             {
                                 let rh_new = if rh_new_raw.is_finite() {
                                     rh_new_raw.clamp(0.0, 1.01)
@@ -379,7 +423,11 @@ impl HamtManager {
 
                         // Cache the post-AA state (post-clamp, as the cells now
                         // hold it) for the next iteration's diff.
-                        let cells_slice = self.surface_curr.cells.as_slice().expect("cells contiguous");
+                        let cells_slice = self
+                            .surface_curr
+                            .cells
+                            .as_slice()
+                            .expect("cells contiguous");
                         let mut x_aa_actual: Vec<(f64, f64)> = Vec::with_capacity(mat_idx.len());
                         for &li in mat_idx.iter() {
                             let c = &cells_slice[li];
@@ -567,9 +615,8 @@ impl HamtManager {
         }
     }
 
-
     /// Solves for the current timestep using adaptive substepping.
-    /// 
+    ///
     /// Warning: This function won't tick timestep after solving.
     pub fn solve_timestep_adaptive<T>(
         &mut self,
@@ -579,10 +626,9 @@ impl HamtManager {
         // Time-extrapolation warm start. Skipped on the very first macro-step
         // (before two converged states exist) and on any step following a
         // failed solve (dt_prev_macro is only stamped on the success path).
-        if let (Some(prev_prev), Some(dt_prev)) = (
-            self.surface_prev_prev_macro.clone(),
-            self.dt_prev_macro,
-        ) {
+        if let (Some(prev_prev), Some(dt_prev)) =
+            (self.surface_prev_prev_macro.clone(), self.dt_prev_macro)
+        {
             self.apply_warm_start(&prev_prev, self.settings.timestep, dt_prev)?;
         }
 
@@ -590,8 +636,8 @@ impl HamtManager {
         adaptive_state.flux_accumulator.reset();
         let orig_timestep = self.settings.timestep;
 
-        // Reset relaxation factors once at the start of each macro-timestep
-        self.reset_relaxation_factors();
+        // // Reset relaxation factors once at the start of each macro-timestep
+        // self.reset_relaxation_factors();
 
         if adaptive_state.split_factor < 1 {
             adaptive_state.split_factor = 1;
@@ -680,10 +726,8 @@ impl HamtManager {
                     .map(|c| c.relaxation_factor)
                     .collect();
 
-                self.surface_curr
-                    .sync_state_from(&self.surface_prev.clone())?;
-                self.surface_next
-                    .sync_state_from(&self.surface_prev.clone())?;
+                self.surface_curr.sync_state_from(&self.surface_prev)?;
+                self.surface_next.sync_state_from(&self.surface_prev)?;
 
                 // Restore learned relaxation factors
                 for (cell, &alpha) in self.surface_curr.cells.iter_mut().zip(saved_alphas.iter()) {
@@ -699,19 +743,22 @@ impl HamtManager {
             adaptive_state.current_time += actual_step;
             rounds_remaining -= 1;
             total_substeps += 1;
-            self.tick_timestep()?;
+            // Don't call tick_timestep here - it will overwrite the "surface_prev_prev_macro" and break the warm start for the next macro step. Instead, just swap the surfaces and sync, so surface_prev holds the just-converged state for the flux accumulation below, and surface_curr is ready for the next iteration.
+            std::mem::swap(&mut self.surface_prev, &mut self.surface_curr);
+
+            self.surface_curr.sync_state_from(&self.surface_prev)?;
 
             // Accumulate time-weighted fluxes for this substep.
             // After tick_timestep, surface_prev holds the just-converged state.
             {
                 let sub_dt = actual_step;
-                let q_int = self.surface_prev
-                    .heat_flux(BoundaryLocation::Interior)?;
-                let q_ext = self.surface_prev
-                    .heat_flux(BoundaryLocation::Exterior)?;
-                let m_int = self.surface_prev
+                let q_int = self.surface_prev.heat_flux(BoundaryLocation::Interior)?;
+                let q_ext = self.surface_prev.heat_flux(BoundaryLocation::Exterior)?;
+                let m_int = self
+                    .surface_prev
                     .moisture_flux(BoundaryLocation::Interior, &self.boundary_condition)?;
-                let m_ext = self.surface_prev
+                let m_ext = self
+                    .surface_prev
                     .moisture_flux(BoundaryLocation::Exterior, &self.boundary_condition)?;
 
                 adaptive_state.flux_accumulator.q_int_dt += q_int * sub_dt;
@@ -769,8 +816,12 @@ impl HamtManager {
         // the swap, because afterwards `surface_prev` carries the just-converged
         // state and the t-1 snapshot is no longer accessible.
         match self.surface_prev_prev_macro {
-            Some(ref mut s) => { s.sync_state_from(&self.surface_prev)?; }
-            None => { self.surface_prev_prev_macro = Some(self.surface_prev.clone()); }
+            Some(ref mut s) => {
+                s.sync_state_from(&self.surface_prev)?;
+            }
+            None => {
+                self.surface_prev_prev_macro = Some(self.surface_prev.clone());
+            }
         }
 
         // The converged state is in `surface_curr`. This becomes the previous state for the next timestep.
@@ -1014,27 +1065,42 @@ impl SubstepFluxAccumulator {
 
     /// Time-averaged interior heat flux [W/m²].
     pub fn avg_q_int(&self) -> EnergyFluxDensity<f64> {
-        if self.total_time > 0.0 * seconds { self.q_int_dt / self.total_time } else { 0.0 * w_per_m2 }
+        if self.total_time > 0.0 * seconds {
+            self.q_int_dt / self.total_time
+        } else {
+            0.0 * w_per_m2
+        }
     }
 
     /// Time-averaged exterior heat flux [W/m²].
     pub fn avg_q_ext(&self) -> EnergyFluxDensity<f64> {
-        if self.total_time > 0.0 * seconds { self.q_ext_dt / self.total_time } else { 0.0 * w_per_m2 }
+        if self.total_time > 0.0 * seconds {
+            self.q_ext_dt / self.total_time
+        } else {
+            0.0 * w_per_m2
+        }
     }
 
     /// Time-averaged interior moisture flux [kg/(m²·s)].
     pub fn avg_m_int(&self) -> MassFluxDensity<f64> {
-        if self.total_time > 0.0 * seconds { self.m_int_dt / self.total_time } else { 0.0 * kg_per_m2_s }
+        if self.total_time > 0.0 * seconds {
+            self.m_int_dt / self.total_time
+        } else {
+            0.0 * kg_per_m2_s
+        }
     }
 
     /// Time-averaged exterior moisture flux [kg/(m²·s)].
     pub fn avg_m_ext(&self) -> MassFluxDensity<f64> {
-        if self.total_time > 0.0 * seconds { self.m_ext_dt / self.total_time } else { 0.0 * kg_per_m2_s }
+        if self.total_time > 0.0 * seconds {
+            self.m_ext_dt / self.total_time
+        } else {
+            0.0 * kg_per_m2_s
+        }
     }
 }
 
-pub struct AdaptiveState<T>
-{
+pub struct AdaptiveState<T> {
     pub substep_time: Time<f64>,
     pub current_time: Time<f64>,
     pub split_factor: i32,
@@ -1048,7 +1114,8 @@ pub struct AdaptiveState<T>
 }
 
 impl<T> Default for AdaptiveState<T>
-where T:Default
+where
+    T: Default,
 {
     fn default() -> Self {
         Self {
@@ -1094,20 +1161,28 @@ mod block_tridiag_dispatch_tests {
                     cell.cell_rh = bc_rh;
                 }
             }
-            s.apply_boundary_coefficients(&mgr.boundary_condition, &mgr.settings).unwrap();
-            s.update_cell_properties(&mgr.boundary_condition, &mgr.settings).unwrap();
+            s.apply_boundary_coefficients(&mgr.boundary_condition, &mgr.settings)
+                .unwrap();
+            s.update_cell_properties(&mgr.boundary_condition, &mgr.settings)
+                .unwrap();
         }
 
-        let result = mgr.solve_timestep().expect("solve must not error on benign step");
+        let result = mgr
+            .solve_timestep()
+            .expect("solve must not error on benign step");
         assert!(result, "solve must return Ok(true) on benign step");
 
         // Verify the converged state is at the BC.
         for cell in mgr.surface_curr.cells.iter() {
-            if !matches!(cell.cell_type, CellType::Material(_)) { continue; }
+            if !matches!(cell.cell_type, CellType::Material(_)) {
+                continue;
+            }
             let dt_k = (cell.cell_temp - bc_temp).value_in(kelvin).abs();
             let drh = (cell.cell_rh - bc_rh).value().abs();
-            assert!(dt_k < 1e-3 && drh < 1e-3,
-                    "post-step ΔT={dt_k}, Δφ={drh} — block-tridiag did not stay at BC");
+            assert!(
+                dt_k < 1e-3 && drh < 1e-3,
+                "post-step ΔT={dt_k}, Δφ={drh} — block-tridiag did not stay at BC"
+            );
         }
     }
 
@@ -1132,11 +1207,15 @@ mod block_tridiag_dispatch_tests {
                     cell.cell_rh = bc_rh;
                 }
             }
-            s.apply_boundary_coefficients(&mgr.boundary_condition, &mgr.settings).unwrap();
-            s.update_cell_properties(&mgr.boundary_condition, &mgr.settings).unwrap();
+            s.apply_boundary_coefficients(&mgr.boundary_condition, &mgr.settings)
+                .unwrap();
+            s.update_cell_properties(&mgr.boundary_condition, &mgr.settings)
+                .unwrap();
         }
         // Should not panic; the dispatcher must fall back to Picard
         // because BlockTridiagonal requires coupled_heat_moisture_enabled.
-        let _ = mgr.solve_timestep().expect("fallback to Picard must not error");
+        let _ = mgr
+            .solve_timestep()
+            .expect("fallback to Picard must not error");
     }
 }
