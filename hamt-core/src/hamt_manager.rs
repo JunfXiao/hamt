@@ -114,7 +114,7 @@ impl HamtManager {
     /// Dispatches to the configured inner solver.
     pub fn solve_timestep(&mut self) -> Result<bool> {
         match self.settings.solver_method {
-            SolverMethod::Picard => self.solve_timestep_picard(),
+            SolverMethod::BlockJacobi => self.solve_timestep_picard(),
             SolverMethod::BlockTridiagonal => {
                 if !self.settings.coupled_heat_moisture_enabled {
                     warn!(
@@ -914,7 +914,7 @@ fn convergence_stats(
 
 /// Selects the inner linear solver used by `solve_timestep`.
 ///
-/// The legacy `Picard` path runs block-Jacobi sweeps until per-iter δ
+/// The legacy `BlockJacobi` path runs block-Jacobi sweeps until per-iter δ
 /// falls below tolerance (with the option-2 min-iter guard for
 /// correctness). The `BlockTridiagonal` path assembles the implicit-Euler
 /// step into a block-tridiagonal system and solves it directly via the
@@ -922,13 +922,13 @@ fn convergence_stats(
 /// premature-convergence pathology (see `solver::block_tridiag`).
 ///
 /// `BlockTridiagonal` requires `coupled_heat_moisture_enabled = true`.
-/// If false, `solve_timestep` falls back to `Picard` and emits a warn!.
+/// If false, `solve_timestep` falls back to `BlockJacobi` and emits a warn!.
 ///
 /// Future 2-D / 3-D wall extensions will add an `Adi` variant that
 /// reuses the same block-Thomas kernel direction-by-direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverMethod {
-    Picard,
+    BlockJacobi,
     BlockTridiagonal,
 }
 

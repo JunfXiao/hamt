@@ -132,7 +132,7 @@ impl TrnSysType {
                 message: format!("Solver method must be 0 (Picard) or 1 (BlockTridiagonal). Got: {:?}", p),
             })?;
             settings.solver_method = match v {
-                0 => SolverMethod::Picard,
+                0 => SolverMethod::BlockJacobi,
                 1 => SolverMethod::BlockTridiagonal,
                 _ => {
                     return Err(InputError::BadParameter {

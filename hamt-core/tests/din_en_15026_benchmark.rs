@@ -344,7 +344,7 @@ const INTERPOLATION_DELTA: f64 = 0.6;
 const DIAGNOSTIC_SAMPLE: bool = true;
 
 fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
-    run_benchmark_test_with_solver(time_step, SolverMethod::Picard)
+    run_benchmark_test_with_solver(time_step, SolverMethod::BlockJacobi)
 }
 
 fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) -> Result<()> {
@@ -864,6 +864,11 @@ fn test_din_en_15026_timestep_0_5h() -> Result<()> {
 }
 
 #[test]
+fn test_din_en_15026_block_tridiag_0_5h() -> Result<()> {
+    run_benchmark_test_with_solver(0.5 * hours, SolverMethod::BlockTridiagonal)
+}
+
+#[test]
 #[ignore = "Prefer 2h timestep when dynamic timestep is enabled."]
 // #[ignore = "Please manually test the DIN EN 15026 benchmark"]
 fn test_din_en_15026_timestep_0_1h() -> Result<()> {
@@ -905,7 +910,7 @@ fn test_interpolation() {
 // =====================================================================
 
 fn run_total_release_with_timestep(timestep: Time<f64>) -> Result<f64> {
-    run_total_release_with_timestep_and_solver(timestep, SolverMethod::Picard)
+    run_total_release_with_timestep_and_solver(timestep, SolverMethod::BlockJacobi)
 }
 
 fn run_total_release_with_timestep_and_solver(
