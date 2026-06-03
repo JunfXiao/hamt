@@ -145,7 +145,7 @@ impl TrnSysType {
             info!("Selected solver_method = {:?}", settings.solver_method);
         }
 
-        settings.min_relaxation_factor = 0.01; // allow more aggressive refinement for better convergence in TRNSYS
+        settings.min_relaxation_factor = 0.1; // allow more aggressive refinement for better convergence in TRNSYS
 
         let manager = HamtManager::new(
             Some(settings),

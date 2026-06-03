@@ -25,6 +25,8 @@ use uom::dimensions::Area;
 use uom::dimensions::Length;
 use uom::units;
 
+const MAX_ALPHA: f64 = 1.5;
+
 /// Manages the state and execution of the HAMT simulation for a surface.
 #[derive(Debug, Clone)]
 pub struct HamtManager {
@@ -140,7 +142,16 @@ impl HamtManager {
 
         let mut stats = ConvergenceStats::default();
 
+        // Fully utilize the dimension definition of surface_curr.
+        // Allocate iteration history buffers outside the loop to avoid reallocation.
+        let n_cells = self.surface_curr.cells.len();
+        let mut prev_delta_t = vec![0.0f64; n_cells];
+        let mut prev_delta_rh = vec![0.0f64; n_cells];
+
         for iter in 0..MAX_OUTER {
+            // 1. Pass surface_prev (physical time t-1) for the inertial term (tcap/dt).
+            // 2. Pass surface_curr (iteration step k) to compute nonlinear coefficients and Jacobian.
+            // 3. Write computation results to surface_next (iteration step k+1).
             self.surface_next.calculate_iteration_block_tridiag(
                 &self.settings,
                 &self.boundary_condition,
@@ -150,31 +161,84 @@ impl HamtManager {
 
             stats = convergence_stats(&self.surface_next, &self.surface_curr, &self.settings);
 
-            // Adaptive per-cell relaxation: reduce α for cells with large residuals
-            let temp_tol = self.settings.temp_convergence_tolerance;
-            let rh_tol = self.settings.rh_convergence_tolerance;
-            for (cell_next, cell_curr) in self
+            // Aitken Δ² dynamic relaxation calculation (Component-wise)
+            for (i, (cell_next, cell_curr)) in self
                 .surface_next
                 .cells
                 .iter_mut()
                 .zip(self.surface_curr.cells.iter())
+                .enumerate()
             {
                 if !matches!(cell_next.cell_type, CellType::Material(_)) {
                     continue;
                 }
-                let delta_t = (cell_next.cell_temp - cell_curr.cell_temp).abs();
-                let delta_rh = (cell_next.cell_rh - cell_curr.cell_rh).abs();
 
-                if delta_t > temp_tol * 10.0 || delta_rh > rh_tol * 10.0 {
-                    cell_next.relaxation_factor = (cell_next.relaxation_factor * 0.9)
-                        .max(self.settings.min_relaxation_factor);
-                } else if delta_t < temp_tol && delta_rh < rh_tol {
-                    cell_next.relaxation_factor = (cell_next.relaxation_factor * 1.02).min(1.0);
+                // Extract scalar increments (strip units for pure numerical ratio calculations)
+                let delta_t_curr =
+                    (cell_next.cell_temp - cell_curr.cell_temp).value_in(crate::uom::units::kelvin);
+                let delta_rh_curr = (cell_next.cell_rh - cell_curr.cell_rh).value();
+
+                let mut next_alpha = cell_curr.relaxation_factor;
+
+                if iter > 0 {
+                    let delta_t_prev = prev_delta_t[i];
+                    let delta_rh_prev = prev_delta_rh[i];
+
+                    let mut alpha_t = next_alpha;
+                    let mut alpha_rh = next_alpha;
+
+                    // Calculate the Aitken decay rate for temperature
+                    if delta_t_prev.abs() > 1e-12 {
+                        let r_t = delta_t_curr / delta_t_prev;
+                        if (1.0 - r_t) > 1e-3 {
+                            alpha_t = next_alpha / (1.0 - r_t);
+                        } else {
+                            // r_t >= 1.0 (diverging) or r_t approaches 1 (stagnation)
+                            // Strictly enforce minimum damping to brake
+                            alpha_t = 0.0;
+                        }
+                    }
+
+                    // Calculate the Aitken decay rate for relative humidity
+                    if delta_rh_prev.abs() > 1e-12 {
+                        let r_rh = delta_rh_curr / delta_rh_prev;
+                        if (1.0 - r_rh) > 1e-3 {
+                            alpha_rh = next_alpha / (1.0 - r_rh);
+                        } else {
+                            alpha_rh = 0.0;
+                        }
+                    }
+
+                    // Catch negative overshoot and strictly clamp to the minimum safe value
+                    if alpha_t <= 0.0 {
+                        alpha_t = self.settings.min_relaxation_factor;
+                    }
+                    if alpha_rh <= 0.0 {
+                        alpha_rh = self.settings.min_relaxation_factor;
+                    }
+
+                    // Conservative strategy: take the smaller alpha between temperature and humidity
+                    // to ensure the overall stability of the cross-coupled system
+                    next_alpha = alpha_t.min(alpha_rh);
                 }
+
+                // Apply slight inertial smoothing to alpha itself to prevent excessive
+                // acceleration/deceleration jumps at extreme nonlinear breakpoints
+                let smoothed_alpha = 0.5 * cell_curr.relaxation_factor + 0.5 * next_alpha;
+
+                // Assign the safely clamped dynamic alpha to the next iteration
+                cell_next.relaxation_factor =
+                    smoothed_alpha.clamp(self.settings.min_relaxation_factor, MAX_ALPHA);
+
+                // Update history buffers for the next iteration's calculation
+                prev_delta_t[i] = delta_t_curr;
+                prev_delta_rh[i] = delta_rh_curr;
             }
 
+            // Iteration advancement: overwrite the k state with the k+1 state for the next loop
             std::mem::swap(&mut self.surface_curr, &mut self.surface_next);
 
+            // Tolerance check (only used for the exit condition, no longer involved in relaxation control)
             if stats.converged && stats.rh_converged {
                 if iter > 4 {
                     debug!(
@@ -206,7 +270,7 @@ impl HamtManager {
         );
         Ok(false)
     }
-
+    
     fn solve_timestep_picard(&mut self) -> Result<bool> {
         // Reapply surface vapor coefficients if not using constant value.
         // When mass_convection_coeff is non-zero it represents h_mass [m/s] and β is derived
@@ -240,6 +304,8 @@ impl HamtManager {
         let temp_tol = self.settings.temp_convergence_tolerance.value_in(kelvin);
         let rh_tol = self.settings.rh_convergence_tolerance;
         let min_alpha = self.settings.min_relaxation_factor;
+        // Assuming MAX_ALPHA is already defined in scope as requested. If not locally defined,
+        // it references the outer scope const.
 
         // For early termination: track best residual to detect stalls/oscillation
         let mut best_max_delta = f64::MAX;
@@ -261,11 +327,6 @@ impl HamtManager {
         //   * Hard cap `2·n_mat`     — guaranteed exit even if stability never
         //     accumulates (e.g. slow oscillation), preserving the previous
         //     forward-plus-backward worst-case behaviour.
-        //
-        // Steady-state steps where the criterion is tight from the start exit
-        // around `iter ≈ n_mat`. Stiff transients with late-firing criterion
-        // ride the hard cap up to `2·n_mat`. Avoids paying the full forward+
-        // backward cost on the 90+% of timesteps that don't need it.
         let n_mat: i32 = self
             .surface_curr
             .cells
@@ -274,35 +335,27 @@ impl HamtManager {
             .count() as i32;
 
         // Counter of consecutive iterations where the per-iter δ criterion held.
-        // Reset to 0 whenever the criterion fails. Once it reaches `n_mat` AND
-        // the soft floor is satisfied, we treat the iteration as truly converged.
         let mut consecutive_met: i32 = 0;
 
-        // Track when the per-iter δ criterion FIRST fires. The gap between that
-        // and the actual exit iter is `min_iter_extension`; if it is large, the
-        // criterion was firing prematurely and the guard is doing useful work.
+        // Track when the per-iter δ criterion FIRST fires.
         let mut premature_iter: Option<i32> = None;
         let mut premature_max_dt_k: f64 = 0.0;
         let mut premature_max_drh: f64 = 0.0;
 
-        // Anderson acceleration on the outer fixed-point loop. Reset per
-        // timestep so each macro-step starts with empty history (an old
-        // history from a different state would mislead AA). The per-cell α
-        // relaxation lives *inside* G; AA wraps G from outside without
-        // touching that logic.
+        // Anderson acceleration on the outer fixed-point loop. Reset per timestep.
         let mut accelerator = AndersonAccelerator::new(self.settings.anderson_history_depth);
         accelerator.reset();
-        // Cached pre-iteration state for AA: one (T_kelvin, φ) pair per material
-        // cell, in `material_indices` order. Built lazily on the first iteration.
-        // AA needs (x_curr, G(x_curr)) where x_curr is the state going *into* G
-        // and G(x_curr) is the just-computed result of `calculate_iteration`
-        // after the per-cell α write-back. The AA kernel itself works on flat
-        // `&[f64]`; the conversion happens at the call site below.
+
         let mut x_prev_iter: Option<Vec<(f64, f64)>> = None;
-        // Cached material-cell linear indices into self.cells (in iteration
-        // order). Built once per call; the cell layout is fixed across the
-        // outer loop within one solve_timestep.
         let mut material_indices: Option<Vec<usize>> = None;
+
+        // ---------------------------------------------------------------------
+        // Aitken Δ² Dynamic Relaxation Setup
+        // Allocate iteration history buffers outside the loop to track increments.
+        // ---------------------------------------------------------------------
+        let n_cells = self.surface_curr.cells.len();
+        let mut prev_delta_t = vec![0.0f64; n_cells];
+        let mut prev_delta_rh = vec![0.0f64; n_cells];
 
         for iter in 0..self.settings.max_iterations {
             self.surface_next.calculate_iteration(
@@ -314,49 +367,86 @@ impl HamtManager {
 
             stats = convergence_stats(&self.surface_next, &self.surface_curr, &self.settings);
 
-            // Adaptive per-cell relaxation: reduce α for cells with large residuals
-            for (cell_next, cell_curr) in self
+            // -----------------------------------------------------------------
+            // Aitken Δ² dynamic relaxation calculation (Component-wise)
+            // Replaces the heuristic 10x tolerance checks.
+            // -----------------------------------------------------------------
+            for (i, (cell_next, cell_curr)) in self
                 .surface_next
                 .cells
                 .iter_mut()
                 .zip(self.surface_curr.cells.iter())
+                .enumerate()
             {
                 if !matches!(cell_next.cell_type, CellType::Material(_)) {
                     continue;
                 }
-                let delta_t = (cell_next.cell_temp - cell_curr.cell_temp)
-                    .value_in(kelvin)
-                    .abs();
-                let delta_rh = (cell_next.cell_rh - cell_curr.cell_rh).value().abs();
 
-                // If residual is large (>10× tolerance), tighten relaxation
-                if delta_t
-                    > temp_tol * 10.0 * (STALL_PATIENCE - stall_count) as f64
-                        / STALL_PATIENCE as f64
-                    || delta_rh
-                        > rh_tol * 10.0 * (STALL_PATIENCE - stall_count) as f64
-                            / STALL_PATIENCE as f64
-                {
-                    cell_next.relaxation_factor =
-                        (cell_next.relaxation_factor * 0.9).max(min_alpha);
-                } else if delta_t < temp_tol && delta_rh < rh_tol {
-                    // Cell is converged — slowly recover toward 1.0
-                    cell_next.relaxation_factor = (cell_next.relaxation_factor * 1.02).min(1.0);
+                // Extract scalar increments for the current iteration
+                let delta_t_curr = (cell_next.cell_temp - cell_curr.cell_temp).value_in(kelvin);
+                let delta_rh_curr = (cell_next.cell_rh - cell_curr.cell_rh).value();
+
+                let mut next_alpha = cell_curr.relaxation_factor;
+
+                if iter > 0 {
+                    let delta_t_prev = prev_delta_t[i];
+                    let delta_rh_prev = prev_delta_rh[i];
+
+                    let mut alpha_t = next_alpha;
+                    let mut alpha_rh = next_alpha;
+
+                    // Compute Aitken decay rate for Temperature
+                    if delta_t_prev.abs() > 1e-12 {
+                        let r_t = delta_t_curr / delta_t_prev;
+                        if (1.0 - r_t) > 1e-3 {
+                            alpha_t = next_alpha / (1.0 - r_t);
+                        } else {
+                            // r_t >= 1.0 (diverging) or r_t ~ 1.0 (stagnating): emergency brake
+                            alpha_t = 0.0;
+                        }
+                    }
+
+                    // Compute Aitken decay rate for Relative Humidity
+                    if delta_rh_prev.abs() > 1e-12 {
+                        let r_rh = delta_rh_curr / delta_rh_prev;
+                        if (1.0 - r_rh) > 1e-3 {
+                            alpha_rh = next_alpha / (1.0 - r_rh);
+                        } else {
+                            alpha_rh = 0.0;
+                        }
+                    }
+
+                    // Catch overshoots and fallback to the minimum allowed relaxation factor
+                    if alpha_t <= 0.0 {
+                        alpha_t = min_alpha;
+                    }
+                    if alpha_rh <= 0.0 {
+                        alpha_rh = min_alpha;
+                    }
+
+                    // Conservative approach: take the minimum alpha between T and RH
+                    // to keep the coupled physical system stable.
+                    next_alpha = alpha_t.min(alpha_rh);
                 }
+
+                // Apply mild low-pass filtering to the relaxation factor itself
+                // to prevent erratic jumps across highly nonlinear boundaries.
+                let smoothed_alpha = 0.5 * cell_curr.relaxation_factor + 0.5 * next_alpha;
+
+                // Write back clamped alpha using the globally defined MAX_ALPHA
+                cell_next.relaxation_factor = smoothed_alpha.clamp(min_alpha, MAX_ALPHA);
+
+                // Update history buffers
+                prev_delta_t[i] = delta_t_curr;
+                prev_delta_rh[i] = delta_rh_curr;
             }
 
             mem::swap(&mut self.surface_curr, &mut self.surface_next);
 
             // Anderson acceleration. After the swap, surface_curr holds
             // G(x_prev) — the relaxed iterate produced by `calculate_iteration`
-            // plus the per-cell α write-back. We feed (x_prev, G(x_prev)) to
-            // the accelerator and, if it produces an extrapolated x_aa, we
-            // scatter it back into surface_curr in place of G(x_prev). The
-            // next iteration's calculate_iteration then reads x_aa as its
-            // current state (lagged neighbours), and the convergence test at
-            // the top of the next iteration sees the AA-corrected residual.
+            // plus the per-cell α write-back.
             if self.settings.anderson_enabled {
-                // Build material-cell index list once.
                 if material_indices.is_none() {
                     let mut idx = Vec::with_capacity(self.surface_curr.cells.len());
                     for (linear_i, cell) in self.surface_curr.cells.iter().enumerate() {
@@ -368,9 +458,6 @@ impl HamtManager {
                 }
                 let mat_idx = material_indices.as_ref().unwrap();
 
-                // Gather G(x_prev) = surface_curr post-swap as one (T_kelvin, φ)
-                // pair per material cell. Linear-algebra-kernel boundary: strip
-                // typed quantities to raw SI f64; re-tag on scatter below.
                 let mut g_x: Vec<(f64, f64)> = Vec::with_capacity(mat_idx.len());
                 {
                     let cells_slice = self
@@ -380,26 +467,19 @@ impl HamtManager {
                         .expect("cells contiguous");
                     for &li in mat_idx.iter() {
                         let c = &cells_slice[li];
-                        // strip: AA kernel works on raw f64 (kelvin, dimensionless)
                         g_x.push((c.cell_temp.value_in(kelvin), c.cell_rh.value()));
                     }
                 }
 
                 if let Some(x_curr_pairs) = x_prev_iter.as_ref() {
-                    // Flatten the (T, φ) pairs into the interleaved layout the
-                    // AA kernel expects.
                     let x_curr_flat: Vec<f64> =
                         x_curr_pairs.iter().flat_map(|&(t, rh)| [t, rh]).collect();
                     let g_x_flat: Vec<f64> = g_x.iter().flat_map(|&(t, rh)| [t, rh]).collect();
 
                     if let Some(x_aa) = accelerator.accelerate(&x_curr_flat, &g_x_flat) {
-                        // Reshape AA output back into (T, φ) pairs for the scatter.
                         let x_aa_pairs: Vec<(f64, f64)> =
                             x_aa.chunks_exact(2).map(|c| (c[0], c[1])).collect();
 
-                        // Scatter into surface_curr's material cells and refresh
-                        // dependent state so the next iteration reads consistent
-                        // (vp_sat, w, dwd_phi, ...).
                         {
                             let cells_slice = self
                                 .surface_curr
@@ -414,15 +494,12 @@ impl HamtManager {
                                     cells_slice[li].cell_rh.value()
                                 };
                                 let cell = &mut cells_slice[li];
-                                // re-tag at kernel boundary
                                 cell.cell_temp = t_new * kelvin;
                                 cell.cell_rh = rh_new * uom::units::dimensionless;
                                 cell.calc_dependent_state(&self.boundary_condition, &self.settings);
                             }
                         }
 
-                        // Cache the post-AA state (post-clamp, as the cells now
-                        // hold it) for the next iteration's diff.
                         let cells_slice = self
                             .surface_curr
                             .cells
@@ -431,51 +508,35 @@ impl HamtManager {
                         let mut x_aa_actual: Vec<(f64, f64)> = Vec::with_capacity(mat_idx.len());
                         for &li in mat_idx.iter() {
                             let c = &cells_slice[li];
-                            // strip: AA kernel boundary
                             x_aa_actual.push((c.cell_temp.value_in(kelvin), c.cell_rh.value()));
                         }
                         x_prev_iter = Some(x_aa_actual);
                     } else {
-                        // AA skipped (gate, singular, or non-finite). Keep
-                        // surface_curr = G(x_prev) and advance the cache to it.
                         x_prev_iter = Some(g_x);
                     }
                 } else {
-                    // First iteration: no previous x to diff against. Seed the
-                    // cache with the current G(x); the next iteration forms the
-                    // first ΔF column.
                     x_prev_iter = Some(g_x);
                 }
             }
 
             let criterion_met = stats.converged && stats.rh_converged;
 
-            // Record the first iteration where the per-iter δ criterion fires
-            // — to be compared against the actual exit iter below.
             if criterion_met && premature_iter.is_none() {
                 premature_iter = Some(iter);
                 premature_max_dt_k = stats.max_delta_t_k;
                 premature_max_drh = stats.max_delta_rh;
             }
 
-            // Track stability: consecutive iters where the criterion held.
             if criterion_met {
                 consecutive_met += 1;
             } else {
                 consecutive_met = 0;
             }
 
-            // Adaptive exit. Two ways to declare converged once the soft floor
-            // is reached:
-            //   (1) `consecutive_met >= n_mat`  — back wave settled cleanly,
-            //                                     exits early on easy steps.
-            //   (2) `iter + 1 >= 2 · n_mat`     — hard cap, guarantees the
-            //                                     previous forward+backward
-            //                                     worst case as upper bound.
-            // `iter + 1` because `iter` is 0-indexed.
             let soft_floor_met = iter + 1 >= n_mat;
             let stable_exit = consecutive_met >= n_mat;
             let hard_cap_hit = iter + 1 >= 2 * n_mat;
+
             if criterion_met && soft_floor_met && (stable_exit || hard_cap_hit) {
                 let extension = premature_iter.map_or(0, |pi| iter - pi);
                 if iter > 50 || extension > 0 {
@@ -501,13 +562,9 @@ impl HamtManager {
                 return Ok(true);
             }
 
-            // Stall / oscillation detection. Suppressed while the criterion is
-            // met — the iteration is intentionally being held open by the
-            // min-iter guard, so treating that as a "stall" would defeat it.
             if !criterion_met {
                 let current_max = stats.max_delta_t_k.max(stats.max_delta_rh * 1000.0);
                 if current_max < best_max_delta * 0.99 {
-                    // Meaningful improvement (>1%) — reset stall counter
                     best_max_delta = current_max;
                     stall_count = 0;
                 } else {
@@ -1019,7 +1076,7 @@ impl Default for HamtSettings {
             adj_length: 0.00005 * units::meter,
             div_distribution_factor: 0.5,
             user_defined_depth: None,
-            min_relaxation_factor: 0.5,
+            min_relaxation_factor: 0.1,
             coupled_heat_moisture_enabled: true,
             sorption_enthalpy_enabled: true,
             anderson_enabled: true,
