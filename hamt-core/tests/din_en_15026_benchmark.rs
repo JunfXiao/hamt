@@ -371,7 +371,7 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
         settings.timestep = time_step;
         settings.max_iterations = 3000;
         settings.temp_convergence_tolerance = 1e-6 * kelvin;
-        settings.rh_convergence_tolerance = 1e-4;
+        settings.rh_convergence_tolerance = 1e-4 * dimensionless;
         settings.max_div = 50;
         settings.min_div = 20;
         settings.div_length = 1e-5 * meter;
@@ -937,7 +937,7 @@ fn run_total_release_with_timestep_and_solver(
     // the stall-detection branch to fire spuriously, defeating the substep
     // splitter even with very small sub-dt.
     settings.temp_convergence_tolerance = 1e-3 * kelvin;
-    settings.rh_convergence_tolerance = 1e-4;
+    settings.rh_convergence_tolerance = 1e-4 * dimensionless;
     settings.min_div = 15;
     settings.max_div = 30;
     settings.min_relaxation_factor = 0.5;

@@ -872,12 +872,14 @@ impl HamtManager {
     }
 
     /// Solves for the current timestep using an adaptive stepping strategy based on a PI controller.
+/// Solves for the current timestep using an adaptive stepping strategy based on a PI controller.
     pub fn solve_timestep_adaptive_pi<T>(
         &mut self,
         adaptive_state: &mut AdaptiveState<T>,
         mut callback_state_change: Option<Box<dyn FnMut(&AdaptiveState<T>) -> Result<()>>>,
     ) -> Result<()> {
         // --- 1. Macro-level Warm Start ---
+        // Uses previous macro-steps to provide a better initial guess for the non-linear solver.
         if let (Some(prev_prev), Some(dt_prev)) =
             (self.surface_prev_prev_macro.clone(), self.dt_prev_macro)
         {
@@ -895,8 +897,7 @@ impl HamtManager {
         let macro_dt = self.settings.timestep;
         adaptive_state.substep_time = 0.0 * hours;
 
-        // Initialize the proposed step size.
-        // Inherit from previous macro-step if available, otherwise cold start with macro_dt.
+        // Optimistic Start with the full macro Δt. The PI controller will adjust down if it detects instability.
         let mut current_dt: Time<f64> = adaptive_state.proposed_dt.unwrap_or(macro_dt);
 
         // Historical change rates for PI linear extrapolation. Cold start with 0.
@@ -923,6 +924,7 @@ impl HamtManager {
             let is_boundary_step = current_dt >= time_remaining;
             let rate_t = adaptive_state.rate_t.as_mut().unwrap();
             let rate_rh = adaptive_state.rate_rh.as_mut().unwrap();
+            
             // Boundary Clamping
             let dt_step: Time<f64> = current_dt.min(time_remaining);
 
@@ -930,20 +932,27 @@ impl HamtManager {
                 .predicted_surface_state
                 .as_mut()
                 .expect("Predicted Surface shouldn't be None");
+                
             predicted_surface.sync_state_from(&self.surface_prev)?;
             for (idx, cell) in predicted_surface.cells.indexed_iter_mut() {
                 if matches!(cell.cell_type, CellType::Material(_)) {
-                    cell.cell_temp += rate_t[idx] * dt_step;
-                    cell.cell_rh += rate_rh[idx] * dt_step;
+                    cell.cell_temp += (*rate_t)[idx] * dt_step;
+                    cell.cell_rh += (*rate_rh)[idx] * dt_step;
                     cell.calc_dependent_state(&self.boundary_condition, &self.settings);
                 }
             }
+
+
+            // Predictor Warm-Start
+            // Use the predicted surface as the initial guess for the current step. 
+            //This can significantly reduce iterations for small steps, especially in the early phase of a macro-step where the state changes rapidly.
+            self.surface_curr.sync_state_from(predicted_surface)?;
 
             self.settings.timestep = dt_step;
             let converged = self.solve_timestep()?;
 
             if !converged {
-                // Shrink the proposed PI timestep
+                // Failed to converge, rollback to the previous state and reduce the timestep more aggressively for the next try.
                 current_dt *= 0.25;
 
                 if current_dt.value_in(seconds) < 1e-3 {
@@ -954,12 +963,19 @@ impl HamtManager {
                     .into());
                 }
 
+                // Clean up any partial updates to avoid contaminating the next iteration
                 self.surface_curr.sync_state_from(&self.surface_prev)?;
                 self.surface_next.sync_state_from(&self.surface_prev)?;
                 continue;
             }
 
-            // Evaluate LTE
+
+            // Decouple Integration Tolerance
+            // Instead of using the global convergence tolerances, we define separate integration tolerances for temperature and relative humidity that are more lenient. 
+            // This allows the PI controller to make informed decisions based on the physical changes rather than strict solver convergence, which can be too tight for adaptive stepping.
+            let integ_tol_t: Temperature<f64> = self.settings.temp_convergence_tolerance.max(0.25 * kelvin); 
+            let integ_tol_rh: Dimensionless<f64> = self.settings.rh_convergence_tolerance.max(0.02 * dimensionless);
+
             let mut max_lte: f64 = 1e-12;
             for (cell_pred, cell_curr) in predicted_surface
                 .cells
@@ -967,10 +983,9 @@ impl HamtManager {
                 .zip(self.surface_curr.cells.iter())
             {
                 if matches!(cell_curr.cell_type, CellType::Material(_)) {
-                    let lte_t = (cell_pred.cell_temp - cell_curr.cell_temp).abs()
-                        / self.settings.temp_convergence_tolerance;
-                    let lte_rh = (cell_pred.cell_rh - cell_curr.cell_rh).abs()
-                        / self.settings.rh_convergence_tolerance;
+                    let lte_t:Dimensionless<f64> = (cell_pred.cell_temp - cell_curr.cell_temp).abs() / integ_tol_t;
+                    let lte_rh:Dimensionless<f64> = (cell_pred.cell_rh - cell_curr.cell_rh).abs() / integ_tol_rh;
+
                     let cell_lte = lte_t.max(lte_rh).value();
                     if cell_lte > max_lte {
                         max_lte = cell_lte;
@@ -980,22 +995,20 @@ impl HamtManager {
 
             // Accept/Reject Logic
             if max_lte <= 1.0 {
-                // ✅ [ACCEPT STEP]
+                // ACCEPT
 
+                // Update the prediction rates.
                 for (idx, cell_prev) in self.surface_prev.cells.indexed_iter() {
                     if matches!(cell_prev.cell_type, CellType::Material(_)) {
-                        (*rate_t)[idx] = (self.surface_curr.cells[idx].cell_temp
-                            - cell_prev.cell_temp)
-                            / dt_step;
-                        (*rate_rh)[idx] =
-                            (self.surface_curr.cells[idx].cell_rh - cell_prev.cell_rh) / dt_step;
+                        (*rate_t)[idx] = (self.surface_curr.cells[idx].cell_temp - cell_prev.cell_temp) / dt_step;
+                        (*rate_rh)[idx] = (self.surface_curr.cells[idx].cell_rh - cell_prev.cell_rh) / dt_step;
                     }
                 }
 
-                // Advance accumulators and physical time
                 adaptive_state.substep_time += dt_step;
                 adaptive_state.current_time += dt_step;
 
+                // Accumulate fluxes.
                 {
                     let q_int = self.surface_curr.heat_flux(BoundaryLocation::Interior)?;
                     let q_ext = self.surface_curr.heat_flux(BoundaryLocation::Exterior)?;
@@ -1017,39 +1030,46 @@ impl HamtManager {
                 self.surface_curr.sync_state_from(&self.surface_prev)?;
 
                 if let Some(ref mut cb) = callback_state_change {
-                    // adaptive_state.proposed_dt = Some(dt_step);
                     cb(adaptive_state)?;
                 }
 
-                // PI Controller logic
+                // PI Controller
                 if !is_boundary_step {
-                    let k_i = 0.3;
-                    let k_p = 0.2;
-                    let safety = 0.9;
+                    let k_i = 0.15; 
+                    let k_p = 0.05; 
+                    let safety = 0.8; 
 
                     let mut amplification = (1.0 / max_lte).powf(k_i);
                     if let Some(pe) = adaptive_state.prev_lte {
                         amplification *= (pe / max_lte).powf(k_p);
                     }
-                    amplification = (amplification * safety).clamp(0.1, 2.0);
+                    
+                    // Asymmetric Clamping
+                    // Allow more aggressive amplification on the first successful step after a failure to quickly recover, 
+                    // but clamp more conservatively after that to ensure stability.
+                    let max_amp = if adaptive_state.prev_lte.is_none() { 2.0 } else { 1.5 };
+                    amplification = (amplification * safety).clamp(0.25, max_amp);
 
-                    // Update the proposed timestep for the NEXT loop iteration
                     current_dt = dt_step * amplification;
                     adaptive_state.prev_lte = Some(max_lte);
                 }
             } else {
-                // ❌ [REJECT STEP]
-                let shrink_factor = (0.9 / max_lte.sqrt()).clamp(0.1, 0.9);
+                // REJECT 
+                
+                // In cold start, be more forgiving to allow the controller to gather data. After that, be more conservative to ensure stability.
+                let min_shrink = if adaptive_state.prev_lte.is_none() { 0.5 } else { 0.1 };
+                let shrink_factor = (0.8 / max_lte.sqrt()).clamp(min_shrink, 0.9);
 
-                // Update the proposed timestep and retry immediately
                 current_dt = dt_step * shrink_factor;
 
+                // Clean up any partial updates to avoid contaminating the next iteration
                 self.surface_curr.sync_state_from(&self.surface_prev)?;
                 self.surface_next.sync_state_from(&self.surface_prev)?;
             }
         }
 
-        // Persist the momentum to the state struct for the next macro-step
+        // Save the successfully proposed macro Δt for the next step's warm start extrapolation, 
+        // but only if we made actual progress (substep_time > 0) to avoid poisoning the next step with a failed attempt.
         adaptive_state.proposed_dt = Some(current_dt);
 
         mem::swap(&mut self.surface_prev, &mut self.surface_curr);
@@ -1058,12 +1078,11 @@ impl HamtManager {
 
         self.settings.timestep = macro_dt;
         self.dt_prev_macro = Some(macro_dt);
-
-        // Restore substep_time to macro_dt for any downstream TRNSYS queries
         adaptive_state.substep_time = macro_dt;
 
         Ok(())
     }
+
 
     /// Executes after the timestep has been calculated.
     pub fn tick_timestep(&mut self) -> Result<()> {
@@ -1198,7 +1217,7 @@ pub struct HamtSettings {
     /// Temperature convergence tolerance [K or °C].
     pub temp_convergence_tolerance: Temperature<f64>,
     /// Relative humidity convergence tolerance [-].
-    pub rh_convergence_tolerance: f64,
+    pub rh_convergence_tolerance: Dimensionless<f64>,
     /// Base Cell Depth [m]
     pub base_cell_size: Size3D,
     /// Flag to enable latent heat coupling (dimensionless).
@@ -1264,7 +1283,7 @@ impl Default for HamtSettings {
             timestep: 3600.0 * units::seconds,
             max_iterations: 1500,
             temp_convergence_tolerance: 0.001 * units::kelvin,
-            rh_convergence_tolerance: 0.0001,
+            rh_convergence_tolerance: 0.0001 * units::dimensionless,
             base_cell_size: Pt3D(0.1 * units::meter, 0.0 * units::meter, 0.0 * units::meter),
             latent_heat_enabled: true,
             rain_enabled: false,
