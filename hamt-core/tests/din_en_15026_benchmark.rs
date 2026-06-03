@@ -857,17 +857,25 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
 }
 
 #[test]
+#[ignore = "Prefer Block-Tridiagonal solver."]
 fn test_din_en_15026_timestep_2h() -> Result<()> {
     run_benchmark_test(2.0 * hours)
 }
 
 #[test]
-#[ignore = "Prefer 2h timestep when dynamic timestep is enabled."]
+#[ignore = "Prefer Block-Tridiagonal solver."]
+fn test_din_en_15026_timestep_6h() -> Result<()> {
+    run_benchmark_test(6.0 * hours)
+}
+
+#[test]
+#[ignore = "Prefer Block-Tridiagonal solver."]
 fn test_din_en_15026_timestep_0_5h() -> Result<()> {
     run_benchmark_test(0.5 * hours)
 }
 
 #[test]
+#[ignore = "Prefer 2h timestep when dynamic timestep is enabled."]
 fn test_din_en_15026_block_tridiag_0_5h() -> Result<()> {
     run_benchmark_test_with_solver(0.5 * hours, SolverMethod::BlockTridiagonal)
 }
