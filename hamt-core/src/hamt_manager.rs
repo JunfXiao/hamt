@@ -8,25 +8,28 @@ use crate::material::{Construction, Material};
 use crate::cell::BoundaryLocation;
 use crate::physics::geometry::{Pt3D, Size3D};
 use crate::surface::Surface;
+use crate::uom::Quantity;
 use crate::uom::constants::VAPOR_GAS_CONSTANT;
 use crate::uom::dimensions::{
-    ArealEnergyDensity, ArealMassDensity, EnergyFluxDensity, MassFluxDensity, Power, Temperature,
-    Time,
+    ArealEnergyDensity, ArealMassDensity, Dimensionless, EnergyFluxDensity, MassFluxDensity, Power,
+    Temperature, Time,
 };
 use crate::uom::units::{
-    hours, j_per_m2, kelvin, kg_per_m2, kg_per_m2_s, m_per_s, seconds, w_per_m2,
+    dimensionless, hours, j_per_m2, kelvin, kg_per_m2, kg_per_m2_s, m_per_s, seconds, w_per_m2,
 };
 use crate::{error, uom};
 use anyhow::{Context, Ok, Result};
-use std::mem;
+use std::ops::Div;
 use std::sync::Arc;
+use std::{cell, mem};
 use tracing::{debug, info, warn};
 use uom::dimensions::Area;
 use uom::dimensions::Length;
 use uom::units;
 
 const MAX_ALPHA: f64 = 1.5;
-
+pub type TempRate<S> = <Temperature<S> as Div<Time<S>>>::Output;
+pub type RhRate<S> = <Dimensionless<S> as Div<Time<S>>>::Output;
 /// Manages the state and execution of the HAMT simulation for a surface.
 #[derive(Debug, Clone)]
 pub struct HamtManager {
@@ -270,7 +273,7 @@ impl HamtManager {
         );
         Ok(false)
     }
-    
+
     fn solve_timestep_picard(&mut self) -> Result<bool> {
         // Reapply surface vapor coefficients if not using constant value.
         // When mass_convection_coeff is non-zero it represents h_mass [m/s] and β is derived
@@ -680,6 +683,8 @@ impl HamtManager {
         adaptive_state: &mut AdaptiveState<T>,
         mut callback_state_change: Option<Box<dyn FnMut(&AdaptiveState<T>) -> Result<()>>>,
     ) -> Result<()> {
+        return self.solve_timestep_adaptive_pi(adaptive_state, callback_state_change);
+
         // Time-extrapolation warm start. Skipped on the very first macro-step
         // (before two converged states exist) and on any step following a
         // failed solve (dt_prev_macro is only stamped on the success path).
@@ -863,6 +868,200 @@ impl HamtManager {
         // Stamp the macro Δt only on the success path: a failed step must not
         // poison the next extrapolation.
         self.dt_prev_macro = Some(orig_timestep);
+        Ok(())
+    }
+
+    /// Solves for the current timestep using an adaptive stepping strategy based on a PI controller.
+    pub fn solve_timestep_adaptive_pi<T>(
+        &mut self,
+        adaptive_state: &mut AdaptiveState<T>,
+        mut callback_state_change: Option<Box<dyn FnMut(&AdaptiveState<T>) -> Result<()>>>,
+    ) -> Result<()> {
+        // --- 1. Macro-level Warm Start ---
+        if let (Some(prev_prev), Some(dt_prev)) =
+            (self.surface_prev_prev_macro.clone(), self.dt_prev_macro)
+        {
+            self.apply_warm_start(&prev_prev, self.settings.timestep, dt_prev)?;
+        }
+
+        if let Some(ref mut prev_surface_state) = adaptive_state.prev_surface_state {
+            prev_surface_state.sync_state_from(&self.surface_prev)?;
+        } else {
+            adaptive_state.prev_surface_state = Some(self.surface_prev.clone());
+        }
+
+        // --- 2. State & Accumulator Initialization ---
+        adaptive_state.flux_accumulator.reset();
+        let macro_dt = self.settings.timestep;
+        adaptive_state.substep_time = 0.0 * hours;
+
+        // Initialize the proposed step size.
+        // Inherit from previous macro-step if available, otherwise cold start with macro_dt.
+        let mut current_dt: Time<f64> = adaptive_state.proposed_dt.unwrap_or(macro_dt);
+
+        // Historical change rates for PI linear extrapolation. Cold start with 0.
+        if adaptive_state.rate_t.is_none() {
+            adaptive_state.rate_t = Some(ndarray::Array3::<Quantity<f64, _>>::from_shape_fn(
+                self.surface_curr.cells.dim(),
+                |_| 0.0 * kelvin / hours,
+            ));
+        }
+        if adaptive_state.rate_rh.is_none() {
+            adaptive_state.rate_rh = Some(ndarray::Array3::<Quantity<f64, _>>::from_shape_fn(
+                self.surface_curr.cells.dim(),
+                |_| 0.0 * (dimensionless / hours),
+            ));
+        }
+
+        if adaptive_state.predicted_surface_state.is_none() {
+            adaptive_state.predicted_surface_state = Some(self.surface_prev.clone());
+        }
+
+        // Use adaptive_state.substep_time as the accumulator condition
+        while adaptive_state.substep_time < macro_dt {
+            let time_remaining = macro_dt - adaptive_state.substep_time;
+            let is_boundary_step = current_dt >= time_remaining;
+            let rate_t = adaptive_state.rate_t.as_mut().unwrap();
+            let rate_rh = adaptive_state.rate_rh.as_mut().unwrap();
+            // Boundary Clamping
+            let dt_step: Time<f64> = current_dt.min(time_remaining);
+
+            let predicted_surface = adaptive_state
+                .predicted_surface_state
+                .as_mut()
+                .expect("Predicted Surface shouldn't be None");
+            predicted_surface.sync_state_from(&self.surface_prev)?;
+            for (idx, cell) in predicted_surface.cells.indexed_iter_mut() {
+                if matches!(cell.cell_type, CellType::Material(_)) {
+                    cell.cell_temp += rate_t[idx] * dt_step;
+                    cell.cell_rh += rate_rh[idx] * dt_step;
+                    cell.calc_dependent_state(&self.boundary_condition, &self.settings);
+                }
+            }
+
+            self.settings.timestep = dt_step;
+            let converged = self.solve_timestep()?;
+
+            if !converged {
+                // Shrink the proposed PI timestep
+                current_dt *= 0.25;
+
+                if current_dt.value_in(seconds) < 1e-3 {
+                    return Err(error::Error::Other(format!(
+                        "Solver irrecoverably stalled at {:.2} hours with dt < 1ms",
+                        adaptive_state.current_time.value_in(hours)
+                    ))
+                    .into());
+                }
+
+                self.surface_curr.sync_state_from(&self.surface_prev)?;
+                self.surface_next.sync_state_from(&self.surface_prev)?;
+                continue;
+            }
+
+            // Evaluate LTE
+            let mut max_lte: f64 = 1e-12;
+            for (cell_pred, cell_curr) in predicted_surface
+                .cells
+                .iter()
+                .zip(self.surface_curr.cells.iter())
+            {
+                if matches!(cell_curr.cell_type, CellType::Material(_)) {
+                    let lte_t = (cell_pred.cell_temp - cell_curr.cell_temp).abs()
+                        / self.settings.temp_convergence_tolerance;
+                    let lte_rh = (cell_pred.cell_rh - cell_curr.cell_rh).abs()
+                        / self.settings.rh_convergence_tolerance;
+                    let cell_lte = lte_t.max(lte_rh).value();
+                    if cell_lte > max_lte {
+                        max_lte = cell_lte;
+                    }
+                }
+            }
+
+            // Accept/Reject Logic
+            if max_lte <= 1.0 {
+                // ✅ [ACCEPT STEP]
+
+                for (idx, cell_prev) in self.surface_prev.cells.indexed_iter() {
+                    if matches!(cell_prev.cell_type, CellType::Material(_)) {
+                        (*rate_t)[idx] = (self.surface_curr.cells[idx].cell_temp
+                            - cell_prev.cell_temp)
+                            / dt_step;
+                        (*rate_rh)[idx] =
+                            (self.surface_curr.cells[idx].cell_rh - cell_prev.cell_rh) / dt_step;
+                    }
+                }
+
+                // Advance accumulators and physical time
+                adaptive_state.substep_time += dt_step;
+                adaptive_state.current_time += dt_step;
+
+                {
+                    let q_int = self.surface_curr.heat_flux(BoundaryLocation::Interior)?;
+                    let q_ext = self.surface_curr.heat_flux(BoundaryLocation::Exterior)?;
+                    let m_int = self
+                        .surface_curr
+                        .moisture_flux(BoundaryLocation::Interior, &self.boundary_condition)?;
+                    let m_ext = self
+                        .surface_curr
+                        .moisture_flux(BoundaryLocation::Exterior, &self.boundary_condition)?;
+
+                    adaptive_state.flux_accumulator.q_int_dt += q_int * dt_step;
+                    adaptive_state.flux_accumulator.q_ext_dt += q_ext * dt_step;
+                    adaptive_state.flux_accumulator.m_int_dt += m_int * dt_step;
+                    adaptive_state.flux_accumulator.m_ext_dt += m_ext * dt_step;
+                    adaptive_state.flux_accumulator.total_time += dt_step;
+                }
+
+                std::mem::swap(&mut self.surface_prev, &mut self.surface_curr);
+                self.surface_curr.sync_state_from(&self.surface_prev)?;
+
+                if let Some(ref mut cb) = callback_state_change {
+                    // adaptive_state.proposed_dt = Some(dt_step);
+                    cb(adaptive_state)?;
+                }
+
+                // PI Controller logic
+                if !is_boundary_step {
+                    let k_i = 0.3;
+                    let k_p = 0.2;
+                    let safety = 0.9;
+
+                    let mut amplification = (1.0 / max_lte).powf(k_i);
+                    if let Some(pe) = adaptive_state.prev_lte {
+                        amplification *= (pe / max_lte).powf(k_p);
+                    }
+                    amplification = (amplification * safety).clamp(0.1, 2.0);
+
+                    // Update the proposed timestep for the NEXT loop iteration
+                    current_dt = dt_step * amplification;
+                    adaptive_state.prev_lte = Some(max_lte);
+                }
+            } else {
+                // ❌ [REJECT STEP]
+                let shrink_factor = (0.9 / max_lte.sqrt()).clamp(0.1, 0.9);
+
+                // Update the proposed timestep and retry immediately
+                current_dt = dt_step * shrink_factor;
+
+                self.surface_curr.sync_state_from(&self.surface_prev)?;
+                self.surface_next.sync_state_from(&self.surface_prev)?;
+            }
+        }
+
+        // Persist the momentum to the state struct for the next macro-step
+        adaptive_state.proposed_dt = Some(current_dt);
+
+        mem::swap(&mut self.surface_prev, &mut self.surface_curr);
+        self.surface_prev
+            .sync_state_from(adaptive_state.prev_surface_state.as_ref().unwrap())?;
+
+        self.settings.timestep = macro_dt;
+        self.dt_prev_macro = Some(macro_dt);
+
+        // Restore substep_time to macro_dt for any downstream TRNSYS queries
+        adaptive_state.substep_time = macro_dt;
+
         Ok(())
     }
 
@@ -1162,11 +1361,22 @@ pub struct AdaptiveState<T> {
     pub current_time: Time<f64>,
     pub split_factor: i32,
     pub max_split_factor: i32,
+
+    /// The current timestep size proposed by the PI controller.
+    pub proposed_dt: Option<Time<f64>>,
+
+    /// The local truncation error (LTE) from the previous accepted step, used for the Integral term.
+    pub prev_lte: Option<f64>,
+
+    // Temperature per Time
+    pub rate_t: Option<ndarray::Array3<TempRate<f64>>>,
+    pub rate_rh: Option<ndarray::Array3<RhRate<f64>>>,
     pub data: T,
     pub retry_wait_time: i32,
     pub time_in_contineous_split: i32,
     pub reset_time_in_contineous: bool,
     pub prev_surface_state: Option<Surface>,
+    pub predicted_surface_state: Option<Surface>,
     pub flux_accumulator: SubstepFluxAccumulator,
 }
 
@@ -1181,10 +1391,15 @@ where
             split_factor: 1,
             max_split_factor: 12,
             data: T::default(),
+            proposed_dt: None,
+            prev_lte: None,
+            rate_t: None,
+            rate_rh: None,
             retry_wait_time: 0,
             time_in_contineous_split: 0,
             reset_time_in_contineous: false,
             prev_surface_state: None,
+            predicted_surface_state: None,
             flux_accumulator: SubstepFluxAccumulator::default(),
         }
     }

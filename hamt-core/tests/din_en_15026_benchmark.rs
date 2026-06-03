@@ -464,7 +464,9 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
                     let tracker = tracker.clone();
                     move |state: &AdaptiveState<Vec<(Time<f64>, u32)>>| -> Result<()> {
                         let orig_timestep = (*orig_timestep_for_ui).clone();
-                        let current_step = if state.split_factor > 0 {
+                        let current_step = if state.proposed_dt.is_some() {
+                            state.proposed_dt.unwrap()
+                        } else if state.split_factor > 0 {
                             orig_timestep / 2.0_f64.powi(state.split_factor - 1)
                         } else {
                             orig_timestep.clone()
@@ -590,7 +592,9 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
                     let tracker = tracker.clone();
                     move |state: &AdaptiveState<Vec<(Time<f64>, u32)>>| -> Result<()> {
                         let orig_timestep = (*orig_timestep_for_ui).clone();
-                        let current_step = if state.split_factor > 0 {
+                        let current_step = if state.proposed_dt.is_some() {
+                            state.proposed_dt.unwrap()
+                        } else if state.split_factor > 0 {
                             orig_timestep / 2.0_f64.powi(state.split_factor - 1)
                         } else {
                             orig_timestep.clone()
