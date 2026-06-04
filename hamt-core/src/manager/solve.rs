@@ -421,6 +421,68 @@ impl HamtManager {
         Ok(false)
     }
 
+    /// Test-only driver: run the outer loop for an arbitrary [`IterativeStep`]
+    /// with the standard ADI accelerator stack (Aitken relaxer + optional
+    /// Anderson extrapolator) and report `(converged, outer_iterations)`.
+    ///
+    /// The iteration count is captured by wrapping the Aitken relaxer in a
+    /// counting adapter: `run_outer_loop` calls `relax` exactly once at the top
+    /// of every outer-iteration body (before the exit test), so the relax-call
+    /// count equals the number of outer iterations executed before exit. Used by
+    /// the ADI-vs-direct strong-coupling gate (Phase 2a Task 10).
+    #[cfg(test)]
+    pub(crate) fn run_outer_loop_counted<S: crate::surface::IterativeStep>(
+        &mut self,
+        step: &S,
+        max_iter: i32,
+    ) -> Result<(bool, i32)> {
+        use crate::accel::{Accelerator, Aitken, RelaxKnobs};
+
+        /// Counts `relax` invocations while forwarding to an inner relaxer.
+        struct CountingRelaxer<'a> {
+            inner: &'a mut dyn Accelerator,
+            count: i32,
+        }
+        impl Accelerator for CountingRelaxer<'_> {
+            fn relax(&mut self, next: &mut Surface, curr: &Surface, iter: i32, knobs: RelaxKnobs) {
+                self.count += 1;
+                self.inner.relax(next, curr, iter, knobs);
+            }
+            fn extrapolate(&mut self, x_curr: &[f64], g_x: &[f64]) -> Option<Vec<f64>> {
+                self.inner.extrapolate(x_curr, g_x)
+            }
+            fn reset(&mut self) {
+                self.count = 0;
+                self.inner.reset();
+            }
+        }
+
+        let n_cells = self.surface_curr.cells.len();
+        let mut aitken = Aitken::new(n_cells);
+        let mut counting = CountingRelaxer { inner: &mut aitken, count: 0 };
+        let mut anderson = AndersonAccelerator::new(self.settings.anderson_history_depth);
+
+        // `run_outer_loop` resets the relaxer at entry (CountingRelaxer::reset
+        // zeroes the count), so `counting.count` after the loop is the number of
+        // outer iterations executed this call. The inner block scopes the
+        // `&mut counting` borrow so it ends before we read `counting.count`.
+        let converged = {
+            let extrapolator: Option<&mut dyn Accelerator> = if self.settings.anderson_enabled {
+                Some(&mut anderson as &mut dyn Accelerator)
+            } else {
+                None
+            };
+            self.run_outer_loop(
+                step,
+                &mut counting,
+                extrapolator,
+                ExitPolicy { max_iter, min_iter_guard: None, stall_patience: None },
+            )?
+        };
+
+        Ok((converged, counting.count))
+    }
+
     /// ADI (Alternating-Direction Implicit) solve. For a 1-D grid (ny=nz=1) this
     /// is identical to the block-tridiag path (a single x-sweep with no cross
     /// coupling), so we delegate. The genuine 2-D/3-D ADI step lands in a later task.

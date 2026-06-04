@@ -42,7 +42,7 @@ impl IterativeStep for BlockJacobiStep {
 /// Blend (next, curr) by the cell's relaxation factor, clamp RH to [0, 1.01],
 /// and recompute dependent state. Shared by the BlockJacobi write-back and the
 /// BlockTridiag scatter.
-pub(super) fn relax_write_cell(
+pub(crate) fn relax_write_cell(
     cell: &mut Cell,
     next_t: Temperature<f64>,
     next_rh: Dimensionless<f64>,

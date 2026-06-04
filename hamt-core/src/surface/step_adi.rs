@@ -60,6 +60,29 @@ impl Surface {
         surface_prev: &Surface,
         surface_curr: &Surface,
     ) -> Result<()> {
+        self.prepare_iteration_prologue(settings, bc, surface_curr)?;
+
+        // ── ADI sweeps ──
+        // x-sweep: solve each x-line implicitly; y-neighbours lagged into RHS.
+        self.run_axis_sweep(0, settings, bc, surface_prev, surface_curr)?;
+        // y-sweep: reads the x-updated `self` for cross-axis lag.
+        self.run_axis_sweep(1, settings, bc, surface_prev, surface_curr)?;
+
+        Ok(())
+    }
+
+    /// Shared iteration prologue for the multi-dimensional (T,φ) solvers: sync
+    /// the writable `self` from `surface_curr`, apply boundary coefficients,
+    /// refresh Virtual cells against the current iterate, and update dependent
+    /// cell properties. Both [`Surface::calculate_iteration_adi`] and the
+    /// test-only direct solver ([`crate::solver::adi::DirectStep`]) share this so
+    /// the ADI-vs-direct comparison differs ONLY in the solve/scatter stage.
+    pub(crate) fn prepare_iteration_prologue(
+        &mut self,
+        settings: &HamtSettings,
+        bc: &BoundaryCondition,
+        surface_curr: &Surface,
+    ) -> Result<()> {
         self.sync_state_from(surface_curr)?;
         self.apply_boundary_coefficients(bc, settings)?;
 
@@ -140,12 +163,6 @@ impl Surface {
         }
 
         self.update_cell_properties(bc, settings)?;
-
-        // ── ADI sweeps ──
-        // x-sweep: solve each x-line implicitly; y-neighbours lagged into RHS.
-        self.run_axis_sweep(0, settings, bc, surface_prev, surface_curr)?;
-        // y-sweep: reads the x-updated `self` for cross-axis lag.
-        self.run_axis_sweep(1, settings, bc, surface_prev, surface_curr)?;
 
         Ok(())
     }
