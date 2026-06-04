@@ -44,12 +44,15 @@ pub const FACE_Z_MAX: usize = 5;
 /// `BlockTridiagonal` requires `coupled_heat_moisture_enabled = true`.
 /// If false, `solve_timestep` falls back to `BlockJacobi` and emits a warn!.
 ///
-/// Future 2-D / 3-D wall extensions will add an `Adi` variant that
-/// reuses the same block-Thomas kernel direction-by-direction.
+/// `Adi` (Alternating-Direction Implicit) extends `BlockTridiagonal` to
+/// multi-dimensional grids via direction-by-direction sweeps. For a 1-D grid
+/// (ny=nz=1) it delegates to the existing block-tridiag path. The genuine 2-D/3-D
+/// ADI step is implemented in Phase 2a Task 8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverMethod {
     BlockJacobi,
     BlockTridiagonal,
+    Adi,
 }
 
 /// Tunable gains for the PI adaptive sub-stepper (`solve_timestep_adaptive`).

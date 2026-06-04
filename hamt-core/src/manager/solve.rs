@@ -127,6 +127,7 @@ impl HamtManager {
                 }
                 self.solve_timestep_block_tridiag()
             }
+            SolverMethod::Adi => self.solve_timestep_adi(),
         }
     }
 
@@ -418,6 +419,17 @@ impl HamtManager {
             );
         }
         Ok(false)
+    }
+
+    /// ADI (Alternating-Direction Implicit) solve. For a 1-D grid (ny=nz=1) this
+    /// is identical to the block-tridiag path (a single x-sweep with no cross
+    /// coupling), so we delegate. The genuine 2-D/3-D ADI step lands in a later task.
+    pub(super) fn solve_timestep_adi(&mut self) -> Result<bool> {
+        let dim = self.surface_curr.cells.raw_dim();
+        if dim[1] == 1 && dim[2] == 1 {
+            return self.solve_timestep_block_tridiag();
+        }
+        unimplemented!("2-D/3-D ADI (AdiStep) lands in Phase 2a Task 8")
     }
 
     /// Direct block-tridiagonal solve. See `solver::block_tridiag` for the
