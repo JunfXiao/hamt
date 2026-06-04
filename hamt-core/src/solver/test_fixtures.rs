@@ -2,7 +2,7 @@
 //!
 //! Gated `#[cfg(test)]` — not compiled into the release binary.
 
-use crate::hamt_manager::HamtManager;
+use crate::manager::HamtManager;
 
 /// Build a tiny test surface — single layer, `n_div` cells, fixed
 /// material (DIN-EN-15026-style), gentle symmetric BCs.
@@ -110,7 +110,7 @@ pub(crate) fn build_fixture_manager(n_div: usize) -> HamtManager {
     };
 
     let settings = {
-        let mut s = crate::hamt_manager::HamtSettings::default();
+        let mut s = crate::config::HamtSettings::default();
         s.min_div = n_div as i32;
         s.max_div = n_div as i32;
         s.coupled_heat_moisture_enabled = true;

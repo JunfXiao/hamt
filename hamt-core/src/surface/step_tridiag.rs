@@ -13,7 +13,7 @@ impl IterativeStep for BlockTridiagStep {
     fn step(
         &self,
         next: &mut Surface,
-        settings: &crate::hamt_manager::HamtSettings,
+        settings: &crate::config::HamtSettings,
         bc: &crate::boundary::BoundaryCondition,
         surface_prev: &Surface,
         surface_curr: &Surface,
@@ -181,7 +181,7 @@ impl Surface {
 
 #[cfg(test)]
 mod block_tridiag_tests {
-    fn fixture(n_div: usize) -> crate::hamt_manager::HamtManager {
+    fn fixture(n_div: usize) -> crate::manager::HamtManager {
         crate::solver::test_fixtures::build_fixture_manager(n_div)
     }
 

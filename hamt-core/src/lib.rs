@@ -4,6 +4,7 @@
 pub mod accel;
 pub mod boundary;
 pub mod cell;
+pub mod config;
 pub mod error;
 pub mod manager;
 pub use manager as hamt_manager;
