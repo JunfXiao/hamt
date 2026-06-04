@@ -21,8 +21,8 @@ use crate::{error, uom};
 use anyhow::{Context, Ok, Result};
 use std::ops::Div;
 use std::sync::Arc;
-use std::{cell, mem};
-use tracing::{debug, info, warn};
+use std::mem;
+use tracing::{debug, warn};
 use uom::dimensions::Area;
 use uom::dimensions::Length;
 use uom::units;
@@ -51,8 +51,6 @@ pub struct HamtManager {
 
     /// Simulation-wide settings
     pub settings: HamtSettings,
-
-    pub last_report_time: Time<f64>,
 
     /// Converged state from two macro-steps ago (t-2). Used together with
     /// `surface_prev` (t-1) to seed the next macro-step's iteration with a
@@ -109,7 +107,6 @@ impl HamtManager {
             surface_next: surface,
             boundary_condition: boundary,
             materials: construction.layers.clone(),
-            last_report_time: 0.0 * hours,
             surface_prev_prev_macro: None,
             dt_prev_macro: None,
         })
@@ -304,8 +301,6 @@ impl HamtManager {
 
         let mut stats: ConvergenceStats = ConvergenceStats::default();
 
-        let temp_tol = self.settings.temp_convergence_tolerance.value_in(kelvin);
-        let rh_tol = self.settings.rh_convergence_tolerance;
         let min_alpha = self.settings.min_relaxation_factor;
         // Assuming MAX_ALPHA is already defined in scope as requested. If not locally defined,
         // it references the outer scope const.
