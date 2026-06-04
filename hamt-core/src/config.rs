@@ -12,6 +12,26 @@ use crate::uom::dimensions::{Dimensionless, Power, Temperature, Time};
 use crate::uom::units;
 use crate::uom::units::{dimensionless, kelvin};
 
+/// Boundary condition on one of the 6 axis-aligned faces of the wall box.
+/// Side faces (y/z-normal) default to Adiabatic; the two x-normal faces carry
+/// the existing interior/exterior Convection+Radiation sheets. Designed to admit
+/// future variants (thermal bridges) without a topology rewrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaceBc {
+    /// No flux across this face (the stencil has no neighbour across it).
+    Adiabatic,
+    /// Active boundary face carrying the Conv/Rad/Sky/Ground sheets (the two x-faces).
+    Active,
+}
+
+/// Indices into `Surface::face_bcs`: x-min (exterior), x-max (interior), y-min, y-max, z-min, z-max.
+pub const FACE_X_MIN: usize = 0;
+pub const FACE_X_MAX: usize = 1;
+pub const FACE_Y_MIN: usize = 2;
+pub const FACE_Y_MAX: usize = 3;
+pub const FACE_Z_MIN: usize = 4;
+pub const FACE_Z_MAX: usize = 5;
+
 /// Selects the inner linear solver used by `solve_timestep`.
 ///
 /// The legacy `BlockJacobi` path runs block-Jacobi sweeps until per-iter δ

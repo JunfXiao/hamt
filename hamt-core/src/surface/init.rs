@@ -29,6 +29,14 @@ impl Surface {
             exterior_surface_material_idx: None,
             user_defined_depth: settings.user_defined_depth,
             user_defined_cell_idx: None,
+            face_bcs: [
+                crate::config::FaceBc::Active,    // x-min (exterior)
+                crate::config::FaceBc::Active,    // x-max (interior)
+                crate::config::FaceBc::Adiabatic, // y-min
+                crate::config::FaceBc::Adiabatic, // y-max
+                crate::config::FaceBc::Adiabatic, // z-min
+                crate::config::FaceBc::Adiabatic, // z-max
+            ],
         };
         surface.init_cells_idx_map();
         surface

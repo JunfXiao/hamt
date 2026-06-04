@@ -85,6 +85,9 @@ pub struct Surface {
     pub user_defined_depth: Option<Length<f64>>,
 
     pub user_defined_cell_idx: Option<InterpolationWeights>,
+
+    /// Per-face boundary condition: [x-min, x-max, y-min, y-max, z-min, z-max].
+    pub face_bcs: [crate::config::FaceBc; 6],
 }
 
 /// A single inner-iteration step of the nonlinear outer loop.
@@ -187,5 +190,19 @@ impl Surface {
         };
 
         left.into_iter().chain(right)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn one_d_surface_has_active_x_faces_adiabatic_sides() {
+        use crate::config::{FaceBc, FACE_X_MIN, FACE_X_MAX, FACE_Y_MIN, FACE_Z_MAX};
+        let mgr = crate::solver::test_fixtures::build_fixture_manager(6);
+        let f = mgr.surface_curr.face_bcs;
+        assert_eq!(f[FACE_X_MIN], FaceBc::Active);
+        assert_eq!(f[FACE_X_MAX], FaceBc::Active);
+        assert_eq!(f[FACE_Y_MIN], FaceBc::Adiabatic);
+        assert_eq!(f[FACE_Z_MAX], FaceBc::Adiabatic);
     }
 }
