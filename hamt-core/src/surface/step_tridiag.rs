@@ -42,6 +42,10 @@ impl Surface {
         surface_prev: &Surface,
         surface_curr: &Surface,
     ) -> Result<()> {
+        debug_assert!(
+            self.cells.raw_dim()[1] == 1 && self.cells.raw_dim()[2] == 1,
+            "1-D step invoked on a multi-dimensional grid; use AdiStep"
+        );
         self.sync_state_from(surface_curr)?;
         self.apply_boundary_coefficients(bc, settings)?;
 

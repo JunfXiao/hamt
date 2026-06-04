@@ -151,26 +151,34 @@ impl Surface {
         // default to mid-depth if not provided
         if self.user_defined_depth.is_none() {
             self.user_defined_depth = Some({
-                // default to mid-depth if not provided
-                
-                // Calculate the thickness of the surface based on the first and last cell positions in the x-direction
+                // Calculate the thickness of the surface based on the first and last cell positions
+                // in the x-direction.  Use the real x-extent (nx) rather than cells.len() which is
+                // the flat product nx*ny*nz and would give an out-of-bounds index on 2-D grids.
+                let nx = self.cells.raw_dim()[0];
+
                 let first_cell_pos = self
                     .cells
                     .get([0, 0, 0])
-                    .map(|c| c.origin.x() - c.size.x() / 2.0) // Get the left boundary of the first cell
+                    .map(|c| c.origin.x() - c.size.x() / 2.0) // left boundary of the first cell
                     .unwrap_or(0.0 * meter);
 
                 let last_cell_pos = self
                     .cells
-                    .get([self.cells.len() - 1, 0, 0])
-                    .map(|c| c.origin.x() + c.size.x() / 2.0) // Get the right boundary of the last cell
+                    .get([nx - 1, 0, 0])
+                    .map(|c| c.origin.x() + c.size.x() / 2.0) // right boundary of the last cell
                     .unwrap_or(0.0 * meter);
-            
+
                 (first_cell_pos + last_cell_pos) / 2.0
             })
         }
         self.user_defined_cell_idx = self.user_defined_depth.map(|v| {
-            let target = Pt3D::new(v, self.size.y(), self.size.z());
+            // Use the geometric mid-point in y and z so the probe falls in the centre
+            // of the wall on 2-D/3-D grids.  For a 1-D (N,1,1) grid the y- and
+            // z-interpolation fractions are 0.0 regardless of the target value
+            // (find_bracket returns fraction=0 when there is only one cell), so
+            // size.y()/2 and size.z()/2 produce the same result as any other y/z
+            // target — 1-D probe output is unchanged.
+            let target = Pt3D::new(v, self.size.y() / 2.0, self.size.z() / 2.0);
             self.compute_interpolation_weights(&target)
         });
     }

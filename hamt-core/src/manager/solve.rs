@@ -115,6 +115,12 @@ impl HamtManager {
     /// Solves for the current timestep by iterating until convergence.
     /// Dispatches to the configured inner solver.
     pub fn solve_timestep(&mut self) -> Result<bool> {
+        let dim = self.surface_curr.cells.raw_dim();
+        if dim[1] > 1 || dim[2] > 1 {
+            // BlockJacobi / BlockTridiagonal are 1-D (x-only); multi-dimensional
+            // grids are solved by ADI regardless of the configured solver_method.
+            return self.solve_timestep_adi();
+        }
         match self.settings.solver_method {
             SolverMethod::BlockJacobi => self.solve_timestep_block_jacobi(),
             SolverMethod::BlockTridiagonal => {
@@ -483,9 +489,18 @@ impl HamtManager {
         Ok((converged, counting.count))
     }
 
-    /// ADI (Alternating-Direction Implicit) solve. For a 1-D grid (ny=nz=1) this
-    /// is identical to the block-tridiag path (a single x-sweep with no cross
-    /// coupling), so we delegate. The genuine 2-D/3-D ADI step lands in a later task.
+    /// ADI (Alternating-Direction Implicit) solve.
+    ///
+    /// For a 1-D grid (`ny == 1 && nz == 1`) this delegates to
+    /// `solve_timestep_block_tridiag`: a single x-sweep with no cross coupling is
+    /// byte-identical to the block-tridiag path.
+    ///
+    /// For a genuine 2-D/3-D grid (`ny > 1` or `nz > 1`) the alternating
+    /// x→y line sweeps are driven by the shared [`HamtManager::run_outer_loop`]
+    /// with `AdiStep` as the inner step. The outer loop iterates on the
+    /// nonlinearity (`P_sat(T)`, `∂w/∂φ`, `L_eff(φ)`) and the cross-axis lag
+    /// until convergence. `solve_timestep` always routes multi-dimensional grids
+    /// here regardless of the configured `solver_method`.
     pub(super) fn solve_timestep_adi(&mut self) -> Result<bool> {
         let dim = self.surface_curr.cells.raw_dim();
         if dim[1] == 1 && dim[2] == 1 {

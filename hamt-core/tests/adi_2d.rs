@@ -1003,3 +1003,97 @@ fn adi_2d_energy_mass_balance() -> Result<()> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// M1 regression — 2-D manager with DEFAULT solver_method must not panic.
+// ---------------------------------------------------------------------------
+
+/// Regression test: a 2-D manager (ny > 1) constructed with the DEFAULT
+/// `solver_method` (BlockTridiagonal) must not panic or error when
+/// `tick_timestep` / `solve_timestep` is called.  Before the M1 fix,
+/// `solve_timestep` dispatched BlockTridiagonal on a (nx, ny, 1) grid and
+/// `calculate_iteration_block_tridiag` immediately OOB-indexed at
+/// `self.cells[[li, 0, 0]]` with a flat linear index `li` that exceeds `nx`.
+#[test]
+fn two_d_manager_default_solver_does_not_panic() -> Result<()> {
+    init_tracing();
+
+    let ny = 4usize;
+    let y_extent = 1.0 * meter;
+    let time_step: Time<f64> = 2.0 * hours;
+
+    // Use a small single-layer construction so the test is fast.
+    let library = create_library(
+        20.0,
+        0.5,
+        vec![0.1],
+        vec![Some(6)],
+    );
+    let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
+
+    // DEFAULT settings — solver_method is BlockTridiagonal.
+    let mut settings = HamtSettings::default();
+    settings.timestep = time_step;
+    // Leave solver_method at its default (BlockTridiagonal) to exercise the
+    // dispatch guard added by M1.
+
+    let bc = BoundaryCondition {
+        temp_outside_air: celsius_to_kelvin(20.0),
+        temp_inside_air: celsius_to_kelvin(20.0),
+        temp_outside_air_moisture: celsius_to_kelvin(20.0),
+        temp_inside_air_moisture: celsius_to_kelvin(20.0),
+        rh_outside_air: 0.5 * dimensionless,
+        rh_inside_air: 0.5 * dimensionless,
+        heat_transfer_coeff_ext: 25.0 * w_per_m2_k,
+        heat_transfer_coeff_int: 25.0 * w_per_m2_k,
+        mass_convection_coeff_ext: 0.0 * m_per_s,
+        mass_convection_coeff_int: 0.0 * m_per_s,
+        vapor_transport_coeff_ext: 1.0e-9 * kg_per_m2_s_pa,
+        vapor_transport_coeff_int: 1.0e-9 * kg_per_m2_s_pa,
+        ..Default::default()
+    };
+
+    // Build a 2-D manager — ny=4 columns stacked along y.
+    let mut mgr = HamtManager::new_2d(
+        Some(settings),
+        Some(bc.clone()),
+        construction,
+        "M1RegressionSurface".to_string(),
+        1.0 * square_meter,
+        ny,
+        y_extent,
+    )?;
+
+    // Confirm the grid is genuinely 2-D.
+    let dim = mgr.surface_curr.cells.raw_dim();
+    assert_eq!(dim[1], ny, "expected ny={} columns in the y-direction", ny);
+
+    // Run one solve_timestep without a panic or error.  The M1 dispatch guard
+    // must route this to ADI (not BlockTridiagonal) because dim[1] > 1.
+    let result = mgr.solve_timestep();
+    assert!(result.is_ok(), "solve_timestep returned Err: {:?}", result);
+
+    // The returned flag (converged?) must be true or false — never nonsense.
+    let converged = result.unwrap();
+    println!("two_d_manager_default_solver_does_not_panic: converged={}", converged);
+
+    // Run tick_timestep to advance state — also must not panic.
+    mgr.tick_timestep()?;
+
+    // Sanity: every material cell must have a finite T and RH.
+    for cell in mgr.surface_prev.cells.iter() {
+        if matches!(cell.cell_type, CellType::Material(_)) {
+            assert!(
+                cell.cell_temp.value_in(kelvin).is_finite(),
+                "non-finite T after one step"
+            );
+            assert!(
+                cell.cell_rh.value().is_finite(),
+                "non-finite RH after one step"
+            );
+        }
+    }
+
+    println!("M1 regression PASS: 2-D default-solver tick completed without panic.");
+    Ok(())
+}
