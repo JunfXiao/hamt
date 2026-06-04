@@ -75,11 +75,26 @@ pub struct Surface {
     // ========= Boundary-adjacent material cell indices =========
     /// Index (x-axis) of the outermost interior material cell (last Material cell in x).
     /// Radiation absorbed at the interior surface is deposited here.
+    /// For a multi-column (ny>1) grid this is the first element of
+    /// `interior_surface_material_idx_set`; kept for backward-compatibility with
+    /// callers that need only a single x-index.
     pub interior_surface_material_idx: Option<usize>,
 
     /// Index (x-axis) of the outermost exterior material cell (first Material cell in x).
     /// Radiation absorbed at the exterior surface is deposited here.
+    /// For a multi-column (ny>1) grid this is the first element of
+    /// `exterior_surface_material_idx_set`; kept for backward-compatibility.
     pub exterior_surface_material_idx: Option<usize>,
+
+    /// Interior-most material cell per y/z column (the interior surface sheet).
+    /// For a 1-D wall (ny=1, nz=1) this contains exactly one element `[x,0,0]`
+    /// whose `x` equals `interior_surface_material_idx.unwrap()`.
+    pub interior_surface_material_idx_set: Vec<[usize; 3]>,
+
+    /// Exterior-most material cell per y/z column (the exterior surface sheet).
+    /// For a 1-D wall (ny=1, nz=1) this contains exactly one element `[x,0,0]`
+    /// whose `x` equals `exterior_surface_material_idx.unwrap()`.
+    pub exterior_surface_material_idx_set: Vec<[usize; 3]>,
 
     // ========= Optional user-defined probe =========
     /// Depth (m) at which user-defined reporting is performed.
@@ -361,4 +376,154 @@ mod tests {
     // NOTE: genuine 2-D stencil verified in T6/T9/T10 (2-D grid generator not
     // yet available in Task 3; hand-rolling a full Surface literal here would be
     // fragile).
+
+    /// For a (N,1,1) 1-D wall the interior/exterior sets must each contain
+    /// exactly one element, and that element's x-index must equal the scalar
+    /// `interior_surface_material_idx` / `exterior_surface_material_idx`.
+    #[test]
+    fn interior_set_is_single_cell_in_1d() {
+        let mgr = crate::solver::test_fixtures::build_fixture_manager(6);
+        let surf = &mgr.surface_curr;
+
+        // Interior set: single element whose [0] == scalar idx.
+        let set = &surf.interior_surface_material_idx_set;
+        assert_eq!(set.len(), 1, "1-D wall must have exactly one interior sheet cell");
+        assert_eq!(
+            Some(set[0][0]),
+            surf.interior_surface_material_idx,
+            "set element x-index must equal scalar interior_surface_material_idx"
+        );
+
+        // Exterior set: same invariant.
+        let eset = &surf.exterior_surface_material_idx_set;
+        assert_eq!(eset.len(), 1, "1-D wall must have exactly one exterior sheet cell");
+        assert_eq!(
+            Some(eset[0][0]),
+            surf.exterior_surface_material_idx,
+            "set element x-index must equal scalar exterior_surface_material_idx"
+        );
+    }
+
+    /// For a (nx, ny=4, 1) 2-D surface the interior/exterior sets must each
+    /// contain exactly `ny` elements — one per y-column.
+    #[test]
+    fn interior_set_has_ny_entries_in_2d() {
+        use super::Surface;
+        use crate::boundary::{BoundaryCondition, celsius_to_kelvin};
+        use crate::material::{Material, MaterialLibrary, SurfaceVaporCoef};
+        use crate::physics::{Curve, LogY};
+        use crate::uom::units::{
+            dimensionless, j_per_kg_k, kg_per_m3, m2_per_s, meter, square_meter, w_per_m_k,
+        };
+        use crate::uom::{
+            DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_THERMAL_CONDUCTIVITY,
+            DIM_WATER_CONTENT, Quantity,
+        };
+        use std::sync::Arc;
+
+        let ny = 4usize;
+        let n_div = 3usize;
+
+        // ── Minimal material (same curves as build_fixture_manager) ──────────
+        let w_sat = 146.0 * kg_per_m3;
+        let n_pts = 20usize;
+        let si_x: Vec<_> = (0..=n_pts)
+            .map(|k| (k as f64 / n_pts as f64) * dimensionless)
+            .collect();
+        let si_y: Vec<_> = si_x.iter().map(|&rh| w_sat * rh.value().max(0.0).sqrt()).collect();
+        let sorption_isotherm: Curve<DIM_DIMENSIONLESS, DIM_WATER_CONTENT> =
+            Curve::new(si_x.clone(), si_y);
+        let mu_y: Vec<_> = si_x.iter().map(|_| 10.0 * dimensionless).collect();
+        let vapor_diffusion_resistance: Curve<DIM_DIMENSIONLESS, DIM_DIMENSIONLESS> =
+            Curve::new(si_x.clone(), mu_y);
+        let wc_pts = 10usize;
+        let wc_x: Vec<_> = (0..=wc_pts)
+            .map(|k| (k as f64 / wc_pts as f64) * w_sat)
+            .collect();
+        let k_y: Vec<_> = wc_x.iter().map(|_| 0.5 * w_per_m_k).collect();
+        let thermal_conductivity: Curve<DIM_WATER_CONTENT, DIM_THERMAL_CONDUCTIVITY> =
+            Curve::new(wc_x.clone(), k_y);
+        let dw_y: Vec<_> = wc_x.iter().map(|_| 1.0e-10 * m2_per_s).collect();
+        let liquid_tc: Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF, LogY> =
+            Curve::<_, _, LogY>::try_new(wc_x.clone(), dw_y).expect("valid Dw");
+
+        let mat = Material {
+            name: "2dMat".to_string(),
+            thickness: 0.01 * meter,
+            density: 200.0 * kg_per_m3,
+            spec_heat: 1000.0 * j_per_kg_k,
+            porosity: Quantity(0.146),
+            initial_water_content: Quantity(0.073),
+            sorption_isotherm,
+            suction: liquid_tc.clone(),
+            redistribution: liquid_tc,
+            vapor_diffusion_resistance,
+            thermal_conductivity,
+            sorption_enthalpy: None,
+            initial_temp: celsius_to_kelvin(20.0),
+            num_div: Some(n_div),
+            div_distribution_factor: 0.5,
+        };
+
+        let lib = MaterialLibrary::new();
+        lib.add_material(mat).expect("add material");
+        let sv = SurfaceVaporCoef {
+            is_external_const: false,
+            external_value: 1e-12,
+            is_internal_const: false,
+            internal_value: 1e-8,
+        };
+        lib.create_construction("2dConst".to_string(), vec!["2dMat".to_string()], sv)
+            .expect("create construction");
+        let construction = lib.get_construction("2dConst").unwrap();
+
+        let settings = {
+            let mut s = crate::config::HamtSettings::default();
+            s.min_div = n_div as i32;
+            s.max_div = n_div as i32;
+            s
+        };
+        let bc = BoundaryCondition::default();
+        let total_area = 4.0 * square_meter;
+        let y_extent = 2.0 * meter; // ny=4 columns each 0.5 m tall
+
+        let surf = Surface::from_construction_2d(
+            &settings,
+            Arc::clone(&construction),
+            "2dSurface".to_string(),
+            total_area,
+            ny,
+            y_extent,
+            &bc,
+        )
+        .expect("from_construction_2d");
+
+        assert_eq!(
+            surf.interior_surface_material_idx_set.len(),
+            ny,
+            "interior set must have one entry per y-column (ny={ny})"
+        );
+        assert_eq!(
+            surf.exterior_surface_material_idx_set.len(),
+            ny,
+            "exterior set must have one entry per y-column (ny={ny})"
+        );
+
+        // All elements in each set must refer to actual Material cells.
+        use crate::cell::CellType;
+        for &idx in &surf.interior_surface_material_idx_set {
+            let cell = surf.cells.get(idx).expect("valid index");
+            assert!(
+                matches!(cell.cell_type, CellType::Material(_)),
+                "interior set element {idx:?} is not a Material cell"
+            );
+        }
+        for &idx in &surf.exterior_surface_material_idx_set {
+            let cell = surf.cells.get(idx).expect("valid index");
+            assert!(
+                matches!(cell.cell_type, CellType::Material(_)),
+                "exterior set element {idx:?} is not a Material cell"
+            );
+        }
+    }
 }

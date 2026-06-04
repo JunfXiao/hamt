@@ -221,34 +221,46 @@ impl Surface {
         CellInertia { tcap, wcap }
     }
 
-    /// Cell-local heat sources `(q_adds, q_boundary)` for cell `i`.
+    /// Cell-local heat sources `(q_adds, q_boundary)` for cell at `idx`.
+    ///
+    /// `idx` is the `[x, y, z]` triplet of the cell. For a 1-D wall `idx =
+    /// [i, 0, 0]`. Radiation / additional-energy deposition is tested via SET
+    /// MEMBERSHIP against `interior_surface_material_idx_set` /
+    /// `exterior_surface_material_idx_set`, so multi-column 2-D walls work
+    /// correctly while a (N,1,1) wall stays byte-identical (single-element
+    /// set, membership == old `Some(i) == ..` test).
     pub(crate) fn cell_sources(
         &self,
-        i: usize,
+        idx: [usize; 3],
         surf_curr: &Surface,
         bc: &BoundaryCondition,
     ) -> CellSources {
+        let i = idx[0];
         let q_weight = surf_curr
             .user_defined_cell_idx
             .as_ref()
             .map(|weights| {
                 weights
                     .iter()
-                    .filter(|(idx, _)| idx[0] == i)
+                    .filter(|(widx, _)| widx[0] == i)
                     .map(|(_, w)| w)
                     .sum::<f64>()
             })
             .unwrap_or(0.0);
         let q_adds = bc.q_addition_userdef * q_weight;
 
-        // Deposit absorbed radiation into the boundary-adjacent material cell.
-        let q_boundary: Power<f64> = if Some(i) == surf_curr.interior_surface_material_idx {
-            bc.additional_energy_int
-        } else if Some(i) == surf_curr.exterior_surface_material_idx {
-            bc.additional_energy_ext
-        } else {
-            0.0 * watts
-        };
+        // Deposit absorbed radiation into the boundary-adjacent material cell(s).
+        // Uses set membership so every column's surface cell gets the deposit in
+        // the 2-D case; for (N,1,1) the set has one element and the check is
+        // equivalent to the old `Some(i) == interior_surface_material_idx` test.
+        let q_boundary: Power<f64> =
+            if surf_curr.interior_surface_material_idx_set.contains(&idx) {
+                bc.additional_energy_int
+            } else if surf_curr.exterior_surface_material_idx_set.contains(&idx) {
+                bc.additional_energy_ext
+            } else {
+                0.0 * watts
+            };
 
         CellSources { q_adds, q_boundary }
     }
@@ -316,7 +328,7 @@ impl Surface {
                     // lagged neighbour state from `surface_curr` (block-Jacobi sweep).
                     let sums = surface_curr.accumulate_neighbor_sums([i, 0, 0], surface_curr, bc);
                     let inertia = Self::cell_inertia(i, cell_curr);
-                    let sources = surface_curr.cell_sources(i, surface_curr, bc);
+                    let sources = surface_curr.cell_sources([i, 0, 0], surface_curr, bc);
 
                     let t_curr = cell_curr.cell_temp;
                     let vpsat_curr = cell_curr.vp_sat;

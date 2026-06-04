@@ -26,6 +26,8 @@ impl Surface {
             cells_idx_map: HashMap::new(),
             interior_surface_material_idx: None,
             exterior_surface_material_idx: None,
+            interior_surface_material_idx_set: Vec::new(),
+            exterior_surface_material_idx_set: Vec::new(),
             user_defined_depth: settings.user_defined_depth,
             user_defined_cell_idx: None,
             face_bcs: [
@@ -115,14 +117,36 @@ impl Surface {
                 .push([x, y, z]);
         }
 
-        // Cache boundary-adjacent material cell indices (scan x-axis once).
-        let nx = self.cells.raw_dim()[0];
-        self.exterior_surface_material_idx = (0..nx).find(|&i| {
-            matches!(self.cells[[i, 0, 0]].cell_type, CellType::Material(_))
-        });
-        self.interior_surface_material_idx = (0..nx).rev().find(|&i| {
-            matches!(self.cells[[i, 0, 0]].cell_type, CellType::Material(_))
-        });
+        // Cache boundary-adjacent material cell indices.
+        //
+        // Per-column sets: for each (y,z) column, find the exterior-most (min-x)
+        // and interior-most (max-x) Material cell and push its [x,y,z] into the
+        // corresponding set.  For a (N,1,1) wall each set has exactly one element.
+        let dims = self.cells.raw_dim();
+        let (nx, ny, nz) = (dims[0], dims[1], dims[2]);
+        self.interior_surface_material_idx_set.clear();
+        self.exterior_surface_material_idx_set.clear();
+        for y in 0..ny {
+            for z in 0..nz {
+                // exterior: first x with Material
+                if let Some(x) = (0..nx).find(|&x| {
+                    matches!(self.cells[[x, y, z]].cell_type, CellType::Material(_))
+                }) {
+                    self.exterior_surface_material_idx_set.push([x, y, z]);
+                }
+                // interior: last x with Material
+                if let Some(x) = (0..nx).rev().find(|&x| {
+                    matches!(self.cells[[x, y, z]].cell_type, CellType::Material(_))
+                }) {
+                    self.interior_surface_material_idx_set.push([x, y, z]);
+                }
+            }
+        }
+        // Scalar back-compat: first element's x-index (or None if no material cells).
+        self.exterior_surface_material_idx =
+            self.exterior_surface_material_idx_set.first().map(|t| t[0]);
+        self.interior_surface_material_idx =
+            self.interior_surface_material_idx_set.first().map(|t| t[0]);
 
         // default to mid-depth if not provided
         if self.user_defined_depth.is_none() {

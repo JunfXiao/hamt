@@ -228,7 +228,7 @@ pub(crate) fn assemble_1d(
             phiorsum: 0.0 * kg_per_s,
         };
         let inertia = Surface::cell_inertia(i, cell_curr);
-        let sources = surface.cell_sources(i, surface, bc);
+        let sources = surface.cell_sources(triplet, surface, bc);
 
         let (block, (b_t0, b_p0)) =
             Surface::build_cell_block(&sums, &inertia, &sources, cell_curr, cell_prev, l_eff, dt_s);
