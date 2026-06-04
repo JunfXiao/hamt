@@ -24,6 +24,8 @@ pub enum Error {
     HamtError(String),
     #[error("Unhandled error: {0:#}")]
     Other(#[source] Box<dyn StdError + Send + Sync>),
+    #[error("HAMT core error: {0}")]
+    Core(#[from] hamt_core::error::Error),
 }
 
 impl ErrorHandler for Error {
@@ -49,6 +51,9 @@ impl ErrorHandler for Error {
             }
             Error::Other(e) => {
                 error!("Unhandled TRNSYS error: {:?}", e);
+            }
+            Error::Core(e) => {
+                error!("HAMT core error: {:#}", e);
             }
         }
     }
