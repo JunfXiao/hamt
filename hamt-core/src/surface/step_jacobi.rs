@@ -134,20 +134,22 @@ impl Surface {
         Ok(())
     }
 
-    /// Accumulate the seven conductance-weighted neighbour sums for cell `i`
-    /// in a single pass. `surf_curr` provides the lagged neighbour state read
-    /// during a block-Jacobi / Picard sweep. The guards
-    /// (`1e-12*k_per_w`, `1e-12*pa_s_per_kg`, the liquid `r_total` bounds)
-    /// drop degenerate / zero-coupling interfaces.
+    /// Accumulate the seven conductance-weighted neighbour sums for the cell at
+    /// `idx` over ALL face neighbours (every active spatial axis). `surf_curr`
+    /// provides the lagged neighbour state read during a block-Jacobi / Picard
+    /// sweep. The guards (`1e-12*k_per_w`, `1e-12*pa_s_per_kg`, the liquid
+    /// `r_total` bounds) drop degenerate / zero-coupling interfaces.
+    ///
+    /// For a 1-D wall (ny=1, nz=1) and `idx = [i, 0, 0]`, the result is
+    /// byte-identical to the former `accumulate_neighbor_sums(i, …, axis=0)`.
     pub(crate) fn accumulate_neighbor_sums(
         &self,
-        i: usize,
+        idx: [usize; 3],
         surf_curr: &Surface,
         bc: &BoundaryCondition,
-        axis: usize,
     ) -> NeighborSums {
-        let nx = self.cells.raw_dim()[0];
-        let cell_curr = &surf_curr.cells[[i, 0, 0]];
+        let [i, j, k] = idx;
+        let cell_curr = &surf_curr.cells[[i, j, k]];
 
         let mut oorsum: ThermalConductance<f64> = 0.0 * w_per_k;
         let mut torsum: Power<f64> = 0.0 * watts;
@@ -159,10 +161,12 @@ impl Surface {
 
         let curr_vp_pa = cell_curr.cell_vp;
 
-        for nbr_i in surf_curr.neighbor_indices(i, nx, axis) {
-            let nbr_curr = &surf_curr.cells[[nbr_i, 0, 0]];
+        for (nbr_idx, nbr_axis) in surf_curr.all_face_neighbors(idx) {
+            let [ni, nj, nk] = nbr_idx;
+            let nbr_curr = &surf_curr.cells[[ni, nj, nk]];
 
-            let r = Self::calculate_resistance_triple(cell_curr, nbr_curr, bc.pressure_air, axis);
+            let r =
+                Self::calculate_resistance_triple(cell_curr, nbr_curr, bc.pressure_air, nbr_axis);
 
             if r.therm > 1e-12 * k_per_w {
                 oorsum += 1.0 / r.therm;
@@ -310,7 +314,7 @@ impl Surface {
                     // Conductance-weighted neighbour sums, cell-local inertia, and
                     // heat sources are extracted into testable helpers. The sums read
                     // lagged neighbour state from `surface_curr` (block-Jacobi sweep).
-                    let sums = surface_curr.accumulate_neighbor_sums(i, surface_curr, bc, 0);
+                    let sums = surface_curr.accumulate_neighbor_sums([i, 0, 0], surface_curr, bc);
                     let inertia = Self::cell_inertia(i, cell_curr);
                     let sources = surface_curr.cell_sources(i, surface_curr, bc);
 
