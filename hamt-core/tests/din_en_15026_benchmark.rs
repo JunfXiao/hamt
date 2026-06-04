@@ -464,17 +464,12 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
                     let tracker = tracker.clone();
                     move |state: &AdaptiveState<Vec<(Time<f64>, u32)>>| -> Result<()> {
                         let orig_timestep = (*orig_timestep_for_ui).clone();
-                        let current_step = if state.proposed_dt.is_some() {
-                            state.proposed_dt.unwrap()
-                        } else if state.split_factor > 0 {
-                            orig_timestep / 2.0_f64.powi(state.split_factor - 1)
-                        } else {
-                            orig_timestep.clone()
-                        };
+                        let current_step = state.proposed_dt.unwrap_or_else(|| orig_timestep.clone());
                         let sim_hours = state.current_time.value_in(hours);
                         let remaining_hours = preheat_end_hours - sim_hours;
                         tracker.borrow_mut().record(sim_hours);
                         let (speed, eta) = tracker.borrow().speed_and_eta(remaining_hours);
+                        let dt_ratio = current_step.value_in(hours) / orig_timestep.value_in(hours);
                         ui_clone.borrow_mut().set_status(
                             format!(
                                 "Preheat ΔT={:.2e} K, Δrh={:.2}% | Time={:.2} hours | Run time: {} seconds | {:.2} hr/s, ETA: {:.1} s | timestep: {:?} (orig: {:?})",
@@ -487,7 +482,7 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
                                 current_step,
                                 orig_timestep
                             ),
-                            StatusStyle::from_split_factor(state.split_factor),
+                            StatusStyle::from_dt_ratio(dt_ratio),
                         )
                     }
                 }
@@ -592,13 +587,7 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
                     let tracker = tracker.clone();
                     move |state: &AdaptiveState<Vec<(Time<f64>, u32)>>| -> Result<()> {
                         let orig_timestep = (*orig_timestep_for_ui).clone();
-                        let current_step = if state.proposed_dt.is_some() {
-                            state.proposed_dt.unwrap()
-                        } else if state.split_factor > 0 {
-                            orig_timestep / 2.0_f64.powi(state.split_factor - 1)
-                        } else {
-                            orig_timestep.clone()
-                        };
+                        let current_step = state.proposed_dt.unwrap_or_else(|| orig_timestep.clone());
                         let progress = progress_bar(
                             state.current_time,
                             simulation_durations_for_ui.as_ref(),
@@ -609,6 +598,7 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
                         tracker.borrow_mut().record(sim_hours);
                         let (speed, eta) = tracker.borrow().speed_and_eta(remaining_hours);
                         let realworld_elapsed = start_time_for_ui.elapsed().as_secs();
+                        let dt_ratio = current_step.value_in(hours) / orig_timestep.value_in(hours);
                         ui_clone.borrow_mut().set_status(
                             format!(
                                 "{} Time={:.2} hours | Run time: {} seconds | {:.2} hr/s, ETA: {:.1} s | timestep: {:?} (orig: {:?})",
@@ -620,7 +610,7 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
                                 current_step,
                                 orig_timestep
                             ),
-                            StatusStyle::from_split_factor(state.split_factor),
+                            StatusStyle::from_dt_ratio(dt_ratio),
                         )
                     }
                 }
@@ -997,17 +987,12 @@ fn run_total_release_with_timestep_and_solver(
 
     let total_duration: Time<f64> = 6.0 * hours;
     let mut total_release_kg: f64 = 0.0;
-    let mut max_split_factor_seen: i32 = 1;
     let mut adap_state: AdaptiveState<()> = AdaptiveState::default();
-    adap_state.max_split_factor = 10;
     let mut elapsed: Time<f64> = 0.0 * hours;
 
     while elapsed < total_duration {
         mgr.solve_timestep_adaptive(&mut adap_state, None)?;
         mgr.tick_timestep()?;
-        if adap_state.split_factor > max_split_factor_seen {
-            max_split_factor_seen = adap_state.split_factor;
-        }
         let area = mgr.surface_curr.area;
         // m_int_dt = ∫ m_int dt over this macro-step  [kg/m²]; the m_int
         // sign convention is flux INTO the wall, so a wall releasing
@@ -1021,10 +1006,9 @@ fn run_total_release_with_timestep_and_solver(
     }
 
     println!(
-        "  Δt = {:>9.4e} h: total released = {:>11.4e} kg | max split factor = {}",
+        "  Δt = {:>9.4e} h: total released = {:>11.4e} kg",
         timestep.value_in(hours),
         total_release_kg,
-        max_split_factor_seen,
     );
 
     Ok(total_release_kg)
@@ -1381,8 +1365,10 @@ enum StatusStyle {
 }
 
 impl StatusStyle {
-    fn from_split_factor(split_factor: i32) -> Self {
-        if split_factor > 1 {
+    /// Maps a PI-controller dt ratio (current_step / orig_timestep) to a display style.
+    /// Ratio < 0.5 means the controller has shortened the step significantly — show Warning.
+    fn from_dt_ratio(ratio: f64) -> Self {
+        if ratio < 0.5 {
             StatusStyle::Warning
         } else {
             StatusStyle::Normal

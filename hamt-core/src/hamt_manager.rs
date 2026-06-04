@@ -1182,8 +1182,6 @@ impl SubstepFluxAccumulator {
 pub struct AdaptiveState<T> {
     pub substep_time: Time<f64>,
     pub current_time: Time<f64>,
-    pub split_factor: i32,
-    pub max_split_factor: i32,
 
     /// The current timestep size proposed by the PI controller.
     pub proposed_dt: Option<Time<f64>>,
@@ -1195,9 +1193,6 @@ pub struct AdaptiveState<T> {
     pub rate_t: Option<ndarray::Array3<TempRate<f64>>>,
     pub rate_rh: Option<ndarray::Array3<RhRate<f64>>>,
     pub data: T,
-    pub retry_wait_time: i32,
-    pub time_in_contineous_split: i32,
-    pub reset_time_in_contineous: bool,
     pub prev_surface_state: Option<Surface>,
     pub predicted_surface_state: Option<Surface>,
     pub flux_accumulator: SubstepFluxAccumulator,
@@ -1211,16 +1206,11 @@ where
         Self {
             substep_time: 0.0 * units::seconds,
             current_time: 0.0 * units::seconds,
-            split_factor: 1,
-            max_split_factor: 12,
             data: T::default(),
             proposed_dt: None,
             prev_lte: None,
             rate_t: None,
             rate_rh: None,
-            retry_wait_time: 0,
-            time_in_contineous_split: 0,
-            reset_time_in_contineous: false,
             prev_surface_state: None,
             predicted_surface_state: None,
             flux_accumulator: SubstepFluxAccumulator::default(),
