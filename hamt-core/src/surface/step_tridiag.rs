@@ -58,7 +58,7 @@ impl Surface {
         let virtual_nbr_pairs: Vec<(usize, Vec<usize>)> = (0..self.cells.len())
             .filter(|&li| matches!(self.cells[[li, 0, 0]].cell_type, crate::cell::CellType::Virtual(_)))
             .map(|li| {
-                let nbrs: Vec<usize> = self.neighbor_indices(li, nx).collect();
+                let nbrs: Vec<usize> = self.neighbor_indices(li, nx, 0).collect();
                 (li, nbrs)
             })
             .collect();
@@ -76,7 +76,7 @@ impl Surface {
             for nbr_li in nbr_indices {
                 let nbr = &self.cells[[nbr_li, 0, 0]];
                 let (therm_r, vapor_r) = Surface::calculate_resistance_pair(
-                    cell, nbr, bc.pressure_air,
+                    cell, nbr, bc.pressure_air, 0,
                 );
                 if vapor_r > 1e-12 * pa_s_per_kg {
                     let inv_v = 1.0 / vapor_r.value_in(pa_s_per_kg);

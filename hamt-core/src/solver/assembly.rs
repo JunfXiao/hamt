@@ -148,12 +148,12 @@ pub(crate) fn assemble_1d(
         // conductances. Boundary neighbours contribute only to diagonal + RHS.
 
         // Walk the neighbour stencil.
-        for nbr_li in surface.neighbor_indices(i, nx) {
+        for nbr_li in surface.neighbor_indices(i, nx, 0) {
             let nbr_curr = &surface.cells[[nbr_li, 0, 0]];
 
             // Resistance pair using the lagged state.
             let (therm_r, vapor_r) = Surface::calculate_resistance_pair(
-                cell_curr, nbr_curr, bc.pressure_air,
+                cell_curr, nbr_curr, bc.pressure_air, 0,
             );
 
             // Conductances (zero-on-degeneracy guards mirror the existing path).

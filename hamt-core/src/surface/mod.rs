@@ -144,8 +144,21 @@ impl Surface {
         Ok(())
     }
 
-    /// Get neighbor indices for a 1D cell.
-    pub(crate) fn neighbor_indices(&self, i: usize, nx: usize) -> impl Iterator<Item = usize> {
+    /// Get neighbor indices for a cell along `axis`.
+    ///
+    /// For `axis == 0` this is the existing x-axis walk. The Virtual-cell
+    /// gather (all-of-wall fan-out) is x-only by design; Phase 2 will
+    /// generalize it for y/z once the multi-D cell topology is defined.
+    pub(crate) fn neighbor_indices(
+        &self,
+        i: usize,
+        n_along: usize,
+        axis: usize,
+    ) -> impl Iterator<Item = usize> {
+        debug_assert!(
+            axis == 0,
+            "neighbor_indices: only axis 0 (x) is implemented; 3-D walks land in Phase 2"
+        );
         let self_cell = self.cells.get([i, 0, 0]).unwrap();
 
         let left: Vec<usize> = if i > 0 {
@@ -166,8 +179,8 @@ impl Surface {
             self_cell.cell_type,
             CellType::Virtual(BoundaryLocation::Interior)
         ) {
-            (i + 1..nx).collect()
-        } else if i + 1 < nx {
+            (i + 1..n_along).collect()
+        } else if i + 1 < n_along {
             vec![i + 1]
         } else {
             vec![]

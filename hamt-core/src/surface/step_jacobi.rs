@@ -131,6 +131,7 @@ impl Surface {
         i: usize,
         surf_curr: &Surface,
         bc: &BoundaryCondition,
+        axis: usize,
     ) -> NeighborSums {
         let nx = self.cells.raw_dim()[0];
         let cell_curr = &surf_curr.cells[[i, 0, 0]];
@@ -145,10 +146,10 @@ impl Surface {
 
         let curr_vp_pa = cell_curr.cell_vp;
 
-        for nbr_i in surf_curr.neighbor_indices(i, nx) {
+        for nbr_i in surf_curr.neighbor_indices(i, nx, axis) {
             let nbr_curr = &surf_curr.cells[[nbr_i, 0, 0]];
 
-            let r = Self::calculate_resistance_triple(cell_curr, nbr_curr, bc.pressure_air);
+            let r = Self::calculate_resistance_triple(cell_curr, nbr_curr, bc.pressure_air, axis);
 
             if r.therm > 1e-12 * k_per_w {
                 oorsum += 1.0 / r.therm;
@@ -288,7 +289,7 @@ impl Surface {
                     // Conductance-weighted neighbour sums, cell-local inertia, and
                     // heat sources are extracted into testable helpers. The sums read
                     // lagged neighbour state from `surface_curr` (block-Jacobi sweep).
-                    let sums = surface_curr.accumulate_neighbor_sums(i, surface_curr, bc);
+                    let sums = surface_curr.accumulate_neighbor_sums(i, surface_curr, bc, 0);
                     let inertia = Self::cell_inertia(i, cell_curr);
                     let sources = surface_curr.cell_sources(i, surface_curr, bc);
 

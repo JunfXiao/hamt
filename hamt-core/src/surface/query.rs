@@ -545,10 +545,14 @@ impl Surface {
         cell1: &Cell,
         cell2: &Cell,
         pressure_air: Pressure<f64>,
+        axis: usize,
     ) -> ResistanceTriple {
-        let overlap: Area<f64> = cell1.size.area_along(0).min(cell2.size.area_along(0));
-        let dist1 = cell1.size.x().abs() * 0.5;
-        let dist2 = cell2.size.x().abs() * 0.5;
+        let overlap: Area<f64> = cell1
+            .size
+            .area_along(axis as i32)
+            .min(cell2.size.area_along(axis as i32));
+        let dist1 = cell1.size.extent_along(axis).abs() * 0.5;
+        let dist2 = cell2.size.extent_along(axis).abs() * 0.5;
 
         if overlap <= ECLIPSE * square_meter {
             tracing::warn!(
@@ -627,6 +631,7 @@ impl Surface {
             } else {
                 0.0f64 * s_per_kg
             };
+        // dist2 is already axis-aware (extent_along(axis) * 0.5 above)
         let rh_r2: MassResistance<f64> =
             if cell2.dw > 1e-20 * m2_per_s && cell2.dwd_phi > 1e-20 * kg_per_m3 {
                 dist2 / (overlap * cell2.dw * cell2.dwd_phi)
@@ -655,8 +660,9 @@ impl Surface {
         cell1: &Cell,
         cell2: &Cell,
         pressure_air: Pressure<f64>,
+        axis: usize,
     ) -> (ThermalResistance<f64>, VaporResistance<f64>) {
-        let t = Self::calculate_resistance_triple(cell1, cell2, pressure_air);
+        let t = Self::calculate_resistance_triple(cell1, cell2, pressure_air, axis);
         (t.therm, t.vapor)
     }
 }
@@ -687,9 +693,9 @@ mod resistance_triple_tests {
         let cell2 = cells[1];
 
         // ── 1. therm/vapor agree with calculate_resistance_pair ────────────────
-        let triple = Surface::calculate_resistance_triple(cell1, cell2, bc.pressure_air);
+        let triple = Surface::calculate_resistance_triple(cell1, cell2, bc.pressure_air, 0);
         let (therm_pair, vapor_pair) =
-            Surface::calculate_resistance_pair(cell1, cell2, bc.pressure_air);
+            Surface::calculate_resistance_pair(cell1, cell2, bc.pressure_air, 0);
 
         assert_eq!(
             triple.therm.value_unchecked(),
@@ -731,7 +737,7 @@ mod resistance_triple_tests {
         let mut cell_no_dw = cell1.clone();
         cell_no_dw.dw = 0.0 * m2_per_s;
         let triple_no_dw =
-            Surface::calculate_resistance_triple(&cell_no_dw, cell2, bc.pressure_air);
+            Surface::calculate_resistance_triple(&cell_no_dw, cell2, bc.pressure_air, 0);
         // rh_r1 should be zero; only rh_r2 contributes (if cell2.dw is above threshold).
         let expected_no_dw = if cell2.dw > 1e-20 * m2_per_s && cell2.dwd_phi > 1e-20 * kg_per_m3 {
             (cell2.size.x().abs() * 0.5) / (overlap * cell2.dw * cell2.dwd_phi)
@@ -748,7 +754,7 @@ mod resistance_triple_tests {
         let mut cell2_no_dw = cell2.clone();
         cell2_no_dw.dw = 0.0 * m2_per_s;
         let triple_both_zero =
-            Surface::calculate_resistance_triple(&cell_no_dw, &cell2_no_dw, bc.pressure_air);
+            Surface::calculate_resistance_triple(&cell_no_dw, &cell2_no_dw, bc.pressure_air, 0);
         assert_eq!(
             triple_both_zero.liquid.value_unchecked(),
             0.0,
