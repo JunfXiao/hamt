@@ -20,7 +20,11 @@ use crate::uom::units::{dimensionless, kelvin};
 pub enum FaceBc {
     /// No flux across this face (the stencil has no neighbour across it).
     Adiabatic,
-    /// Active boundary face carrying the Conv/Rad/Sky/Ground sheets (the two x-faces).
+    /// Active boundary face: this face participates in boundary exchange via the
+    /// per-face boundary sheets (Convection / Radiation / Sky / Ground). Currently
+    /// used for the two x-normal faces (interior and exterior). Future thermal-bridge
+    /// variants (e.g. a y-face with a specified temperature or convective coefficient)
+    /// should be added as NEW enum variants rather than overloading `Active`.
     Active,
 }
 

@@ -169,6 +169,14 @@ pub(crate) fn assemble_line_sweep(
                     d: -(inv_phi + inv_vapor * psat_n),
                 };
                 let nbr_row = pos_in_line[&nbr_idx];
+                // Safety-net: along-axis material neighbour must be the immediately-adjacent
+                // member in the line ordering (|row − nbr_row| == 1) so it maps to a
+                // contiguous off-diagonal; any gap would silently skip rows in the tridiagonal.
+                debug_assert!(
+                    nbr_row + 1 == row || row + 1 == nbr_row,
+                    "along-axis neighbour {nbr_idx:?} at line position {nbr_row} is not \
+                     adjacent to cell {idx:?} at position {row} — ordering or topology bug"
+                );
                 if nbr_row == row + 1 {
                     upper[row] = off;
                 } else {
@@ -180,6 +188,7 @@ pub(crate) fn assemble_line_sweep(
                 // neighbour-VALUE coupling into the RHS using its current
                 // iterate. Matches assemble_1d's boundary-RHS form, extended to
                 // cross-axis material neighbours (known in this sweep).
+                // strip: linear-algebra kernel boundary — RHS scalars fed into raw f64 accumulator
                 let temp_n = nbr_curr.cell_temp.value_in(kelvin);
                 let vp_n = nbr_curr.cell_vp.value_in(pascals);
                 let phi_or_rh = nbr_curr.cell_rh.value();
@@ -370,6 +379,8 @@ impl Surface {
                     off_blocks.push((nbr_row, off));
                 } else {
                     // Boundary neighbour → RHS, exactly as the sweeps fold it.
+                    // strip: dense Gaussian-elimination oracle (small linear-algebra kernel) —
+                    // RHS scalars fed into raw f64 accumulator at the kernel boundary
                     let temp_n = nbr_curr.cell_temp.value_in(kelvin);
                     let vp_n = nbr_curr.cell_vp.value_in(pascals);
                     let phi_b = nbr_curr.cell_rh.value();

@@ -502,6 +502,13 @@ impl HamtManager {
     /// until convergence. `solve_timestep` always routes multi-dimensional grids
     /// here regardless of the configured `solver_method`.
     pub(super) fn solve_timestep_adi(&mut self) -> Result<bool> {
+        // ADI assembles the same 2×2 (T,φ) coupled block as BlockTridiagonal;
+        // the coupling term (∂P_sat/∂T) is essential for the off-diagonal entries.
+        debug_assert!(
+            self.settings.coupled_heat_moisture_enabled,
+            "Adi requires coupled_heat_moisture_enabled=true (the 2×2 block assumes T↔φ coupling)"
+        );
+
         let dim = self.surface_curr.cells.raw_dim();
         if dim[1] == 1 && dim[2] == 1 {
             // 1-D grid: a single x-sweep with no cross coupling is byte-identical
