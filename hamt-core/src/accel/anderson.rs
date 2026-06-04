@@ -204,6 +204,18 @@ impl AndersonAccelerator {
     }
 }
 
+impl super::Accelerator for AndersonAccelerator {
+    /// Anderson plays the extrapolator role: delegate to the existing AA math.
+    /// `relax` is the trait default no-op (AA does not touch per-cell α).
+    fn extrapolate(&mut self, x_curr: &[f64], g_x: &[f64]) -> Option<Vec<f64>> {
+        self.accelerate(x_curr, g_x)
+    }
+
+    fn reset(&mut self) {
+        AndersonAccelerator::reset(self);
+    }
+}
+
 fn l2_norm(v: &[f64]) -> f64 {
     v.iter().map(|x| x * x).sum::<f64>().sqrt()
 }

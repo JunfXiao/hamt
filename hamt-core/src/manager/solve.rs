@@ -133,18 +133,28 @@ impl HamtManager {
     /// Shared outer-iteration driver for both inner solvers.
     ///
     /// Hosts the skeleton common to BlockJacobi and BlockTridiag: per iteration
-    /// `step -> convergence_stats -> aitken.relax -> swap -> (Anderson) -> exit
-    /// test`. The differences are injected via `step` (which inner step to run),
-    /// `anderson` (Some only for BlockJacobi this task), and `exit` (which exit
-    /// gates apply). Behaviour is bit-identical to the two hand-written loops it
-    /// replaces.
+    /// `step -> convergence_stats -> relaxer.relax -> swap -> (extrapolator) ->
+    /// exit test`. The differences are injected via `step` (which inner step to
+    /// run), `extrapolator` (Some when Anderson is enabled), and `exit` (which
+    /// exit gates apply). Both accelerators are dispatched through the
+    /// [`Accelerator`] trait — `relaxer` (Aitken) does per-cell relaxation,
+    /// `extrapolator` (Anderson) does the global post-swap extrapolation.
+    /// Behaviour is bit-identical to the two hand-written loops it replaces.
     pub(super) fn run_outer_loop<S: crate::surface::IterativeStep>(
         &mut self,
         step: &S,
-        aitken: &mut Aitken,
-        mut anderson: Option<&mut AndersonAccelerator>,
+        relaxer: &mut dyn Accelerator,
+        mut extrapolator: Option<&mut dyn Accelerator>,
         exit: ExitPolicy,
     ) -> Result<bool> {
+        // Per-timestep reset of accelerator history. Matches the per-timestep
+        // reset the solvers previously did on the AndersonAccelerator and the
+        // fresh Aitken buffers (Aitken::new starts zeroed; reset keeps it so).
+        relaxer.reset();
+        if let Some(ex) = extrapolator.as_deref_mut() {
+            ex.reset();
+        }
+
         let mut stats: ConvergenceStats = ConvergenceStats::default();
 
         let min_alpha = self.settings.min_relaxation_factor;
@@ -186,8 +196,9 @@ impl HamtManager {
 
             stats = convergence_stats(&self.surface_next, &self.surface_curr, &self.settings);
 
-            // Aitken delta-squared dynamic relaxation (Component-wise)
-            aitken.relax(
+            // Aitken delta-squared dynamic relaxation (Component-wise),
+            // dispatched via the Accelerator trait.
+            relaxer.relax(
                 &mut self.surface_next,
                 &self.surface_curr,
                 iter,
@@ -202,8 +213,9 @@ impl HamtManager {
 
             // Anderson acceleration. After the swap, surface_curr holds
             // G(x_prev) -- the relaxed iterate produced by the inner step
-            // plus the per-cell alpha write-back. Only wired for BlockJacobi.
-            if let Some(accelerator) = anderson.as_deref_mut() {
+            // plus the per-cell alpha write-back. Active only when an
+            // extrapolator (Anderson) is supplied.
+            if extrapolator.is_some() {
                 if material_indices.is_none() {
                     let mut idx = Vec::with_capacity(self.surface_curr.cells.len());
                     for (linear_i, cell) in self.surface_curr.cells.iter().enumerate() {
@@ -233,7 +245,10 @@ impl HamtManager {
                         x_curr_pairs.iter().flat_map(|&(t, rh)| [t, rh]).collect();
                     let g_x_flat: Vec<f64> = g_x.iter().flat_map(|&(t, rh)| [t, rh]).collect();
 
-                    if let Some(x_aa) = accelerator.accelerate(&x_curr_flat, &g_x_flat) {
+                    if let Some(x_aa) = extrapolator
+                        .as_deref_mut()
+                        .and_then(|ex| ex.extrapolate(&x_curr_flat, &g_x_flat))
+                    {
                         let x_aa_pairs: Vec<(f64, f64)> =
                             x_aa.chunks_exact(2).map(|c| (c[0], c[1])).collect();
 
@@ -418,15 +433,15 @@ impl HamtManager {
         let n_cells = self.surface_curr.cells.len();
         let mut aitken = Aitken::new(n_cells);
 
-        // Anderson acceleration on the outer nonlinear loop. Reset per timestep.
+        // Anderson acceleration on the outer nonlinear loop. History is reset
+        // per timestep inside run_outer_loop via the Accelerator trait.
         let mut anderson = AndersonAccelerator::new(self.settings.anderson_history_depth);
-        anderson.reset();
 
         self.run_outer_loop(
             &crate::surface::BlockTridiagStep,
             &mut aitken,
             if self.settings.anderson_enabled {
-                Some(&mut anderson)
+                Some(&mut anderson as &mut dyn Accelerator)
             } else {
                 None
             },
@@ -492,15 +507,15 @@ impl HamtManager {
         let n_cells = self.surface_curr.cells.len();
         let mut aitken = Aitken::new(n_cells);
 
-        // Anderson acceleration on the outer fixed-point loop. Reset per timestep.
+        // Anderson acceleration on the outer fixed-point loop. History is reset
+        // per timestep inside run_outer_loop via the Accelerator trait.
         let mut anderson = AndersonAccelerator::new(self.settings.anderson_history_depth);
-        anderson.reset();
 
         self.run_outer_loop(
             &crate::surface::BlockJacobiStep,
             &mut aitken,
             if self.settings.anderson_enabled {
-                Some(&mut anderson)
+                Some(&mut anderson as &mut dyn Accelerator)
             } else {
                 None
             },
