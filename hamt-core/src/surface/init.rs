@@ -42,6 +42,11 @@ impl Surface {
     }
 
     /// Dividing the cells and create a surface.
+    ///
+    /// The 1-D path: delegates to [`Surface::from_construction_2d`] with `ny = 1`
+    /// and `y_extent = sqrt(area)`, which builds a single x-column at y-origin 0
+    /// with `col_y = col_z = sqrt(area)` — byte-identical to the legacy
+    /// `(N,1,1)` build.
     pub fn from_construction(
         settings: &HamtSettings,
         construction: Arc<Construction>,
@@ -49,32 +54,51 @@ impl Surface {
         surface_area: Area<f64>,
         init_boundary_condition: &BoundaryCondition,
     ) -> Result<Surface> {
-        let boundary_cell_thickness = settings.base_cell_size.x();
-        // Use non-zero y/z to avoid zero-overlap in resistance calculation
-        let dummy_length = surface_area.sqrt();
-        let dummy_height = surface_area.sqrt();
+        Self::from_construction_2d(
+            settings,
+            construction,
+            surface_name,
+            surface_area,
+            1,
+            surface_area.sqrt(),
+            init_boundary_condition,
+        )
+    }
 
-        // base pt is always the point with the smallest x/y/z
-        // Offset for 2 exterior layers. First layer is for Conv/Rad/Sky/Ground Cells
-        // Second layer is for Virtual Cell.
-        let mut base_pt = Size3D::new(-boundary_cell_thickness * 2.0, 0.0 * meter, 0.0 * meter);
-
-        let cells = crate::surface::grid::build_x_column(
+    /// Build a 2-D `(nx, ny, 1)` surface: `ny` x-columns stacked along y, each
+    /// with a `y_extent/ny`-tall cross-section. The interior/exterior boundary
+    /// sheets are per-column (one Conv/Rad/Sky/Ground/Virtual stack per y-row);
+    /// there is no single global Virtual cell. Side faces (y-min/y-max) and the
+    /// z-faces stay `FaceBc::Adiabatic` (the `Surface::new` default).
+    ///
+    /// `from_construction` is the `ny = 1` case of this routine.
+    pub fn from_construction_2d(
+        settings: &HamtSettings,
+        construction: Arc<Construction>,
+        surface_name: String,
+        surface_area: Area<f64>,
+        ny: usize,
+        y_extent: Length<f64>,
+        init_bc: &BoundaryCondition,
+    ) -> Result<Surface> {
+        let cells_3d = crate::surface::grid::build_grid_2d(
             settings,
             &construction,
-            &mut base_pt,
-            dummy_length,
-            dummy_height,
-            init_boundary_condition,
+            surface_area,
+            ny,
+            y_extent,
+            init_bc,
         )?;
 
-        // currently, only 1D
-        let cells_3d = ArcArray3::from_shape_vec((cells.len(), 1, 1), cells)?;
+        // Surface bounding box: x = total construction thickness; y = y_extent;
+        // z = sqrt(area) (the out-of-plane extent used by every column).
+        let col_z = surface_area.sqrt();
+        let total_thickness: Length<f64> = construction.layers.iter().map(|l| l.thickness).sum();
+        let dimension = Pt3D(total_thickness, y_extent, col_z);
 
-        let get_size = |thickness: Length<f64>| Pt3D(thickness, dummy_length, dummy_height);
         Ok(Surface::new(
             surface_name,
-            get_size(construction.layers.iter().map(|l| l.thickness).sum()),
+            dimension,
             construction.name.clone(),
             cells_3d,
             settings,

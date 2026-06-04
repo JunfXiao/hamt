@@ -1,6 +1,6 @@
 
 use super::*;
-use crate::uom::dimensions::Length;
+use crate::uom::dimensions::{Area, Length};
 use crate::uom::units::meter;
 use crate::{
     cell::Boundary,
@@ -188,4 +188,175 @@ pub(super) fn build_x_column(
         .for_each(|c| c.calc_dependent_state(init_bc, settings));
 
     Ok(cells)
+}
+
+/// Build a (nx, ny, 1) cell lattice: `ny` x-columns stacked along y, each with
+/// real cross-section (col_y = y_extent/ny, col_z). Column j sits at y-origin
+/// j*col_y. Returns the ArcArray3 ready for Surface assembly.
+///
+/// The 1-D path is the `ny = 1` case: one column at y-origin 0 with
+/// `col_y = col_z = sqrt(area)` — byte-identical to the legacy `(N,1,1)` build.
+///
+/// `build_x_column` advances only `base_pt.x`; the y/z components of `base_pt`
+/// are honoured by `get_origin` (`bp + size/2.0`) for every cell origin, so
+/// seeding `base_pt.y = j*col_y` places column j correctly without any change
+/// to `build_x_column`. Subdivision is x-only, so every column has the same nx.
+pub(super) fn build_grid_2d(
+    settings: &HamtSettings,
+    construction: &Construction,
+    surface_area: Area<f64>,
+    ny: usize,
+    y_extent: Length<f64>,
+    init_bc: &BoundaryCondition,
+) -> Result<ndarray::ArcArray3<Cell>> {
+    let boundary_cell_thickness = settings.base_cell_size.x();
+    let col_y = y_extent / ny as f64;
+    let col_z = surface_area.sqrt(); // 2-D out-of-plane extent (z); unchanged convention
+    let mut columns: Vec<Vec<Cell>> = Vec::with_capacity(ny);
+    for j in 0..ny {
+        // Each column starts at the same x offset as the 1-D path (two exterior
+        // boundary layers worth of negative x), and y-origin j*col_y.
+        let mut base_pt = Pt3D::new(-boundary_cell_thickness * 2.0, col_y * j as f64, 0.0 * meter);
+        let col = build_x_column(settings, construction, &mut base_pt, col_y, col_z, init_bc)?;
+        columns.push(col);
+    }
+    let nx = columns[0].len();
+    // All columns must have identical nx (subdivision is x-only).
+    assert!(
+        columns.iter().all(|c| c.len() == nx),
+        "non-uniform column length"
+    );
+    // Flatten C-order for shape (nx, ny, 1): flat[i*ny + j] = columns[j][i] = cell[[i,j,0]].
+    let mut flat: Vec<Cell> = Vec::with_capacity(nx * ny);
+    for i in 0..nx {
+        for col in columns.iter() {
+            flat.push(col[i].clone());
+        }
+    }
+    Ok(ndarray::ArcArray3::from_shape_vec((nx, ny, 1), flat)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cell::BoundaryLocation;
+    use crate::config::{FACE_Y_MIN, FaceBc};
+    use crate::material::{Material, MaterialLibrary, SurfaceVaporCoef};
+    use crate::physics::{Curve, LogY};
+    use crate::uom::units::{
+        dimensionless, j_per_kg_k, kg_per_m3, m2_per_s, square_meter, w_per_m_k,
+    };
+    use crate::uom::{
+        DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_THERMAL_CONDUCTIVITY,
+        DIM_WATER_CONTENT, Quantity,
+    };
+
+    /// Build a minimal single-layer construction with simple monotone curves,
+    /// suitable for exercising the grid topology (no solve is performed).
+    fn build_test_construction() -> Arc<Construction> {
+        let w_sat = 146.0 * kg_per_m3;
+        let n_pts = 10usize;
+        let si_x: Vec<_> = (0..=n_pts)
+            .map(|k| (k as f64 / n_pts as f64) * dimensionless)
+            .collect();
+        let si_y: Vec<_> = si_x.iter().map(|&rh| w_sat * rh.value().max(0.0)).collect();
+        let sorption_isotherm: Curve<DIM_DIMENSIONLESS, DIM_WATER_CONTENT> =
+            Curve::new(si_x.clone(), si_y);
+
+        let mu_y: Vec<_> = si_x.iter().map(|_| 10.0 * dimensionless).collect();
+        let vapor_diffusion_resistance: Curve<DIM_DIMENSIONLESS, DIM_DIMENSIONLESS> =
+            Curve::new(si_x.clone(), mu_y);
+
+        let wc_x: Vec<_> = (0..=n_pts).map(|k| (k as f64 / n_pts as f64) * w_sat).collect();
+        let k_y: Vec<_> = wc_x.iter().map(|_| 0.5 * w_per_m_k).collect();
+        let thermal_conductivity: Curve<DIM_WATER_CONTENT, DIM_THERMAL_CONDUCTIVITY> =
+            Curve::new(wc_x.clone(), k_y);
+
+        let dw_y: Vec<_> = wc_x.iter().map(|_| 1.0e-10 * m2_per_s).collect();
+        let liquid_tc: Curve<DIM_WATER_CONTENT, DIM_LIQUID_TRANSPORT_COEFF, LogY> =
+            Curve::<_, _, LogY>::try_new(wc_x.clone(), dw_y).expect("valid Dw curve");
+
+        let mat = Material {
+            name: "GridTestMat".to_string(),
+            thickness: 0.1 * meter,
+            density: 200.0 * kg_per_m3,
+            spec_heat: 1000.0 * j_per_kg_k,
+            porosity: Quantity(0.146),
+            initial_water_content: Quantity(0.5 * 0.146),
+            sorption_isotherm,
+            suction: liquid_tc.clone(),
+            redistribution: liquid_tc,
+            vapor_diffusion_resistance,
+            thermal_conductivity,
+            sorption_enthalpy: None,
+            initial_temp: crate::boundary::celsius_to_kelvin(20.0),
+            num_div: Some(3),
+            div_distribution_factor: 0.5,
+        };
+
+        let lib = MaterialLibrary::new();
+        lib.add_material(mat).expect("add material");
+        let surface_coeff = SurfaceVaporCoef {
+            is_external_const: false,
+            external_value: 1e-12,
+            is_internal_const: false,
+            internal_value: 1e-8,
+        };
+        lib.create_construction(
+            "GridTestConstruction".to_string(),
+            vec!["GridTestMat".to_string()],
+            surface_coeff,
+        )
+        .expect("create construction");
+        lib.get_construction("GridTestConstruction").unwrap()
+    }
+
+    #[test]
+    fn grid_2d_shape_and_sheets() {
+        let settings = HamtSettings::default();
+        let bc = BoundaryCondition::default();
+        let construction = build_test_construction();
+        let ny = 4usize;
+        let y_extent = 2.0 * meter;
+
+        let surface = Surface::from_construction_2d(
+            &settings,
+            construction,
+            "GridTest".to_string(),
+            1.0 * square_meter,
+            ny,
+            y_extent,
+            &bc,
+        )
+        .expect("build 2-D surface");
+
+        // Shape is (nx, ny, 1) with a genuinely subdivided x-stack.
+        let dim = surface.cells.raw_dim();
+        let nx = dim[0];
+        assert!(nx > 1, "expected nx > 1, got {nx}");
+        assert_eq!([dim[0], dim[1], dim[2]], [nx, ny, 1]);
+
+        // Every Material cell spans col_y = y_extent / ny = 0.5 m in y.
+        let expected_col_y = (y_extent / ny as f64).value_in(meter); // strip: scalar tolerance compare
+        for cell in surface.cells.iter() {
+            if matches!(cell.cell_type, CellType::Material(_)) {
+                let got = cell.size.y().value_in(meter); // strip: scalar tolerance compare
+                assert!(
+                    (got - expected_col_y).abs() < 1e-9,
+                    "material cell y-size {got} != {expected_col_y}"
+                );
+            }
+        }
+
+        // Per-row boundary sheets: one interior Convection + one interior Virtual
+        // per y-row (no global Virtual cell).
+        let int_conv = CellType::Boundary(Boundary::Convection, BoundaryLocation::Interior);
+        let int_virtual = CellType::Virtual(BoundaryLocation::Interior);
+        let count = |ct: &CellType| surface.cells.iter().filter(|c| &c.cell_type == ct).count();
+        assert_eq!(count(&int_conv), ny, "interior Convection sheet count");
+        assert_eq!(count(&int_virtual), ny, "interior Virtual sheet count");
+
+        // Side (y-min) face stays Adiabatic.
+        assert_eq!(surface.face_bcs[FACE_Y_MIN], FaceBc::Adiabatic);
+    }
 }
