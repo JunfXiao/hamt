@@ -128,7 +128,6 @@ where
 
 impl HamtManager {
     /// Solves for the current timestep using an adaptive stepping strategy based on a PI controller.
-/// Solves for the current timestep using an adaptive stepping strategy based on a PI controller.
     pub fn solve_timestep_adaptive<T>(
         &mut self,
         adaptive_state: &mut AdaptiveState<T>,

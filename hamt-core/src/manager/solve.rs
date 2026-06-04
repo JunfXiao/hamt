@@ -408,8 +408,7 @@ impl HamtManager {
     }
 
     /// Direct block-tridiagonal solve. See `solver::block_tridiag` for the
-    /// kernel and `surface::update::solve_step_block_tridiag` for the 1-D
-    /// wall assembly.
+    /// kernel and `surface::step_tridiag` for the 1-D wall assembly.
     pub(super) fn solve_timestep_block_tridiag(&mut self) -> Result<bool> {
         // The outer loop is much shorter than BlockJacobi: it only iterates to
         // convergence on the nonlinearity (Psat(T), dwdphi(phi), L_eff(phi)).

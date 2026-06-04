@@ -483,43 +483,6 @@ impl Surface {
         })
     }
 
-    /// Checks the maximum change in temperature and RH across cells for convergence.
-    pub fn check_convergence(&self, other: &Surface, settings: &HamtSettings) -> bool {
-        for (((x, y, z), cell_curr), cell_next) in self.cells.indexed_iter().zip(other.cells.iter())
-        {
-            if !matches!(cell_curr.cell_type, CellType::Material(_)) {
-                continue;
-            }
-
-            let temp_tol = settings
-                .temp_convergence_tolerance
-                .value_in(diman::si::units::kelvin);
-            let delta_t = (cell_next.cell_temp - cell_curr.cell_temp)
-                .value_in(diman::si::units::kelvin)
-                .abs();
-
-            if delta_t > temp_tol {
-                debug!(
-                    "Temperature change at ({}, {}, {}) exceeded tolerance: {:?}",
-                    x, y, z, delta_t
-                );
-                return false;
-            }
-
-            let delta_rh = cell_next.cell_rh - cell_curr.cell_rh;
-
-            if delta_rh.abs() > settings.rh_convergence_tolerance {
-                debug!(
-                    "Relative humidity change at ({}, {}, {}) exceeded tolerance: {:#?}",
-                    x, y, z, delta_rh
-                );
-                return false;
-            }
-        }
-
-        true
-    }
-
     /// Linear indices into `self.cells` of every material cell, in
     /// `cells.indexed_iter()` order. Used by the block-tridiagonal
     /// assembler to walk the wall in physical order without having to

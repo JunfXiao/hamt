@@ -1,6 +1,6 @@
 //! 1-D block-tridiagonal assembly for the implicit-Euler HAMT step.
 //!
-//! Mirrors the per-cell 2×2 build in `surface::update::calculate_physics_step`
+//! Mirrors the per-cell 2×2 build in `surface::step_jacobi::calculate_physics_step`
 //! but emits one (L, D, U, b) row per material cell and pushes
 //! material-material couplings into the off-diagonals.
 //!
