@@ -1,5 +1,3 @@
-use crate::uom::units::{dimensionless, k_per_w, kelvin, pa_s_per_kg, pascals};
-
 use super::step_jacobi::relax_write_cell;
 use super::*;
 
@@ -42,88 +40,17 @@ impl Surface {
         surface_prev: &Surface,
         surface_curr: &Surface,
     ) -> Result<()> {
-        self.sync_state_from(surface_curr)?;
-        self.apply_boundary_coefficients(bc, settings)?;
+        debug_assert!(
+            self.cells.raw_dim()[1] == 1 && self.cells.raw_dim()[2] == 1,
+            "1-D step invoked on a multi-dimensional grid; use AdiStep"
+        );
 
-        // Virtual cells aren't updated by `apply_boundary_coefficients`. BlockJacobi's
-        // per-cell 2×2 solve covers them as a side-effect of iterating over all
-        // non-boundary cells, but BlockTridiag's scatter writes only material
-        // cells. Compute Virtual cells here as the conductance-weighted average
-        // of their non-Virtual neighbours' state — the implicit-Euler answer
-        // for a cell with negligible capacity. This produces a non-zero
-        // Virtual ↔ Conv gradient that the moisture-flux query relies on.
-        let nx = self.cells.raw_dim()[0];
-        // Collect (virtual_li, [nbr_li, ...]) before any cell borrows to avoid
-        // simultaneous &self and &self.cells conflicts in the inner loop.
-        let virtual_nbr_pairs: Vec<(usize, Vec<usize>)> = (0..self.cells.len())
-            .filter(|&li| {
-                matches!(
-                    self.cells[[li, 0, 0]].cell_type,
-                    crate::cell::CellType::Virtual(_)
-                )
-            })
-            .map(|li| {
-                let nbrs: Vec<usize> = self.neighbor_indices(li, nx, 0).collect();
-                (li, nbrs)
-            })
-            .collect();
-
-        let mut virtual_updates: Vec<(usize, f64, f64, f64)> = Vec::new();
-        for (li, nbr_indices) in virtual_nbr_pairs {
-            let cell = &self.cells[[li, 0, 0]];
-
-            // strip: linear-algebra kernel boundary
-            let mut sum_inv_v: f64 = 0.0;
-            let mut sum_inv_v_vp: f64 = 0.0;
-            let mut sum_inv_t: f64 = 0.0;
-            let mut sum_inv_t_t: f64 = 0.0;
-
-            for nbr_li in nbr_indices {
-                let nbr = &self.cells[[nbr_li, 0, 0]];
-                let (therm_r, vapor_r) =
-                    Surface::calculate_resistance_pair(cell, nbr, bc.pressure_air, 0);
-                if vapor_r > 1e-12 * pa_s_per_kg {
-                    let inv_v = 1.0 / vapor_r.value_in(pa_s_per_kg);
-                    sum_inv_v += inv_v;
-                    sum_inv_v_vp += inv_v * nbr.cell_vp.value_in(pascals);
-                }
-                if therm_r > 1e-12 * k_per_w {
-                    let inv_t = 1.0 / therm_r.value_in(k_per_w);
-                    sum_inv_t += inv_t;
-                    sum_inv_t_t += inv_t * nbr.cell_temp.value_in(kelvin);
-                }
-            }
-
-            // Fall back to current values when no neighbour has non-zero coupling
-            // (degenerate; should not happen for the standard 1-D wall layout).
-            let new_t = if sum_inv_t > 0.0 {
-                sum_inv_t_t / sum_inv_t
-            } else {
-                cell.cell_temp.value_in(kelvin)
-            };
-            let new_vp = if sum_inv_v > 0.0 {
-                sum_inv_v_vp / sum_inv_v
-            } else {
-                cell.cell_vp.value_in(pascals)
-            };
-            let psat = crate::physics::psy_psat_fn_temp(new_t * kelvin).value_in(pascals);
-            let new_rh = if psat > 0.0 {
-                (new_vp / psat).max(0.0).min(1.01)
-            } else {
-                0.0
-            };
-            virtual_updates.push((li, new_vp, new_t, new_rh));
-        }
-
-        for (li, vp, t, rh) in virtual_updates {
-            let cell = &mut self.cells[[li, 0, 0]];
-            // re-tag at kernel boundary
-            cell.cell_vp = vp * pascals;
-            cell.cell_temp = t * kelvin;
-            cell.cell_rh = rh * dimensionless;
-        }
-
-        self.update_cell_properties(bc, settings)?;
+        // Shared prologue: sync from `surface_curr`, apply BCs, refresh Virtual
+        // cells against the current iterate, and update dependent properties.
+        // Identical to the ADI path (the 1-D `(N,1,1)` grid is the single-line
+        // special case of the [i,j,k]-generalised prologue, so the virtual-cell
+        // refresh produces the same result as the former x-only inline block).
+        self.prepare_iteration_prologue(settings, bc, surface_curr)?;
 
         // Assemble from `self`, not `surface_curr`: the BC and Virtual cells on
         // `self` were just refreshed against the current iterate's surface
@@ -143,22 +70,22 @@ impl Surface {
 
         // Scatter solution back, applying per-cell α relaxation
         // (consistent with the BlockJacobi write-back behaviour).
-        for (row, &li) in system.material_indices.iter().enumerate() {
+        for (row, &triplet) in system.material_indices.iter().enumerate() {
             let (t_new_k, phi_new_raw) = solution[row];
             let curr_temp = surface_curr
                 .cells
-                .get([li, 0, 0])
-                .ok_or_else(|| anyhow::anyhow!("invalid linear index {li}"))?
+                .get(triplet)
+                .ok_or_else(|| anyhow::anyhow!("invalid cell index {:?}", triplet))?
                 .cell_temp;
             let curr_rh = surface_curr
                 .cells
-                .get([li, 0, 0])
-                .ok_or_else(|| anyhow::anyhow!("invalid linear index {li}"))?
+                .get(triplet)
+                .ok_or_else(|| anyhow::anyhow!("invalid cell index {:?}", triplet))?
                 .cell_rh;
             let cell = self
                 .cells
-                .get_mut([li, 0, 0])
-                .ok_or_else(|| anyhow::anyhow!("invalid linear index {li}"))?;
+                .get_mut(triplet)
+                .ok_or_else(|| anyhow::anyhow!("invalid cell index {:?}", triplet))?;
 
             // re-tag at kernel boundary
             let t_new_typed = t_new_k * crate::uom::units::kelvin;

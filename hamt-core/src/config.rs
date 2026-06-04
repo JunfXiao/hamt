@@ -12,6 +12,30 @@ use crate::uom::dimensions::{Dimensionless, Power, Temperature, Time};
 use crate::uom::units;
 use crate::uom::units::{dimensionless, kelvin};
 
+/// Boundary condition on one of the 6 axis-aligned faces of the wall box.
+/// Side faces (y/z-normal) default to Adiabatic; the two x-normal faces carry
+/// the existing interior/exterior Convection+Radiation sheets. Designed to admit
+/// future variants (thermal bridges) without a topology rewrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaceBc {
+    /// No flux across this face (the stencil has no neighbour across it).
+    Adiabatic,
+    /// Active boundary face: this face participates in boundary exchange via the
+    /// per-face boundary sheets (Convection / Radiation / Sky / Ground). Currently
+    /// used for the two x-normal faces (interior and exterior). Future thermal-bridge
+    /// variants (e.g. a y-face with a specified temperature or convective coefficient)
+    /// should be added as NEW enum variants rather than overloading `Active`.
+    Active,
+}
+
+/// Indices into `Surface::face_bcs`: x-min (exterior), x-max (interior), y-min, y-max, z-min, z-max.
+pub const FACE_X_MIN: usize = 0;
+pub const FACE_X_MAX: usize = 1;
+pub const FACE_Y_MIN: usize = 2;
+pub const FACE_Y_MAX: usize = 3;
+pub const FACE_Z_MIN: usize = 4;
+pub const FACE_Z_MAX: usize = 5;
+
 /// Selects the inner linear solver used by `solve_timestep`.
 ///
 /// The legacy `BlockJacobi` path runs block-Jacobi sweeps until per-iter δ
@@ -24,12 +48,15 @@ use crate::uom::units::{dimensionless, kelvin};
 /// `BlockTridiagonal` requires `coupled_heat_moisture_enabled = true`.
 /// If false, `solve_timestep` falls back to `BlockJacobi` and emits a warn!.
 ///
-/// Future 2-D / 3-D wall extensions will add an `Adi` variant that
-/// reuses the same block-Thomas kernel direction-by-direction.
+/// `Adi` (Alternating-Direction Implicit) extends `BlockTridiagonal` to
+/// multi-dimensional grids via direction-by-direction sweeps. For a 1-D grid
+/// (ny=nz=1) it delegates to the existing block-tridiag path. The genuine 2-D/3-D
+/// ADI step is implemented in Phase 2a Task 8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverMethod {
     BlockJacobi,
     BlockTridiagonal,
+    Adi,
 }
 
 /// Tunable gains for the PI adaptive sub-stepper (`solve_timestep_adaptive`).

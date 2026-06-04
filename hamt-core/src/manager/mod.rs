@@ -12,7 +12,7 @@ use crate::cell::CellType;
 use crate::material::{Construction, Material};
 use crate::surface::Surface;
 use crate::uom::Quantity;
-use crate::uom::dimensions::{Area, Dimensionless, Time};
+use crate::uom::dimensions::{Area, Dimensionless, Length, Time};
 use crate::uom::units;
 use anyhow::{Context, Ok, Result};
 use std::mem;
@@ -64,6 +64,65 @@ impl HamtManager {
         surface_name: String,
         surface_area: Area<f64>,
     ) -> Result<Self> {
+        let (settings, boundary) =
+            Self::prepare_settings_and_boundary(settings, initial_boundary, &construction, &surface_name);
+
+        let surface = Surface::from_construction(
+            &settings,
+            construction.clone(),
+            surface_name,
+            surface_area,
+            &boundary,
+        )?;
+
+        Ok(Self::from_surface(settings, boundary, construction, surface))
+    }
+
+    /// 2-D variant of [`HamtManager::new`]: builds the three surfaces via
+    /// [`Surface::from_construction_2d`] so the manager owns a `(nx, ny, 1)`
+    /// grid (`ny` x-columns stacked along y, each `y_extent / ny` tall) instead
+    /// of the 1-D `(N, 1, 1)` stack. Everything else — settings, boundary,
+    /// vapor-coefficient propagation, the three-surface (prev/curr/next) layout —
+    /// is identical to `new`. With `ny = 1` and `y_extent = sqrt(area)` it is
+    /// equivalent to `new`.
+    pub fn new_2d(
+        settings: Option<HamtSettings>,
+        initial_boundary: Option<BoundaryCondition>,
+        construction: Arc<Construction>,
+        surface_name: String,
+        surface_area: Area<f64>,
+        ny: usize,
+        y_extent: Length<f64>,
+    ) -> Result<Self> {
+        let (settings, boundary) = Self::prepare_settings_and_boundary(
+            settings,
+            initial_boundary,
+            &construction,
+            &surface_name,
+        );
+
+        let surface = Surface::from_construction_2d(
+            &settings,
+            construction.clone(),
+            surface_name,
+            surface_area,
+            ny,
+            y_extent,
+            &boundary,
+        )?;
+
+        Ok(Self::from_surface(settings, boundary, construction, surface))
+    }
+
+    /// Propagate constant vapor-transfer coefficients from the construction onto
+    /// the boundary condition and unwrap the optional settings/boundary. Shared
+    /// by [`HamtManager::new`] and [`HamtManager::new_2d`].
+    fn prepare_settings_and_boundary(
+        settings: Option<HamtSettings>,
+        initial_boundary: Option<BoundaryCondition>,
+        construction: &Arc<Construction>,
+        surface_name: &str,
+    ) -> (HamtSettings, BoundaryCondition) {
         let settings = settings.unwrap_or_default();
         let mut boundary = initial_boundary.unwrap_or_default();
         debug!(
@@ -79,16 +138,18 @@ impl HamtManager {
             boundary.vapor_transport_coeff_int =
                 construction.surface_vapor_coef.internal_value * units::kg_per_m2_s_pa;
         }
+        (settings, boundary)
+    }
 
-        let surface = Surface::from_construction(
-            &settings,
-            construction.clone(),
-            surface_name,
-            surface_area,
-            &boundary,
-        )?;
-
-        Ok(Self {
+    /// Assemble the manager from a fully-built surface (`surface_curr` =
+    /// `surface_prev` = `surface_next` clones of it). Shared by `new`/`new_2d`.
+    fn from_surface(
+        settings: HamtSettings,
+        boundary: BoundaryCondition,
+        construction: Arc<Construction>,
+        surface: Surface,
+    ) -> Self {
+        Self {
             settings,
             construction: construction.clone(),
             surface_curr: surface.clone(),
@@ -98,7 +159,7 @@ impl HamtManager {
             materials: construction.layers.clone(),
             surface_prev_prev_macro: None,
             dt_prev_macro: None,
-        })
+        }
     }
 
     /// Linear time-extrapolation warm start for the macro-step initial guess.

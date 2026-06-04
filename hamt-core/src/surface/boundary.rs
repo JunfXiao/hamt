@@ -1,7 +1,7 @@
 use crate::uom::{
     Quantity,
     dimensions::{HeatTransferCoeff, VaporTransportCoeff},
-    units::{kelvin, kg_per_m2_s_pa, pascals, w_per_m2_k},
+    units::{kelvin, kg_per_m2_s_pa, pascals, square_meter, w_per_m2_k},
 };
 
 use super::*;
@@ -10,17 +10,51 @@ use anyhow::Result;
 
 impl Surface {
     /// Push boundary htc/vtc/temp/rh/vp into boundary cells before property updates.
+    ///
+    /// The loop iterates ALL cells via `indexed_iter_mut` so the same logic applies
+    /// to every (y,z) column in multi-column 2-D grids. For a (N,1,1) wall this is
+    /// identical to the old `for i in 0..nx` loop over `cells[[i,0,0]]`.
+    ///
+    /// Interior Radiation `h_rad` linearisation uses a GLOBAL area-averaged interior
+    /// surface material temperature (computed once over
+    /// `interior_surface_material_idx_set` before the loop) as the surface proxy.
+    /// For a (N,1,1) wall the set has one element so the global mean equals the
+    /// single cell temperature — byte-identical to the previous single-cell lookup.
     pub(crate) fn apply_boundary_coefficients(
         &mut self,
         bc: &BoundaryCondition,
         _settings: &HamtSettings,
     ) -> Result<()> {
-        let nx = self.cells.raw_dim()[0];
-        let interior_mat_idx = self.interior_surface_material_idx;
-        let interior_mat_temp: Option<Temperature<f64>> =
-            interior_mat_idx.map(|i| self.cells[[i, 0, 0]].cell_temp);
-        for i in 0..nx {
-            let cell = &mut self.cells[[i, 0, 0]];
+        // ── Global area-averaged interior surface material temperature ─────────
+        // Used as the surface proxy T_s in h_rad = 4σε((T_s+T_MR)/2)³.
+        // For (N,1,1): set has one element → mean == that cell's temperature
+        // (byte-identical to the old `interior_mat_temp.map(|i| cells[[i,0,0]])` path).
+        let interior_mat_temp_global: Option<Temperature<f64>> = {
+            let set = &self.interior_surface_material_idx_set;
+            if set.is_empty() {
+                None
+            } else {
+                let mut sum_t = 0.0_f64; // strip: area-weighted mean over raw kelvin values
+                let mut sum_a = 0.0_f64;
+                for &idx in set {
+                    if let Some(cell) = self.cells.get(idx) {
+                        let a = cell.size.area_along(0).value_in(square_meter); // strip: weight
+                        sum_t += cell.cell_temp.value_in(kelvin) * a;
+                        sum_a += a;
+                    }
+                }
+                if sum_a > 0.0 {
+                    Some((sum_t / sum_a) * kelvin)
+                } else {
+                    None
+                }
+            }
+        };
+
+        // ── Per-cell loop over all cells ──────────────────────────────────────
+        // `indexed_iter_mut` visits every [x,y,z] cell. For (N,1,1) this is
+        // exactly the same sequence as `for i in 0..nx { cells[[i,0,0]] }`.
+        for ((_, _, _), cell) in self.cells.indexed_iter_mut() {
             if cell.is_boundary() {
                 if cell.is_exterior() {
                     cell.htc = bc.heat_transfer_coeff_ext;
@@ -89,14 +123,17 @@ impl Surface {
                         ) => {
                             // Linearised longwave exchange against mean radiant temperature.
                             // h_rad = 4 σ ε T_m³, T_m ≈ mean of surface and TMR.
-                            // Use the adjacent interior material cell's current temperature as the
-                            // surface proxy.
+                            // Uses the GLOBAL area-averaged interior surface material temperature
+                            // (computed once before this loop over interior_surface_material_idx_set).
+                            // For (N,1,1) the global mean equals the single interior cell temp —
+                            // byte-identical to the previous single-cell lookup.
                             // Legacy decks (<14 Type395 inputs) keep using the combined
                             // REQV-derived h_conv on the Convection cell; the Radiation cell
                             // must then be inert (h_rad = 0) so the refactor is byte-identical
                             // to the pre-refactor single-potential behaviour.
                             let h_rad = if bc.has_separate_radiant_int {
-                                let t_s = interior_mat_temp.unwrap_or(bc.temp_inside_mean_radiant);
+                                let t_s = interior_mat_temp_global
+                                    .unwrap_or(bc.temp_inside_mean_radiant);
                                 let t_m_k = (t_s + bc.temp_inside_mean_radiant) * 0.5;
                                 // strip: `.powi(3)` is only defined on the inner f64; the
                                 // result is re-tagged as HeatTransferCoeff via `* w_per_m2_k`.

@@ -42,7 +42,7 @@ impl IterativeStep for BlockJacobiStep {
 /// Blend (next, curr) by the cell's relaxation factor, clamp RH to [0, 1.01],
 /// and recompute dependent state. Shared by the BlockJacobi write-back and the
 /// BlockTridiag scatter.
-pub(super) fn relax_write_cell(
+pub(crate) fn relax_write_cell(
     cell: &mut Cell,
     next_t: Temperature<f64>,
     next_rh: Dimensionless<f64>,
@@ -134,20 +134,22 @@ impl Surface {
         Ok(())
     }
 
-    /// Accumulate the seven conductance-weighted neighbour sums for cell `i`
-    /// in a single pass. `surf_curr` provides the lagged neighbour state read
-    /// during a block-Jacobi / Picard sweep. The guards
-    /// (`1e-12*k_per_w`, `1e-12*pa_s_per_kg`, the liquid `r_total` bounds)
-    /// drop degenerate / zero-coupling interfaces.
+    /// Accumulate the seven conductance-weighted neighbour sums for the cell at
+    /// `idx` over ALL face neighbours (every active spatial axis). `surf_curr`
+    /// provides the lagged neighbour state read during a block-Jacobi / Picard
+    /// sweep. The guards (`1e-12*k_per_w`, `1e-12*pa_s_per_kg`, the liquid
+    /// `r_total` bounds) drop degenerate / zero-coupling interfaces.
+    ///
+    /// For a 1-D wall (ny=1, nz=1) and `idx = [i, 0, 0]`, the result is
+    /// byte-identical to the former `accumulate_neighbor_sums(i, …, axis=0)`.
     pub(crate) fn accumulate_neighbor_sums(
         &self,
-        i: usize,
+        idx: [usize; 3],
         surf_curr: &Surface,
         bc: &BoundaryCondition,
-        axis: usize,
     ) -> NeighborSums {
-        let nx = self.cells.raw_dim()[0];
-        let cell_curr = &surf_curr.cells[[i, 0, 0]];
+        let [i, j, k] = idx;
+        let cell_curr = &surf_curr.cells[[i, j, k]];
 
         let mut oorsum: ThermalConductance<f64> = 0.0 * w_per_k;
         let mut torsum: Power<f64> = 0.0 * watts;
@@ -159,10 +161,12 @@ impl Surface {
 
         let curr_vp_pa = cell_curr.cell_vp;
 
-        for nbr_i in surf_curr.neighbor_indices(i, nx, axis) {
-            let nbr_curr = &surf_curr.cells[[nbr_i, 0, 0]];
+        for (nbr_idx, nbr_axis) in surf_curr.all_face_neighbors(idx) {
+            let [ni, nj, nk] = nbr_idx;
+            let nbr_curr = &surf_curr.cells[[ni, nj, nk]];
 
-            let r = Self::calculate_resistance_triple(cell_curr, nbr_curr, bc.pressure_air, axis);
+            let r =
+                Self::calculate_resistance_triple(cell_curr, nbr_curr, bc.pressure_air, nbr_axis);
 
             if r.therm > 1e-12 * k_per_w {
                 oorsum += 1.0 / r.therm;
@@ -217,34 +221,46 @@ impl Surface {
         CellInertia { tcap, wcap }
     }
 
-    /// Cell-local heat sources `(q_adds, q_boundary)` for cell `i`.
+    /// Cell-local heat sources `(q_adds, q_boundary)` for cell at `idx`.
+    ///
+    /// `idx` is the `[x, y, z]` triplet of the cell. For a 1-D wall `idx =
+    /// [i, 0, 0]`. Radiation / additional-energy deposition is tested via SET
+    /// MEMBERSHIP against `interior_surface_material_idx_set` /
+    /// `exterior_surface_material_idx_set`, so multi-column 2-D walls work
+    /// correctly while a (N,1,1) wall stays byte-identical (single-element
+    /// set, membership == old `Some(i) == ..` test).
     pub(crate) fn cell_sources(
         &self,
-        i: usize,
+        idx: [usize; 3],
         surf_curr: &Surface,
         bc: &BoundaryCondition,
     ) -> CellSources {
+        let i = idx[0];
         let q_weight = surf_curr
             .user_defined_cell_idx
             .as_ref()
             .map(|weights| {
                 weights
                     .iter()
-                    .filter(|(idx, _)| idx[0] == i)
+                    .filter(|(widx, _)| widx[0] == i)
                     .map(|(_, w)| w)
                     .sum::<f64>()
             })
             .unwrap_or(0.0);
         let q_adds = bc.q_addition_userdef * q_weight;
 
-        // Deposit absorbed radiation into the boundary-adjacent material cell.
-        let q_boundary: Power<f64> = if Some(i) == surf_curr.interior_surface_material_idx {
-            bc.additional_energy_int
-        } else if Some(i) == surf_curr.exterior_surface_material_idx {
-            bc.additional_energy_ext
-        } else {
-            0.0 * watts
-        };
+        // Deposit absorbed radiation into the boundary-adjacent material cell(s).
+        // Uses set membership so every column's surface cell gets the deposit in
+        // the 2-D case; for (N,1,1) the set has one element and the check is
+        // equivalent to the old `Some(i) == interior_surface_material_idx` test.
+        let q_boundary: Power<f64> =
+            if surf_curr.interior_surface_material_idx_set.contains(&idx) {
+                bc.additional_energy_int
+            } else if surf_curr.exterior_surface_material_idx_set.contains(&idx) {
+                bc.additional_energy_ext
+            } else {
+                0.0 * watts
+            };
 
         CellSources { q_adds, q_boundary }
     }
@@ -294,6 +310,10 @@ impl Surface {
         surface_prev: &Surface,
         surface_curr: &Surface,
     ) -> Result<()> {
+        debug_assert!(
+            self.cells.raw_dim()[1] == 1 && self.cells.raw_dim()[2] == 1,
+            "1-D step invoked on a multi-dimensional grid; use AdiStep"
+        );
         let dt_s = settings.timestep;
 
         let nx = self.cells.raw_dim()[0];
@@ -310,9 +330,9 @@ impl Surface {
                     // Conductance-weighted neighbour sums, cell-local inertia, and
                     // heat sources are extracted into testable helpers. The sums read
                     // lagged neighbour state from `surface_curr` (block-Jacobi sweep).
-                    let sums = surface_curr.accumulate_neighbor_sums(i, surface_curr, bc, 0);
+                    let sums = surface_curr.accumulate_neighbor_sums([i, 0, 0], surface_curr, bc);
                     let inertia = Self::cell_inertia(i, cell_curr);
-                    let sources = surface_curr.cell_sources(i, surface_curr, bc);
+                    let sources = surface_curr.cell_sources([i, 0, 0], surface_curr, bc);
 
                     let t_curr = cell_curr.cell_temp;
                     let vpsat_curr = cell_curr.vp_sat;

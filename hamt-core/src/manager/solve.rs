@@ -115,6 +115,12 @@ impl HamtManager {
     /// Solves for the current timestep by iterating until convergence.
     /// Dispatches to the configured inner solver.
     pub fn solve_timestep(&mut self) -> Result<bool> {
+        let dim = self.surface_curr.cells.raw_dim();
+        if dim[1] > 1 || dim[2] > 1 {
+            // BlockJacobi / BlockTridiagonal are 1-D (x-only); multi-dimensional
+            // grids are solved by ADI regardless of the configured solver_method.
+            return self.solve_timestep_adi();
+        }
         match self.settings.solver_method {
             SolverMethod::BlockJacobi => self.solve_timestep_block_jacobi(),
             SolverMethod::BlockTridiagonal => {
@@ -127,6 +133,7 @@ impl HamtManager {
                 }
                 self.solve_timestep_block_tridiag()
             }
+            SolverMethod::Adi => self.solve_timestep_adi(),
         }
     }
 
@@ -418,6 +425,117 @@ impl HamtManager {
             );
         }
         Ok(false)
+    }
+
+    /// Test-only driver: run the outer loop for an arbitrary [`IterativeStep`]
+    /// with the standard ADI accelerator stack (Aitken relaxer + optional
+    /// Anderson extrapolator) and report `(converged, outer_iterations)`.
+    ///
+    /// The iteration count is captured by wrapping the Aitken relaxer in a
+    /// counting adapter: `run_outer_loop` calls `relax` exactly once at the top
+    /// of every outer-iteration body (before the exit test), so the relax-call
+    /// count equals the number of outer iterations executed before exit. Used by
+    /// the ADI-vs-direct strong-coupling gate (Phase 2a Task 10).
+    #[cfg(test)]
+    pub(crate) fn run_outer_loop_counted<S: crate::surface::IterativeStep>(
+        &mut self,
+        step: &S,
+        max_iter: i32,
+    ) -> Result<(bool, i32)> {
+        use crate::accel::{Accelerator, Aitken, RelaxKnobs};
+
+        /// Counts `relax` invocations while forwarding to an inner relaxer.
+        struct CountingRelaxer<'a> {
+            inner: &'a mut dyn Accelerator,
+            count: i32,
+        }
+        impl Accelerator for CountingRelaxer<'_> {
+            fn relax(&mut self, next: &mut Surface, curr: &Surface, iter: i32, knobs: RelaxKnobs) {
+                self.count += 1;
+                self.inner.relax(next, curr, iter, knobs);
+            }
+            fn extrapolate(&mut self, x_curr: &[f64], g_x: &[f64]) -> Option<Vec<f64>> {
+                self.inner.extrapolate(x_curr, g_x)
+            }
+            fn reset(&mut self) {
+                self.count = 0;
+                self.inner.reset();
+            }
+        }
+
+        let n_cells = self.surface_curr.cells.len();
+        let mut aitken = Aitken::new(n_cells);
+        let mut counting = CountingRelaxer { inner: &mut aitken, count: 0 };
+        let mut anderson = AndersonAccelerator::new(self.settings.anderson_history_depth);
+
+        // `run_outer_loop` resets the relaxer at entry (CountingRelaxer::reset
+        // zeroes the count), so `counting.count` after the loop is the number of
+        // outer iterations executed this call. The inner block scopes the
+        // `&mut counting` borrow so it ends before we read `counting.count`.
+        let converged = {
+            let extrapolator: Option<&mut dyn Accelerator> = if self.settings.anderson_enabled {
+                Some(&mut anderson as &mut dyn Accelerator)
+            } else {
+                None
+            };
+            self.run_outer_loop(
+                step,
+                &mut counting,
+                extrapolator,
+                ExitPolicy { max_iter, min_iter_guard: None, stall_patience: None },
+            )?
+        };
+
+        Ok((converged, counting.count))
+    }
+
+    /// ADI (Alternating-Direction Implicit) solve.
+    ///
+    /// For a 1-D grid (`ny == 1 && nz == 1`) this delegates to
+    /// `solve_timestep_block_tridiag`: a single x-sweep with no cross coupling is
+    /// byte-identical to the block-tridiag path.
+    ///
+    /// For a genuine 2-D/3-D grid (`ny > 1` or `nz > 1`) the alternating
+    /// x→y line sweeps are driven by the shared [`HamtManager::run_outer_loop`]
+    /// with `AdiStep` as the inner step. The outer loop iterates on the
+    /// nonlinearity (`P_sat(T)`, `∂w/∂φ`, `L_eff(φ)`) and the cross-axis lag
+    /// until convergence. `solve_timestep` always routes multi-dimensional grids
+    /// here regardless of the configured `solver_method`.
+    pub(super) fn solve_timestep_adi(&mut self) -> Result<bool> {
+        // ADI assembles the same 2×2 (T,φ) coupled block as BlockTridiagonal;
+        // the coupling term (∂P_sat/∂T) is essential for the off-diagonal entries.
+        debug_assert!(
+            self.settings.coupled_heat_moisture_enabled,
+            "Adi requires coupled_heat_moisture_enabled=true (the 2×2 block assumes T↔φ coupling)"
+        );
+
+        let dim = self.surface_curr.cells.raw_dim();
+        if dim[1] == 1 && dim[2] == 1 {
+            // 1-D grid: a single x-sweep with no cross coupling is byte-identical
+            // to the block-tridiag path. Delegate to guarantee 1-D equivalence.
+            return self.solve_timestep_block_tridiag();
+        }
+
+        // Genuine 2-D/3-D: alternating x→y line sweeps, iterated on the
+        // cross-axis lag (and the nonlinearity) by the shared outer loop.
+        let n_cells = self.surface_curr.cells.len();
+        let mut aitken = Aitken::new(n_cells);
+        let mut anderson = AndersonAccelerator::new(self.settings.anderson_history_depth);
+
+        self.run_outer_loop(
+            &crate::surface::AdiStep,
+            &mut aitken,
+            if self.settings.anderson_enabled {
+                Some(&mut anderson as &mut dyn Accelerator)
+            } else {
+                None
+            },
+            ExitPolicy {
+                max_iter: 200,
+                min_iter_guard: None,
+                stall_patience: None,
+            },
+        )
     }
 
     /// Direct block-tridiagonal solve. See `solver::block_tridiag` for the
