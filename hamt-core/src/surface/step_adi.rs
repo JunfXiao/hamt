@@ -63,29 +63,32 @@ impl Surface {
         self.sync_state_from(surface_curr)?;
         self.apply_boundary_coefficients(bc, settings)?;
 
-        // ── Virtual-cell refresh (verbatim from calculate_iteration_block_tridiag) ──
+        // ── Virtual-cell refresh (3-D-correct port of the block-tridiag step) ──
         // Virtual cells aren't updated by `apply_boundary_coefficients`; the
-        // sweep scatter writes only material cells. Compute Virtual cells as the
-        // conductance-weighted average of their non-Virtual neighbours' state —
+        // sweep scatter writes only material cells. Compute each Virtual cell as
+        // the conductance-weighted average of its non-Virtual neighbours' state —
         // the implicit-Euler answer for a near-zero-capacity cell — so the
         // Virtual ↔ Conv gradient the moisture-flux query relies on is non-zero.
-        let nx = self.cells.raw_dim()[0];
-        let virtual_nbr_pairs: Vec<(usize, Vec<usize>)> = (0..self.cells.len())
-            .filter(|&li| {
-                matches!(
-                    self.cells[[li, 0, 0]].cell_type,
-                    crate::cell::CellType::Virtual(_)
-                )
-            })
-            .map(|li| {
-                let nbrs: Vec<usize> = self.neighbor_indices(li, nx, 0).collect();
-                (li, nbrs)
+        //
+        // Unlike the 1-D block-tridiag path (which could index the `(N,1,1)`
+        // array with a flat `[li,0,0]`), the ADI grid is genuinely `(nx,ny,nz)`,
+        // so we walk full `[i,j,k]` triplets. Virtual cells are x-axis hubs
+        // (`Virtual(Interior)` fans to all higher-x cells in *its own column*,
+        // `Virtual(Exterior)` to all lower-x), so `axis_neighbors(idx, 0)`
+        // collects the right per-column neighbour set.
+        let virtual_nbr_pairs: Vec<([usize; 3], Vec<[usize; 3]>)> = self
+            .cells
+            .indexed_iter()
+            .filter(|(_, cell)| matches!(cell.cell_type, crate::cell::CellType::Virtual(_)))
+            .map(|((x, y, z), _)| {
+                let idx = [x, y, z];
+                (idx, self.axis_neighbors(idx, 0))
             })
             .collect();
 
-        let mut virtual_updates: Vec<(usize, f64, f64, f64)> = Vec::new();
-        for (li, nbr_indices) in virtual_nbr_pairs {
-            let cell = &self.cells[[li, 0, 0]];
+        let mut virtual_updates: Vec<([usize; 3], f64, f64, f64)> = Vec::new();
+        for (idx, nbr_indices) in virtual_nbr_pairs {
+            let cell = &self.cells[idx];
 
             // strip: linear-algebra kernel boundary
             let mut sum_inv_v: f64 = 0.0;
@@ -93,8 +96,8 @@ impl Surface {
             let mut sum_inv_t: f64 = 0.0;
             let mut sum_inv_t_t: f64 = 0.0;
 
-            for nbr_li in nbr_indices {
-                let nbr = &self.cells[[nbr_li, 0, 0]];
+            for nbr_idx in nbr_indices {
+                let nbr = &self.cells[nbr_idx];
                 let (therm_r, vapor_r) =
                     Surface::calculate_resistance_pair(cell, nbr, bc.pressure_air, 0);
                 if vapor_r > 1e-12 * pa_s_per_kg {
@@ -125,11 +128,11 @@ impl Surface {
             } else {
                 0.0
             };
-            virtual_updates.push((li, new_vp, new_t, new_rh));
+            virtual_updates.push((idx, new_vp, new_t, new_rh));
         }
 
-        for (li, vp, t, rh) in virtual_updates {
-            let cell = &mut self.cells[[li, 0, 0]];
+        for (idx, vp, t, rh) in virtual_updates {
+            let cell = &mut self.cells[idx];
             // re-tag at kernel boundary
             cell.cell_vp = vp * pascals;
             cell.cell_temp = t * kelvin;
