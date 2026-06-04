@@ -418,6 +418,7 @@ impl HamtManager {
                 n_mat,
                 consecutive_met,
                 premature_iter = ?premature_iter,
+                premature_max_dt_k,
                 premature_max_drh,
                 dt_hours = self.settings.timestep.value_in(hours),
                 exit_reason = "max_iter",
