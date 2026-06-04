@@ -361,6 +361,9 @@ where
                 } else {
                     zero_grad
                 };
+                // strip: PCHIP reverse-interp kernel — diman cannot canonicalise
+                // Quantity<f64, {DX.sub(DY)}> * Quantity<f64, DY> -> Quantity<f64, DX>
+                // across generic const parameters; inner arithmetic stays raw f64.
                 let val = x1.0 + grad.0 * (in_y.0 - y1.0);
                 (Quantity::<f64, DX>(val), grad)
             }

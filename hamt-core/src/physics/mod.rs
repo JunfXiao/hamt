@@ -1,9 +1,9 @@
 //! Contains pure physics and psychrometric functions for the HAMT model.
 
 use crate::uom::constants::VAPOR_GAS_CONSTANT;
-use crate::uom::{Quantity, Unit};
+use crate::uom::Quantity;
 use crate::uom::dimensions::{
-    Density, Dimensionless, Pressure, SpecificEnergy, SpecificHeatCapacity, Temperature,
+    Density, Dimensionless, Pressure, Temperature,
     VaporPermeability,
 };
 use crate::uom::units::{self, kelvin, kg_per_m_s_pa, kg_per_m3, pascals};
@@ -11,8 +11,6 @@ use crate::uom::units::{self, kelvin, kg_per_m_s_pa, kg_per_m3, pascals};
 mod curve;
 pub mod geometry;
 pub use curve::*;
-
-/// Universal gas constant for water vapor [J/kg·K].
 
 /// Kelvin conversion constant.
 pub const KELVIN_CONV: f64 = 273.15;
@@ -110,7 +108,7 @@ pub fn rh_from_t_vd(t_db: Temperature<f64>, rho_vapor: Density<f64>) -> Dimensio
     let rh = rho_vapor * VAPOR_GAS_CONSTANT * t_db / p_sat;
 
     // Clamp the value between 0 and 1, as small inaccuracies can push it slightly out of bounds.
-    Quantity(rh.value().min(1.0).max(0.0))
+    rh.clamp(Quantity(0.0), Quantity(1.0))
 }
 
 /// Calculates Vapor Density from dry-bulb temperature and relative humidity.

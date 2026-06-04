@@ -188,8 +188,7 @@ pub(crate) fn assemble_1d(
             // Local Psat / dPsat-dT for the NEIGHBOUR (lagged).
             // strip: kernel boundary
             let psat_n  = nbr_curr.vp_sat.value_in(pascals);
-            let _phi_n  = nbr_curr.cell_rh.value(); // kept for readability; vp_n used in RHS
-            let temp_n  = nbr_curr.cell_temp.value_in(kelvin);
+            let temp_n  = nbr_curr.cell_temp.value_in(kelvin); // strip: kernel boundary
             // Use cell_vp directly: boundary cells set cell_vp explicitly
             // (e.g. Radiation cell sets cell_vp = 0), so psat_n * phi_n
             // is wrong for them. The material-neighbour off-diagonals still
@@ -230,7 +229,7 @@ pub(crate) fn assemble_1d(
                 };
                 // Diagonal counter-contribution (positive sign).
                 d_tt += inv_th;
-                d_pp += inv_phi + inv_vapor * psat_curr.value_in(pascals); // strip
+                d_pp += inv_phi + inv_vapor * psat_curr.value_in(pascals); // strip: kernel boundary
 
                 let nbr_row = row_of[nbr_li];
                 if nbr_row == row + 1 {
@@ -246,7 +245,7 @@ pub(crate) fn assemble_1d(
                 // ── Boundary neighbour: contributes to diagonal + RHS ──
                 let phi_b = nbr_curr.cell_rh.value();
                 d_tt += inv_th;
-                d_pp += inv_phi + inv_vapor * psat_curr.value_in(pascals); // strip
+                d_pp += inv_phi + inv_vapor * psat_curr.value_in(pascals); // strip: kernel boundary
                 // RHS additions for the boundary side.
                 // strip: kernel boundary
                 b_t += inv_th * temp_n
