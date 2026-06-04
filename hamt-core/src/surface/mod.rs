@@ -281,25 +281,6 @@ impl Surface {
         result
     }
 
-    /// Get neighbor indices for a cell along `axis`.
-    ///
-    /// **Thin shim** — delegates to [`Self::axis_neighbors`] and strips the
-    /// `[i,j,k]` index back to a flat `usize` for the existing 1-D callers
-    /// (`assemble_1d`, the BlockTridiag virtual-cell refresh). On a 1-D wall
-    /// (ny=1, nz=1) the behaviour is byte-identical to the previous
-    /// implementation. Do **not** delete this method; callers outside this
-    /// module rely on it.
-    pub(crate) fn neighbor_indices(
-        &self,
-        i: usize,
-        n_along: usize,
-        axis: usize,
-    ) -> impl Iterator<Item = usize> {
-        let _ = n_along; // retained in signature for call-site compatibility
-        self.axis_neighbors([i, 0, 0], axis)
-            .into_iter()
-            .map(|idx| idx[0])
-    }
 }
 
 #[cfg(test)]
