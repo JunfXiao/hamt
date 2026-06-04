@@ -125,11 +125,11 @@ impl TrnSysType {
             settings.min_div = n_div_value;
         }
 
-        // Optional param 10: inner solver selector. 0 = Picard, 1 = BlockTridiagonal.
+        // Optional param 10: inner solver selector. 0 = BlockJacobi, 1 = BlockTridiagonal.
         if let Some(p) = state.params.get(9) {
             let v: i32 = p.try_into().map_err(|_| InputError::BadParameter {
                 index: 10,
-                message: format!("Solver method must be 0 (Picard) or 1 (BlockTridiagonal). Got: {:?}", p),
+                message: format!("Solver method must be 0 (BlockJacobi) or 1 (BlockTridiagonal). Got: {:?}", p),
             })?;
             settings.solver_method = match v {
                 0 => SolverMethod::BlockJacobi,
@@ -137,7 +137,7 @@ impl TrnSysType {
                 _ => {
                     return Err(InputError::BadParameter {
                         index: 10,
-                  message: format!("Solver method must be 0 (Picard) or 1 (BlockTridiagonal). Got: {:?}", p),
+                  message: format!("Solver method must be 0 (BlockJacobi) or 1 (BlockTridiagonal). Got: {:?}", p),
                     }
                     .into());
                 }

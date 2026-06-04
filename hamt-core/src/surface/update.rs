@@ -564,7 +564,7 @@ impl Surface {
         Ok(())
     }
 
-    /// Single outer Picard step using the direct block-tridiagonal solver.
+    /// Single outer BlockJacobi step using the direct block-tridiagonal solver.
     ///
     /// `self` is `surface_next` (writable). The method:
     ///   1. Sync `self` from `surface_curr`.
@@ -586,7 +586,7 @@ impl Surface {
         self.sync_state_from(surface_curr)?;
         self.apply_boundary_coefficients(bc, settings)?;
 
-        // Virtual cells aren't updated by `apply_boundary_coefficients`. Picard's
+        // Virtual cells aren't updated by `apply_boundary_coefficients`. BlockJacobi's
         // per-cell 2×2 solve covers them as a side-effect of iterating over all
         // non-boundary cells, but BlockTridiag's scatter writes only material
         // cells. Compute Virtual cells here as the conductance-weighted average
@@ -675,7 +675,7 @@ impl Surface {
         .map_err(|e| anyhow::anyhow!("block-tridiag solve failed: {:?}", e))?;
 
         // Scatter solution back, applying per-cell α relaxation
-        // (consistent with the Picard write-back behaviour).
+        // (consistent with the BlockJacobi write-back behaviour).
         for (row, &li) in system.material_indices.iter().enumerate() {
             let (t_new_k, phi_new_raw) = solution[row];
             let curr_temp = surface_curr
@@ -864,7 +864,7 @@ mod block_tridiag_tests {
     /// the previous outer iteration). At convergence the two are equal,
     /// but mid-iteration the lag matters: if the assembly reads
     /// `surface_curr`, stale BC/Virtual coefficients leak into the linear
-    /// system and convergence drops from near-Newton to slow Picard.
+    /// system and convergence drops from near-Newton to slow BlockJacobi.
     ///
     /// Test: build two runs that differ ONLY in the Virtual(Interior)
     /// cell state of `surface_curr` (the Virtual cell sits between

@@ -218,13 +218,13 @@ pub(crate) fn assemble_1d(
                 let off = Block2x2 {
                     a: -inv_th,
                     b: -l_eff_v * inv_vapor * psat_n,
-                    // c = 0: matches the existing Picard "lagged neighbour vapour" semantics.
+                    // c = 0: matches the existing BlockJacobi "lagged neighbour vapour" semantics.
                     // The plan's draft proposed -inv_vapor*phi_n*dpsdt_n here, but a
                     // fully-implicit form would also need a matching +inv_vapor*phi_n*
                     // dpsdt_n*T_n term in b_p (Taylor bias for the lagged-T expansion of
                     // vp_n). Without that bias the off-diagonal c term is mathematically
                     // inconsistent. We chose the lagged-vp form (c = 0, no bias) so the
-                    // block-tridiag converges to the same answer Picard does.
+                    // block-tridiag converges to the same answer BlockJacobi does.
                     c: 0.0,
                     d: -(inv_phi + inv_vapor * psat_n),
                 };
@@ -347,7 +347,7 @@ mod tests {
     }
 
     /// Property (round-trip via solver): the assembled system, when
-    /// solved, produces the same end state as the existing Picard inner
+    /// solved, produces the same end state as the existing BlockJacobi inner
     /// loop converges to. We don't compare against a hand-computed
     /// answer — we rely on the proven `block_tridiag::solve` kernel and
     /// check that the residual of the assembled system at the solution

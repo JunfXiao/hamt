@@ -1075,7 +1075,7 @@ fn test_total_release_invariance_across_timesteps() -> Result<()> {
 
 #[test]
 fn test_total_release_invariance_block_tridiag() -> Result<()> {
-    // Same timestep sweep as the Picard variant — span ~30× to verify
+    // Same timestep sweep as the BlockJacobi variant — span ~30× to verify
     // the BlockTridiagonal solver also preserves total release across
     // a wide range of macro-step choices.
     let timesteps = [0.03 * hours, 0.25 * hours, 1.0 * hours];

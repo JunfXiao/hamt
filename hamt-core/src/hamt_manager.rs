@@ -119,14 +119,14 @@ impl HamtManager {
     /// Dispatches to the configured inner solver.
     pub fn solve_timestep(&mut self) -> Result<bool> {
         match self.settings.solver_method {
-            SolverMethod::BlockJacobi => self.solve_timestep_picard(),
+            SolverMethod::BlockJacobi => self.solve_timestep_block_jacobi(),
             SolverMethod::BlockTridiagonal => {
                 if !self.settings.coupled_heat_moisture_enabled {
                     warn!(
                         "BlockTridiagonal requires coupled_heat_moisture_enabled=true; \
-                         falling back to Picard for this step"
+                         falling back to BlockJacobi for this step"
                     );
-                    return self.solve_timestep_picard();
+                    return self.solve_timestep_block_jacobi();
                 }
                 self.solve_timestep_block_tridiag()
             }
@@ -137,7 +137,7 @@ impl HamtManager {
     /// kernel and `surface::update::solve_step_block_tridiag` for the 1-D
     /// wall assembly.
     fn solve_timestep_block_tridiag(&mut self) -> Result<bool> {
-        // The outer loop is much shorter than Picard: it only iterates to
+        // The outer loop is much shorter than BlockJacobi: it only iterates to
         // convergence on the nonlinearity (Psat(T), dwdphi(φ), L_eff(φ)).
         // Cap at a small number; if it doesn't converge in ~20 iters the
         // inputs are pathological.
@@ -274,7 +274,7 @@ impl HamtManager {
         Ok(false)
     }
 
-    fn solve_timestep_picard(&mut self) -> Result<bool> {
+    fn solve_timestep_block_jacobi(&mut self) -> Result<bool> {
         // Reapply surface vapor coefficients if not using constant value.
         // When mass_convection_coeff is non-zero it represents h_mass [m/s] and β is derived
         // via β = h_mass / (R_v·T).  When it is zero the caller has set vapor_transport_coeff
@@ -315,7 +315,7 @@ impl HamtManager {
         let mut stall_count = 0_i32;
         const STALL_PATIENCE: i32 = 50; // bail out if no improvement for this many iterations
 
-        // Option-(2) adaptive min-iteration guard. Picard with neighbour lagging
+        // Option-(2) adaptive min-iteration guard. BlockJacobi with neighbour lagging
         // propagates a BC perturbation exactly one material cell per iteration,
         // so the per-iter δ-tolerance test can fire long before the disturbance
         // has reached the back of the wall — leaving the implicit-Euler equations
@@ -1069,7 +1069,7 @@ pub struct HamtSettings {
 
     /// Enable Type-II Anderson acceleration on the outer fixed-point loop.
     ///
-    /// When `true`, the solver wraps the per-iteration Picard map with an AA
+    /// When `true`, the solver wraps the per-iteration BlockJacobi map with an AA
     /// extrapolation step using the last `anderson_history_depth` iterates.
     /// When `false`, the loop is byte-identical to the unaccelerated baseline.
     pub anderson_enabled: bool,
@@ -1237,7 +1237,7 @@ mod block_tridiag_dispatch_tests {
     /// Property: with `solver_method = BlockTridiagonal` and a benign
     /// macro-step (BC matches initial wall state), `solve_timestep`
     /// returns `Ok(true)` and produces a small-residual converged state.
-    /// Catches dispatch bugs (Picard path getting hit instead) and
+    /// Catches dispatch bugs (BlockJacobi path getting hit instead) and
     /// outer-loop loop-condition bugs.
     #[test]
     fn block_tridiag_converges_on_benign_step() {
@@ -1283,7 +1283,7 @@ mod block_tridiag_dispatch_tests {
 
     /// Property: with `coupled_heat_moisture_enabled = false` AND
     /// `solver_method = BlockTridiagonal`, the dispatch falls back to
-    /// Picard (via the warn! path). The solve completes without error.
+    /// BlockJacobi (via the warn! path). The solve completes without error.
     #[test]
     fn block_tridiag_falls_back_when_coupling_disabled() {
         let mut mgr = crate::solver::test_fixtures::build_fixture_manager(6);
@@ -1307,10 +1307,10 @@ mod block_tridiag_dispatch_tests {
             s.update_cell_properties(&mgr.boundary_condition, &mgr.settings)
                 .unwrap();
         }
-        // Should not panic; the dispatcher must fall back to Picard
+        // Should not panic; the dispatcher must fall back to BlockJacobi
         // because BlockTridiagonal requires coupled_heat_moisture_enabled.
         let _ = mgr
             .solve_timestep()
-            .expect("fallback to Picard must not error");
+            .expect("fallback to BlockJacobi must not error");
     }
 }
