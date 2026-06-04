@@ -17,6 +17,26 @@ use anyhow::Result;
 use rayon::prelude::*;
 
 
+/// Blend (next, curr) by the cell's relaxation factor, clamp RH to [0, 1.01],
+/// and recompute dependent state. Shared by the BlockJacobi write-back and the
+/// BlockTridiag scatter.
+fn relax_write_cell(
+    cell: &mut Cell,
+    next_t: Temperature<f64>,
+    next_rh: Dimensionless<f64>,
+    curr_t: Temperature<f64>,
+    curr_rh: Dimensionless<f64>,
+    bc: &BoundaryCondition,
+    settings: &HamtSettings,
+) {
+    let alpha = cell.relaxation_factor;
+    let relaxed_t = if next_t.is_finite() { next_t * alpha + curr_t * (1.0 - alpha) } else { curr_t };
+    let relaxed_rh = if next_rh.is_finite() { next_rh * alpha + curr_rh * (1.0 - alpha) } else { curr_rh };
+    cell.cell_temp = relaxed_t;
+    cell.cell_rh = relaxed_rh.clamp(Quantity(0.0), Quantity(1.01));
+    cell.calc_dependent_state(bc, settings);
+}
+
 impl Surface {
     /// Executes a single iteration of the HAMT simulation for a single timestep.
     /// `self` is the **only** writable `surface_next`.
@@ -518,23 +538,7 @@ impl Surface {
                 let next_rh = results[i].1;
                 let curr_temp = surface_curr.cells[[i, 0, 0]].cell_temp;
                 let curr_rh = surface_curr.cells[[i, 0, 0]].cell_rh;
-                let alpha = cell.relaxation_factor;
-
-                let relaxed_temp = if next_temp.is_finite() {
-                    next_temp * alpha + curr_temp * (1.0 - alpha)
-                } else {
-                    curr_temp
-                };
-
-                let relaxed_rh = if next_rh.is_finite() {
-                    next_rh * alpha + curr_rh * (1.0 - alpha)
-                } else {
-                    curr_rh
-                };
-
-                cell.cell_temp = relaxed_temp;
-                cell.cell_rh = relaxed_rh.clamp(Quantity(0.0), Quantity(1.01));
-                cell.calc_dependent_state(bc, settings);
+                relax_write_cell(cell, next_temp, next_rh, curr_temp, curr_rh, bc, settings);
             });
         } else {
             for i in 0..nx {
@@ -542,23 +546,11 @@ impl Surface {
                 let next_rh = results[i].1;
                 let curr_temp = surface_curr.cells[[i, 0, 0]].cell_temp;
                 let curr_rh = surface_curr.cells[[i, 0, 0]].cell_rh;
-                let alpha = self.cells[[i, 0, 0]].relaxation_factor;
-
-                let relaxed_temp = if next_temp.is_finite() {
-                    next_temp * alpha + curr_temp * (1.0 - alpha)
-                } else {
-                    curr_temp
-                };
-
-                let relaxed_rh = if next_rh.is_finite() {
-                    next_rh * alpha + curr_rh * (1.0 - alpha)
-                } else {
-                    curr_rh
-                };
-
-                self.cells[[i, 0, 0]].cell_temp = relaxed_temp;
-                self.cells[[i, 0, 0]].cell_rh = relaxed_rh.clamp(Quantity(0.0), Quantity(1.01));
-                self.cells[[i, 0, 0]].calc_dependent_state(bc, settings);
+                relax_write_cell(
+                    &mut self.cells[[i, 0, 0]],
+                    next_temp, next_rh, curr_temp, curr_rh,
+                    bc, settings,
+                );
             }
         }
         Ok(())
@@ -692,26 +684,12 @@ impl Surface {
                 .cells
                 .get_mut([li, 0, 0])
                 .ok_or_else(|| anyhow::anyhow!("invalid linear index {li}"))?;
-            let alpha = cell.relaxation_factor;
 
             // re-tag at kernel boundary
             let t_new_typed = t_new_k * crate::uom::units::kelvin;
             let phi_new_typed = phi_new_raw * crate::uom::units::dimensionless;
 
-            let relaxed_t = if t_new_typed.is_finite() {
-                t_new_typed * alpha + curr_temp * (1.0 - alpha)
-            } else {
-                curr_temp
-            };
-            let relaxed_phi = if phi_new_typed.is_finite() {
-                phi_new_typed * alpha + curr_rh * (1.0 - alpha)
-            } else {
-                curr_rh
-            };
-
-            cell.cell_temp = relaxed_t;
-            cell.cell_rh = relaxed_phi.clamp(Quantity(0.0), Quantity(1.01));
-            cell.calc_dependent_state(bc, settings);
+            relax_write_cell(cell, t_new_typed, phi_new_typed, curr_temp, curr_rh, bc, settings);
         }
 
         Ok(())
@@ -747,6 +725,65 @@ impl Surface {
         };
 
         left.into_iter().chain(right)
+    }
+}
+
+#[cfg(test)]
+mod relax_write_cell_tests {
+    use super::*;
+    use crate::uom::units::{dimensionless, kelvin};
+
+    fn make_material_cell() -> Cell {
+        let mgr = crate::solver::test_fixtures::build_fixture_manager(1);
+        // Grab the first material cell from surface_curr.
+        mgr.surface_curr
+            .cells
+            .iter()
+            .find(|c| matches!(c.cell_type, crate::cell::CellType::Material(_)))
+            .cloned()
+            .expect("fixture must have at least one material cell")
+    }
+
+    #[test]
+    fn relax_write_cell_blends_and_clamps() {
+        let mgr = crate::solver::test_fixtures::build_fixture_manager(1);
+        let bc = &mgr.boundary_condition;
+        let settings = &mgr.settings;
+
+        // ── Case 1: normal blend ────────────────────────────────────────
+        let mut cell = make_material_cell();
+        cell.relaxation_factor = 0.5;
+        let next_t   = 300.0 * kelvin;
+        let curr_t   = 290.0 * kelvin;
+        let next_rh  = 0.8 * dimensionless;
+        let curr_rh  = 0.4 * dimensionless;
+        relax_write_cell(&mut cell, next_t, next_rh, curr_t, curr_rh, bc, settings);
+        let t_out  = cell.cell_temp.value_in(kelvin);
+        let rh_out = cell.cell_rh.value();
+        assert!((t_out - 295.0).abs() < 1e-9,  "expected 295 K, got {t_out}");
+        assert!((rh_out - 0.6).abs() < 1e-9,   "expected 0.6 RH, got {rh_out}");
+
+        // ── Case 2: next_rh = 2.0 → clamped to 1.01 ───────────────────
+        let mut cell2 = make_material_cell();
+        cell2.relaxation_factor = 0.5;
+        let next_rh_high = 2.0 * dimensionless;   // blended = 0.5*2.0 + 0.5*0.4 = 1.2 > 1.01
+        relax_write_cell(&mut cell2, next_t, next_rh_high, curr_t, curr_rh, bc, settings);
+        let rh_clamped = cell2.cell_rh.value();
+        assert!(
+            (rh_clamped - 1.01).abs() < 1e-9,
+            "expected clamp to 1.01, got {rh_clamped}"
+        );
+
+        // ── Case 3: next_t = NaN → cell_temp stays at curr_t ───────────
+        let mut cell3 = make_material_cell();
+        cell3.relaxation_factor = 0.5;
+        let nan_t = f64::NAN * kelvin;
+        relax_write_cell(&mut cell3, nan_t, next_rh, curr_t, curr_rh, bc, settings);
+        let t_nan_fallback = cell3.cell_temp.value_in(kelvin);
+        assert!(
+            (t_nan_fallback - 290.0).abs() < 1e-9,
+            "expected fallback to 290 K, got {t_nan_fallback}"
+        );
     }
 }
 
