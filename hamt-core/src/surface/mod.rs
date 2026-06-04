@@ -8,7 +8,7 @@ use crate::uom::dimensions::{
     Area, Density, Dimensionless, EnergyFluxDensity, Length, Mass, MassFluxDensity, Temperature,
     VaporTransportCoeff,
 };
-use crate::{boundary::BoundaryCondition, hamt_manager::HamtSettings, physics};
+use crate::{boundary::BoundaryCondition, config::HamtSettings, physics};
 use anyhow::Result;
 pub mod boundary;
 pub mod init;
@@ -102,7 +102,7 @@ pub trait IterativeStep {
     fn step(
         &self,
         next: &mut Surface,
-        settings: &crate::hamt_manager::HamtSettings,
+        settings: &crate::config::HamtSettings,
         bc: &crate::boundary::BoundaryCondition,
         surface_prev: &Surface,
         surface_curr: &Surface,

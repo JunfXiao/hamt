@@ -18,7 +18,7 @@
 //! that point.
 
 use crate::boundary::BoundaryCondition;
-use crate::hamt_manager::HamtSettings;
+use crate::config::HamtSettings;
 use crate::surface::Surface;
 use crate::uom::constants::{WATER_LATENT_HEAT, WATER_SPECIFIC_HEAT};
 use crate::uom::units::{
@@ -319,7 +319,7 @@ pub(crate) fn assemble_1d(
 mod tests {
     use super::*;
 
-    fn fixture(n_div: usize) -> crate::hamt_manager::HamtManager {
+    fn fixture(n_div: usize) -> crate::manager::HamtManager {
         crate::solver::test_fixtures::build_fixture_manager(n_div)
     }
 

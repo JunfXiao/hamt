@@ -30,7 +30,7 @@ impl IterativeStep for BlockJacobiStep {
     fn step(
         &self,
         next: &mut Surface,
-        settings: &crate::hamt_manager::HamtSettings,
+        settings: &crate::config::HamtSettings,
         bc: &crate::boundary::BoundaryCondition,
         surface_prev: &Surface,
         surface_curr: &Surface,
