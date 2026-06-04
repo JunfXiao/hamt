@@ -18,3 +18,5 @@ pub trait Accelerator {
 
 pub mod aitken;
 pub use aitken::Aitken;
+
+pub mod anderson;
