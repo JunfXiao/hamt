@@ -7,7 +7,7 @@ use crate::{
         dimensions::{
             Dimensionless, HeatTransferCoeff, MassConvectionCoeff, Power, Pressure, Temperature, VaporTransportCoeff
         },
-        units::{self, m_per_s, w_per_m2_k, watts},
+        units::{self, dimensionless, kg_per_m2_s_pa, kj_per_hr, kj_per_hr_m2_k, m_per_s, w_per_m2_k, watts},
         constants::{ATMOSPHERE_PRESSURE}
     },
 };
@@ -83,44 +83,95 @@ pub struct BoundaryCondition {
 }
 
 impl BoundaryCondition {
-    /// Create a new typed boundary condition from raw inputs.
+    /// Construct a `BoundaryCondition` from the raw TRNSYS Type 395 input array.
     ///
-    /// `temp_*_c` are in °C, `rh_*` are fractions (0–1), `pressure_pa` in Pa.
-    pub fn new(
-        temp_outside_c: f64,
-        temp_inside_c: f64,
-        rh_outside: f64,
-        rh_inside: f64,
-        pressure_pa: f64,
-        heat_transfer_coeff_ext: f64,
-        heat_transfer_coeff_int: f64,
-        mass_conv_coeff_ext: f64,
-        mass_conv_coeff_int: f64,
-        q_additional_out: f64,
-        q_additional_in: f64,
-        q_additional_userdef: f64,
-    ) -> Self {
+    /// The `inputs` slice must contain between 11 and 14 `f64` values in the order
+    /// defined by the Type 395 interface (see `trnsys_type.rs` docs).  Values for
+    /// absent trailing inputs are derived via the same fallback rules that previously
+    /// lived in `trnsys_type.rs::iterate`:
+    ///
+    /// | idx | field                       | unit in   | fallback (missing input) |
+    /// |-----|-----------------------------|-----------|--------------------------|
+    /// | 0   | temp_inside_air (TSTAR)     | °C        | —                        |
+    /// | 1   | temp_outside_air            | °C        | —                        |
+    /// | 2   | rh_inside_air               | % (0–100) | —                        |
+    /// | 3   | rh_outside_air              | % (0–100) | —                        |
+    /// | 4   | heat_transfer_coeff_int     | kJ/hr·m²·K| —                        |
+    /// | 5   | heat_transfer_coeff_ext     | kJ/hr·m²·K| —                        |
+    /// | 6   | additional_energy_int       | kJ/hr     | —                        |
+    /// | 7   | additional_energy_ext       | kJ/hr     | —                        |
+    /// | 8   | vapor_transport_coeff_int β | kg/m²·s·Pa| Lewis fallback if == 0   |
+    /// | 9   | vapor_transport_coeff_ext β | kg/m²·s·Pa| —                        |
+    /// | 10  | q_addition_userdef          | kJ/hr     | —                        |
+    /// | 11  | temp_inside_air_moisture    | °C        | falls back to inputs[0]  |
+    /// | 12  | heat_transfer_coeff_conv_int| kJ/hr·m²·K| falls back to inputs[4]  |
+    /// | 13  | temp_inside_mean_radiant    | °C        | falls back to inputs[0]  |
+    ///
+    /// `has_separate_radiant_int` is set to `inputs.len() >= 14`.
+    ///
+    /// Lewis-analogy fallback: when `inputs[8] == 0.0` the interior vapor transport
+    /// coefficient is derived as `7e-9 × heat_transfer_coeff_conv_int[W/m²K]`.
+    pub fn from_trnsys_inputs(inputs: &[f64]) -> Self {
+        // Always-present inputs (indices 0–10).
+        let t_int   = inputs[0];  // TSTAR [°C]
+        let t_out   = inputs[1];  // outside air T [°C]
+        let rh_int  = inputs[2];  // inside RH [%]
+        let rh_out  = inputs[3];  // outside RH [%]
+        let hconv_int  = inputs[4]; // combined interior HTC [kJ/hr·m²·K]
+        let hconv_out  = inputs[5]; // exterior HTC [kJ/hr·m²·K]
+        let q_int   = inputs[6];  // interior additional energy [kJ/hr]
+        let q_out   = inputs[7];  // exterior additional energy [kJ/hr]
+        let beta_int = inputs[8]; // interior β [kg/m²·s·Pa]
+        let beta_out = inputs[9]; // exterior β [kg/m²·s·Pa]
+        let q_userdef = inputs[10]; // user-defined depth heat [kJ/hr]
+
+        // Optional input 11: actual interior air T for moisture VP.
+        // Falls back to TSTAR (input 0) when <12 inputs.
+        let t_int_moisture = inputs.get(11).copied().unwrap_or(t_int);
+
+        // Optional input 12: pure convective interior HTC (HCONVI).
+        // Falls back to combined hconv_int (input 4) when <13 inputs.
+        let hconv_conv_int = inputs.get(12).copied().unwrap_or(hconv_int);
+
+        // Optional input 13: mean radiant temperature (TMR).
+        // Falls back to TSTAR (input 0) when <14 inputs.
+        let tmr_int = inputs.get(13).copied().unwrap_or(t_int);
+
+        // Separated radiant path enabled only when both inputs 12 and 13 are present.
+        let has_separate_radiant_int = inputs.len() >= 14;
+
+        // Apply Lewis-analogy fallback: when beta_int == 0 derive from hconv_conv_int.
+        // Uses 7e-9 [kg/(m²·s·Pa)] per [W/(m²·K)], the Lewis coefficient at ~20 °C.
+        let vtc_int = if beta_int == 0.0 {
+            // strip: empirical Lewis constant; hconv_conv_int is kJ/hr·m²·K -> /3.6 = W/m²·K
+            let h_w = (hconv_conv_int * kj_per_hr_m2_k).value_in(w_per_m2_k);
+            7.0e-9 * h_w * kg_per_m2_s_pa
+        } else {
+            beta_int * kg_per_m2_s_pa
+        };
+
         Self {
-            temp_outside_air: celsius_to_kelvin(temp_outside_c),
-            temp_inside_air: celsius_to_kelvin(temp_inside_c),
-            rh_outside_air: Quantity(rh_outside),
-            rh_inside_air: Quantity(rh_inside),
-            pressure_air: pressure_pa * units::pascals,
-            heat_transfer_coeff_ext: heat_transfer_coeff_ext * w_per_m2_k,
-            heat_transfer_coeff_int: heat_transfer_coeff_int * w_per_m2_k,
-            mass_convection_coeff_ext: mass_conv_coeff_ext * m_per_s,
-            mass_convection_coeff_int: mass_conv_coeff_int * m_per_s,
-            vapor_transport_coeff_ext: Quantity(0.0),
-            vapor_transport_coeff_int: Quantity(0.0),
-            temp_inside_air_moisture: celsius_to_kelvin(temp_inside_c),
-            temp_outside_air_moisture: celsius_to_kelvin(temp_outside_c),
-            temp_inside_mean_radiant: celsius_to_kelvin(temp_inside_c),
-            heat_transfer_coeff_conv_int: heat_transfer_coeff_int * w_per_m2_k,
-            additional_energy_ext: q_additional_out * watts,
-            additional_energy_int: q_additional_in * watts,
-            q_addition_userdef: q_additional_userdef * watts,
+            temp_inside_air: celsius_to_kelvin(t_int),
+            temp_outside_air: celsius_to_kelvin(t_out),
+            rh_inside_air: rh_int / 100.0 * dimensionless,
+            rh_outside_air: rh_out / 100.0 * dimensionless,
+            heat_transfer_coeff_int: hconv_int * kj_per_hr_m2_k,
+            heat_transfer_coeff_ext: hconv_out * kj_per_hr_m2_k,
+            additional_energy_int: q_int * kj_per_hr,
+            additional_energy_ext: q_out * kj_per_hr,
+            vapor_transport_coeff_int: vtc_int,
+            vapor_transport_coeff_ext: beta_out * kg_per_m2_s_pa,
+            q_addition_userdef: q_userdef * kj_per_hr,
+            temp_inside_air_moisture: celsius_to_kelvin(t_int_moisture),
+            temp_outside_air_moisture: celsius_to_kelvin(t_out),
+            heat_transfer_coeff_conv_int: hconv_conv_int * kj_per_hr_m2_k,
+            temp_inside_mean_radiant: celsius_to_kelvin(tmr_int),
+            has_separate_radiant_int,
+            // Fields not driven by inputs keep sensible defaults.
+            pressure_air: ATMOSPHERE_PRESSURE * 1.0,
+            mass_convection_coeff_ext: Quantity(0.0),
+            mass_convection_coeff_int: Quantity(0.0),
             is_raining: false,
-            has_separate_radiant_int: false,
         }
     }
 }
@@ -206,4 +257,221 @@ pub fn kelvin_to_celsius(temp_k: Temperature<f64>) -> f64 {
     // strip: returns a raw Celsius scalar for external API boundaries
     // (TRNSYS, IDF, °C-based empirical formulas); stays untyped by design.
     temp_k.value_in(units::kelvin) - KELVIN_CONV
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::uom::units::{kelvin, kg_per_m2_s_pa, w_per_m2_k, watts};
+
+    // Conversion factor: 1 kJ/hr·m²·K = 1/3.6 W/m²·K
+    const KJ_HR_M2K_TO_W_M2K: f64 = 1000.0 / 3600.0;
+    // Conversion factor: 1 kJ/hr = 1000/3600 W
+    const KJ_HR_TO_W: f64 = 1000.0 / 3600.0;
+    const KELVIN_OFFSET: f64 = 273.15;
+
+    /// Build a canonical 14-element input vector with distinct values for every field.
+    fn make_14_inputs() -> [f64; 14] {
+        [
+            // idx  field                     value (unit)
+            21.0,  // 0  TSTAR (inside air T)  [°C]
+            -5.0,  // 1  T_out                 [°C]
+            55.0,  // 2  RH_int                [%]
+            80.0,  // 3  RH_out                [%]
+            7.2,   // 4  hconv_int (combined)  [kJ/hr·m²·K]
+            10.8,  // 5  hconv_out             [kJ/hr·m²·K]
+            3.6,   // 6  q_int                 [kJ/hr]
+            7.2,   // 7  q_out                 [kJ/hr]
+            1.4e-8,// 8  beta_int              [kg/m²·s·Pa]
+            2.8e-8,// 9  beta_out              [kg/m²·s·Pa]
+            1.8,   // 10 q_userdef             [kJ/hr]
+            19.0,  // 11 T_int_moisture (TAIR) [°C]
+            5.4,   // 12 HCONVI (conv only)    [kJ/hr·m²·K]
+            22.0,  // 13 TMR                   [°C]
+        ]
+    }
+
+    /// 14-input deck: every field is directly set from its input, no fallbacks needed.
+    #[test]
+    fn test_from_trnsys_inputs_14_all_fields() {
+        let inputs = make_14_inputs();
+        let bc = BoundaryCondition::from_trnsys_inputs(&inputs);
+
+        // Temperatures → Kelvin
+        let eps_k = 1e-9;
+        assert!((bc.temp_inside_air.value_in(kelvin) - (21.0 + KELVIN_OFFSET)).abs() < eps_k,
+            "temp_inside_air mismatch");
+        assert!((bc.temp_outside_air.value_in(kelvin) - (-5.0 + KELVIN_OFFSET)).abs() < eps_k,
+            "temp_outside_air mismatch");
+        assert!((bc.temp_inside_air_moisture.value_in(kelvin) - (19.0 + KELVIN_OFFSET)).abs() < eps_k,
+            "temp_inside_air_moisture mismatch: expected input[11]=19.0 °C -> K");
+        assert!((bc.temp_outside_air_moisture.value_in(kelvin) - (-5.0 + KELVIN_OFFSET)).abs() < eps_k,
+            "temp_outside_air_moisture = t_out");
+        assert!((bc.temp_inside_mean_radiant.value_in(kelvin) - (22.0 + KELVIN_OFFSET)).abs() < eps_k,
+            "temp_inside_mean_radiant mismatch: expected input[13]=22.0 °C -> K");
+
+        // RH → fraction
+        let eps_rh = 1e-12;
+        assert!((bc.rh_inside_air.value() - 0.55).abs() < eps_rh,
+            "rh_inside_air: expected 55/100 = 0.55, got {}", bc.rh_inside_air.value());
+        assert!((bc.rh_outside_air.value() - 0.80).abs() < eps_rh,
+            "rh_outside_air: expected 80/100 = 0.80, got {}", bc.rh_outside_air.value());
+
+        // HTC → W/m²·K
+        let eps_h = 1e-10;
+        let expected_hconv_int = 7.2 * KJ_HR_M2K_TO_W_M2K;
+        let expected_hconv_ext = 10.8 * KJ_HR_M2K_TO_W_M2K;
+        let expected_hconv_conv_int = 5.4 * KJ_HR_M2K_TO_W_M2K;
+        assert!((bc.heat_transfer_coeff_int.value_in(w_per_m2_k) - expected_hconv_int).abs() < eps_h,
+            "heat_transfer_coeff_int");
+        assert!((bc.heat_transfer_coeff_ext.value_in(w_per_m2_k) - expected_hconv_ext).abs() < eps_h,
+            "heat_transfer_coeff_ext");
+        assert!((bc.heat_transfer_coeff_conv_int.value_in(w_per_m2_k) - expected_hconv_conv_int).abs() < eps_h,
+            "heat_transfer_coeff_conv_int: expected input[12]=5.4 kJ/hr·m²·K");
+
+        // Beta → kg/m²·s·Pa  (non-zero so Lewis fallback must NOT fire)
+        let eps_beta = 1e-20;
+        assert!((bc.vapor_transport_coeff_int.value_in(kg_per_m2_s_pa) - 1.4e-8).abs() < eps_beta,
+            "vapor_transport_coeff_int");
+        assert!((bc.vapor_transport_coeff_ext.value_in(kg_per_m2_s_pa) - 2.8e-8).abs() < eps_beta,
+            "vapor_transport_coeff_ext");
+
+        // Energies → W  (1 kJ/hr = 1000/3600 W)
+        let eps_w = 1e-10;
+        assert!((bc.additional_energy_int.value_in(watts) - 3.6 * KJ_HR_TO_W).abs() < eps_w,
+            "additional_energy_int");
+        assert!((bc.additional_energy_ext.value_in(watts) - 7.2 * KJ_HR_TO_W).abs() < eps_w,
+            "additional_energy_ext");
+        assert!((bc.q_addition_userdef.value_in(watts) - 1.8 * KJ_HR_TO_W).abs() < eps_w,
+            "q_addition_userdef");
+
+        // Radiant flag
+        assert!(bc.has_separate_radiant_int, "has_separate_radiant_int must be true for 14 inputs");
+
+        // Defaults preserved
+        assert!(!bc.is_raining, "is_raining default is false");
+    }
+
+    /// 11-input deck: inputs 11/12/13 absent, fallback rules apply.
+    /// - has_separate_radiant_int = false
+    /// - t_int_moisture = t_int (TSTAR)
+    /// - hconv_conv_int = hconv_int (combined)
+    /// - tmr_int = t_int (TSTAR)
+    /// - Lewis fallback fires because beta_int == 0
+    #[test]
+    fn test_from_trnsys_inputs_11_fallbacks_and_lewis() {
+        // Use same first 11 inputs, beta_int = 0 to trigger Lewis fallback.
+        let inputs: [f64; 11] = [
+            21.0,   // 0  TSTAR [°C]
+            -5.0,   // 1  T_out [°C]
+            55.0,   // 2  RH_int [%]
+            80.0,   // 3  RH_out [%]
+            7.2,    // 4  hconv_int (combined) [kJ/hr·m²·K]
+            10.8,   // 5  hconv_out [kJ/hr·m²·K]
+            3.6,    // 6  q_int [kJ/hr]
+            7.2,    // 7  q_out [kJ/hr]
+            0.0,    // 8  beta_int = 0 → Lewis fallback fires
+            2.8e-8, // 9  beta_out [kg/m²·s·Pa]
+            1.8,    // 10 q_userdef [kJ/hr]
+        ];
+        let bc = BoundaryCondition::from_trnsys_inputs(&inputs);
+
+        // Radiant flag must be false for 11-input deck.
+        assert!(!bc.has_separate_radiant_int, "has_separate_radiant_int must be false for 11 inputs");
+
+        let eps_k = 1e-9;
+        // t_int_moisture falls back to TSTAR (inputs[0] = 21 °C)
+        assert!((bc.temp_inside_air_moisture.value_in(kelvin) - (21.0 + KELVIN_OFFSET)).abs() < eps_k,
+            "temp_inside_air_moisture must fall back to t_int (TSTAR = 21 °C)");
+        // tmr_int falls back to TSTAR (inputs[0] = 21 °C)
+        assert!((bc.temp_inside_mean_radiant.value_in(kelvin) - (21.0 + KELVIN_OFFSET)).abs() < eps_k,
+            "temp_inside_mean_radiant must fall back to t_int (TSTAR = 21 °C)");
+
+        // hconv_conv_int falls back to combined hconv_int (inputs[4] = 7.2 kJ/hr·m²·K)
+        let eps_h = 1e-10;
+        let expected_hconv_conv_int = 7.2 * KJ_HR_M2K_TO_W_M2K;
+        assert!((bc.heat_transfer_coeff_conv_int.value_in(w_per_m2_k) - expected_hconv_conv_int).abs() < eps_h,
+            "heat_transfer_coeff_conv_int must fall back to hconv_int=7.2 kJ/hr·m²·K");
+
+        // Lewis fallback: beta_int==0 → vtc_int = 7e-9 * hconv_conv_int[W/m²K]
+        // hconv_conv_int = 7.2 kJ/hr·m²·K = 7.2/3.6 W/m²K = 2.0 W/m²K
+        let h_w = 7.2 * KJ_HR_M2K_TO_W_M2K; // = 2.0 W/m²K
+        let expected_vtc_int = 7.0e-9 * h_w;
+        let eps_beta = 1e-20;
+        assert!((bc.vapor_transport_coeff_int.value_in(kg_per_m2_s_pa) - expected_vtc_int).abs() < eps_beta,
+            "Lewis fallback: vtc_int = 7e-9 * {h_w} = {expected_vtc_int}, got {}",
+            bc.vapor_transport_coeff_int.value_in(kg_per_m2_s_pa));
+    }
+
+    /// 12-input deck: input 11 present, inputs 12/13 absent.
+    /// - t_int_moisture = inputs[11]
+    /// - hconv_conv_int falls back to hconv_int (inputs[4])
+    /// - tmr_int falls back to t_int (inputs[0])
+    /// - has_separate_radiant_int = false
+    #[test]
+    fn test_from_trnsys_inputs_12_partial_fallback() {
+        let inputs: [f64; 12] = [
+            21.0,  // 0  TSTAR
+            -5.0,  // 1  T_out
+            55.0,  // 2  RH_int [%]
+            80.0,  // 3  RH_out [%]
+            7.2,   // 4  hconv_int
+            10.8,  // 5  hconv_out
+            3.6,   // 6  q_int
+            7.2,   // 7  q_out
+            1.4e-8,// 8  beta_int (non-zero → no Lewis fallback)
+            2.8e-8,// 9  beta_out
+            1.8,   // 10 q_userdef
+            19.0,  // 11 T_int_moisture (TAIR)
+        ];
+        let bc = BoundaryCondition::from_trnsys_inputs(&inputs);
+
+        assert!(!bc.has_separate_radiant_int, "12 inputs → no separate radiant");
+        let eps_k = 1e-9;
+        // t_int_moisture comes from inputs[11] = 19 °C
+        assert!((bc.temp_inside_air_moisture.value_in(kelvin) - (19.0 + KELVIN_OFFSET)).abs() < eps_k,
+            "temp_inside_air_moisture = input[11] = 19 °C");
+        // hconv_conv_int falls back to inputs[4] = 7.2
+        let eps_h = 1e-10;
+        assert!((bc.heat_transfer_coeff_conv_int.value_in(w_per_m2_k) - 7.2 * KJ_HR_M2K_TO_W_M2K).abs() < eps_h,
+            "hconv_conv_int falls back to inputs[4]");
+        // tmr falls back to TSTAR = 21 °C
+        assert!((bc.temp_inside_mean_radiant.value_in(kelvin) - (21.0 + KELVIN_OFFSET)).abs() < eps_k,
+            "tmr falls back to TSTAR = 21 °C");
+    }
+
+    /// 13-input deck: inputs 11 and 12 present, input 13 absent.
+    /// - t_int_moisture = inputs[11]
+    /// - hconv_conv_int = inputs[12]
+    /// - tmr_int falls back to TSTAR (inputs[0])
+    /// - has_separate_radiant_int = false
+    #[test]
+    fn test_from_trnsys_inputs_13_tmr_fallback() {
+        let inputs: [f64; 13] = [
+            21.0,  // 0  TSTAR
+            -5.0,  // 1  T_out
+            55.0,  // 2  RH_int [%]
+            80.0,  // 3  RH_out [%]
+            7.2,   // 4  hconv_int
+            10.8,  // 5  hconv_out
+            3.6,   // 6  q_int
+            7.2,   // 7  q_out
+            1.4e-8,// 8  beta_int
+            2.8e-8,// 9  beta_out
+            1.8,   // 10 q_userdef
+            19.0,  // 11 T_int_moisture
+            5.4,   // 12 HCONVI
+        ];
+        let bc = BoundaryCondition::from_trnsys_inputs(&inputs);
+
+        assert!(!bc.has_separate_radiant_int, "13 inputs → no separate radiant");
+        let eps_k = 1e-9;
+        let eps_h = 1e-10;
+        // inputs[12] is present → hconv_conv_int = 5.4 kJ/hr·m²·K
+        assert!((bc.heat_transfer_coeff_conv_int.value_in(w_per_m2_k) - 5.4 * KJ_HR_M2K_TO_W_M2K).abs() < eps_h,
+            "hconv_conv_int = input[12] = 5.4");
+        // inputs[13] absent → tmr falls back to TSTAR = 21 °C
+        assert!((bc.temp_inside_mean_radiant.value_in(kelvin) - (21.0 + KELVIN_OFFSET)).abs() < eps_k,
+            "tmr falls back to TSTAR for 13-input deck");
+    }
 }
