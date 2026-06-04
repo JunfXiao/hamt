@@ -21,10 +21,12 @@
 //!              for i in (0..N-1).rev():
 //!                  x_i = (D'_i)^-1 · (b'_i − U_i · x_{i+1})
 //!
-//! On any singular `D'_i` the solver returns `Err(SolverError::Singular)`.
-//! Callers are expected to treat this as a numerical failure and fall
-//! back to per-cell decoupled handling (consistent with the existing
-//! 2×2 path in `calculate_physics_step`).
+//! On any singular `D'_i` the solver returns `Err(SolverError::Singular { row })`.
+//! The caller (`surface::step_tridiag::BlockTridiagStep`) propagates this as a
+//! step error, which `run_outer_loop` surfaces to the adaptive PI substepper
+//! (`solve_timestep_adaptive`). The substepper then shrinks `dt` and retries
+//! the macro-step from the last accepted state. No per-cell decoupled fallback
+//! is performed inside this module.
 
 use super::block_2x2::Block2x2;
 
