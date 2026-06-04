@@ -442,10 +442,18 @@ impl HamtManager {
         let n_cells = self.surface_curr.cells.len();
         let mut aitken = Aitken::new(n_cells);
 
+        // Anderson acceleration on the outer nonlinear loop. Reset per timestep.
+        let mut anderson = AndersonAccelerator::new(self.settings.anderson_history_depth);
+        anderson.reset();
+
         self.run_outer_loop(
             &crate::surface::BlockTridiagStep,
             &mut aitken,
-            None,
+            if self.settings.anderson_enabled {
+                Some(&mut anderson)
+            } else {
+                None
+            },
             ExitPolicy {
                 max_iter: MAX_OUTER,
                 min_iter_guard: None,
