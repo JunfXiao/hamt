@@ -1,9 +1,7 @@
-use crate::{
-    uom::{
-        Quantity,
-        dimensions::{HeatTransferCoeff, VaporTransportCoeff},
-        units::{kg_per_m2_s_pa, kelvin, pascals, w_per_m2_k},
-    },
+use crate::uom::{
+    Quantity,
+    dimensions::{HeatTransferCoeff, VaporTransportCoeff},
+    units::{kelvin, kg_per_m2_s_pa, pascals, w_per_m2_k},
 };
 
 use super::*;
@@ -33,7 +31,10 @@ impl Surface {
                     // is set to the star-node temperature for the heat convection path.
                     let psat = physics::psy_psat_fn_temp(bc.temp_outside_air_moisture);
                     let rh = cell.cell_rh;
-                    let vtc = if matches!(cell.cell_type, CellType::Boundary(crate::cell::Boundary::Convection, _)) {
+                    let vtc = if matches!(
+                        cell.cell_type,
+                        CellType::Boundary(crate::cell::Boundary::Convection, _)
+                    ) {
                         if bc.vapor_transport_coeff_ext > VaporTransportCoeff::<f64>::zero() {
                             bc.vapor_transport_coeff_ext
                         } else {
@@ -52,7 +53,10 @@ impl Surface {
                     cell.cell_vp = rh * psat;
                 } else {
                     match &cell.cell_type {
-                        CellType::Boundary(crate::cell::Boundary::Convection, BoundaryLocation::Interior) => {
+                        CellType::Boundary(
+                            crate::cell::Boundary::Convection,
+                            BoundaryLocation::Interior,
+                        ) => {
                             // Pure convective HTC (HCONVI). Paired with TAIR on the heat side,
                             // shared with VP_bc on the moisture side. In separated-conv-rad mode
                             // (14-input deck) temp_inside_air_moisture = TAIR (NType 1);
@@ -63,7 +67,9 @@ impl Surface {
                             cell.cell_rh = bc.rh_inside_air;
                             let psat = physics::psy_psat_fn_temp(bc.temp_inside_air_moisture);
                             let rh = cell.cell_rh;
-                            let vtc = if bc.vapor_transport_coeff_int > VaporTransportCoeff::<f64>::zero() {
+                            let vtc = if bc.vapor_transport_coeff_int
+                                > VaporTransportCoeff::<f64>::zero()
+                            {
                                 bc.vapor_transport_coeff_int
                             } else {
                                 let rho_v = physics::vd_from_t_rh(cell.cell_temp, rh);
@@ -77,7 +83,10 @@ impl Surface {
                             cell.vtc = vtc;
                             cell.cell_vp = rh * psat;
                         }
-                        CellType::Boundary(crate::cell::Boundary::Radiation, BoundaryLocation::Interior) => {
+                        CellType::Boundary(
+                            crate::cell::Boundary::Radiation,
+                            BoundaryLocation::Interior,
+                        ) => {
                             // Linearised longwave exchange against mean radiant temperature.
                             // h_rad = 4 σ ε T_m³, T_m ≈ mean of surface and TMR.
                             // Use the adjacent interior material cell's current temperature as the

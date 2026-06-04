@@ -8,8 +8,8 @@ use crate::{
             ThermalResistance, VaporResistance,
         },
         units::{
-            dimensionless, k_per_w, kg_per_hr, kg_per_m2_s_pa, kg_per_m3, m2_per_s,
-            meter, pa_s_per_kg, s_per_kg, square_meter, w_per_m2_k
+            dimensionless, k_per_w, kg_per_hr, kg_per_m2_s_pa, kg_per_m3, m2_per_s, meter,
+            pa_s_per_kg, s_per_kg, square_meter, w_per_m2_k,
         },
     },
 };
@@ -651,7 +651,10 @@ mod resistance_triple_tests {
             .iter()
             .filter(|c| matches!(c.cell_type, crate::cell::CellType::Material(_)))
             .collect();
-        assert!(cells.len() >= 2, "fixture must have at least 2 material cells");
+        assert!(
+            cells.len() >= 2,
+            "fixture must have at least 2 material cells"
+        );
         let cell1 = cells[0];
         let cell2 = cells[1];
 

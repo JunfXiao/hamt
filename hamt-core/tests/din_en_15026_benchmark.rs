@@ -30,10 +30,7 @@ use hamt_core::{
     cell::CellType,
     hamt_manager::{AdaptiveState, HamtManager, HamtSettings, SolverMethod},
 };
-use hamt_core::{
-    surface::Surface,
-    uom::units::pascals,
-};
+use hamt_core::{surface::Surface, uom::units::pascals};
 use std::time::{Duration, Instant};
 use std::{
     borrow::Cow,
@@ -223,8 +220,7 @@ fn get_vapor_diffusion_curve() -> Curve<DIM_DIMENSIONLESS, DIM_DIMENSIONLESS> {
             // This is the direct form that avoids any δ₀ temperature conversion.
             // It is consistent with vapor_diffusivity_model = Linear { coeff: 26.1e-6 },
             // which uses δ_a = 26.1e-6 / (VAPOR_GAS_CONSTANT × T) — the temperature factors cancel in μ.
-            200.0 * (0.503 * rest_water_ratio.powf(2.0) + 0.497) / rest_water_ratio
-                * dimensionless
+            200.0 * (0.503 * rest_water_ratio.powf(2.0) + 0.497) / rest_water_ratio * dimensionless
         },
         x_values,
     )
@@ -464,7 +460,8 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
                     let tracker = tracker.clone();
                     move |state: &AdaptiveState<Vec<(Time<f64>, u32)>>| -> Result<()> {
                         let orig_timestep = (*orig_timestep_for_ui).clone();
-                        let current_step = state.proposed_dt.unwrap_or_else(|| orig_timestep.clone());
+                        let current_step =
+                            state.proposed_dt.unwrap_or_else(|| orig_timestep.clone());
                         let sim_hours = state.current_time.value_in(hours);
                         let remaining_hours = preheat_end_hours - sim_hours;
                         tracker.borrow_mut().record(sim_hours);
@@ -587,7 +584,8 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
                     let tracker = tracker.clone();
                     move |state: &AdaptiveState<Vec<(Time<f64>, u32)>>| -> Result<()> {
                         let orig_timestep = (*orig_timestep_for_ui).clone();
-                        let current_step = state.proposed_dt.unwrap_or_else(|| orig_timestep.clone());
+                        let current_step =
+                            state.proposed_dt.unwrap_or_else(|| orig_timestep.clone());
                         let progress = progress_bar(
                             state.current_time,
                             simulation_durations_for_ui.as_ref(),
@@ -794,7 +792,9 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
     let mut rh_passed = true;
     for (depth, ref_wc) in wc_ref {
         let target = *depth * meter;
-        let cell_wc = surface.interpolate_at_depth(target, |c| c.volumetric_water).value_in(kg_per_m3);
+        let cell_wc = surface
+            .interpolate_at_depth(target, |c| c.volumetric_water)
+            .value_in(kg_per_m3);
         let cell_idx = surface.find_cell_idx_at_depth(target).unwrap_or([0, 0, 0]);
         let diviation = (cell_wc - ref_wc).abs() / ref_wc;
 
@@ -999,8 +999,7 @@ fn run_total_release_with_timestep_and_solver(
         // moisture produces a negative integral. Flip the sign so the
         // running total reads as released-mass.
         // strip: extracting raw kg total from a typed integral for sum
-        let mass_in_kg =
-            (adap_state.flux_accumulator.m_int_dt * area).value_in(kilograms);
+        let mass_in_kg = (adap_state.flux_accumulator.m_int_dt * area).value_in(kilograms);
         total_release_kg += -mass_in_kg;
         elapsed += mgr.settings.timestep;
     }
@@ -1013,7 +1012,7 @@ fn run_total_release_with_timestep_and_solver(
 
     Ok(total_release_kg)
 }
- 
+
 #[test]
 fn test_total_release_invariance_across_timesteps() -> Result<()> {
     // Span ~30× — finest resolves transient, coarsest forces a near-quasi-
@@ -1048,8 +1047,10 @@ fn test_total_release_invariance_across_timesteps() -> Result<()> {
             "Δt={:.4e} h: total release {:.4e} kg differs from reference (Δt={:.4e} h, {:.4e} kg) by {:.2}% — \
              exceeds {:.1}% tolerance. HAMT does NOT preserve total moisture mass under timestep changes — \
              possible bug in implicit-Euler conservation, warm-start, or the substep flux accumulator.",
-            ts.value_in(hours), total,
-            timesteps[0].value_in(hours), reference,
+            ts.value_in(hours),
+            total,
+            timesteps[0].value_in(hours),
+            reference,
             rel_err * 100.0,
             allowed_rel_err * 100.0,
         );
@@ -1093,8 +1094,10 @@ fn test_total_release_invariance_block_tridiag() -> Result<()> {
             rel_err < allowed_rel_err,
             "Δt={:.4e} h: total release {:.4e} kg differs from reference (Δt={:.4e} h, {:.4e} kg) by {:.2}% — \
              exceeds {:.1}% tolerance.",
-            ts.value_in(hours), total,
-            timesteps[0].value_in(hours), reference,
+            ts.value_in(hours),
+            total,
+            timesteps[0].value_in(hours),
+            reference,
             rel_err * 100.0,
             allowed_rel_err * 100.0,
         );
@@ -1111,7 +1114,7 @@ pub fn init_tracing() {
                 EnvFilter::try_from_default_env()
                     .unwrap_or_else(|_| EnvFilter::new("info,hamt_core=info")),
             )
-            .with_test_writer() 
+            .with_test_writer()
             .init();
     });
 }
@@ -1282,7 +1285,6 @@ impl Ui {
             self.stdout.queue(Print("\n"))?;
         }
 
-
         let current_height = lines.len();
         if current_height < self.last_render_height {
             for y in current_height..self.last_render_height.min(max_content_lines) {
@@ -1291,7 +1293,6 @@ impl Ui {
             }
         }
         self.last_render_height = current_height;
-
 
         let status = truncate_line(&self.status_line, cols);
         self.stdout
@@ -1319,7 +1320,6 @@ impl Ui {
         Ok(())
     }
 }
-
 
 impl Drop for Ui {
     fn drop(&mut self) {

@@ -134,7 +134,10 @@ mod tests {
         let l = vec![Block2x2::zero()];
         let u = vec![Block2x2::zero()];
         let b = vec![(1.0, 1.0)];
-        assert!(matches!(solve(&l, &d, &u, &b), Err(SolverError::Singular { row: 0 })));
+        assert!(matches!(
+            solve(&l, &d, &u, &b),
+            Err(SolverError::Singular { row: 0 })
+        ));
     }
 
     #[test]
@@ -146,15 +149,26 @@ mod tests {
     /// Helper: assemble residual r_i = L·x_{i-1} + D·x_i + U·x_{i+1} − b_i.
     /// Used by tests to verify the SOLVED x satisfies the system.
     fn residual_norm(
-        l: &[Block2x2], d: &[Block2x2], u: &[Block2x2],
-        x: &[(f64, f64)], b: &[(f64, f64)],
+        l: &[Block2x2],
+        d: &[Block2x2],
+        u: &[Block2x2],
+        x: &[(f64, f64)],
+        b: &[(f64, f64)],
     ) -> f64 {
         let n = d.len();
         let mut max_r = 0.0_f64;
         for i in 0..n {
             let dx = d[i].mul_vec(x[i]);
-            let lx = if i == 0 { (0.0, 0.0) } else { l[i].mul_vec(x[i - 1]) };
-            let ux = if i + 1 == n { (0.0, 0.0) } else { u[i].mul_vec(x[i + 1]) };
+            let lx = if i == 0 {
+                (0.0, 0.0)
+            } else {
+                l[i].mul_vec(x[i - 1])
+            };
+            let ux = if i + 1 == n {
+                (0.0, 0.0)
+            } else {
+                u[i].mul_vec(x[i + 1])
+            };
             let r0 = dx.0 + lx.0 + ux.0 - b[i].0;
             let r1 = dx.1 + lx.1 + ux.1 - b[i].1;
             max_r = max_r.max(r0.abs()).max(r1.abs());
@@ -164,24 +178,52 @@ mod tests {
 
     /// Helper: build b consistent with x_true so we can round-trip.
     fn build_b(
-        l: &[Block2x2], d: &[Block2x2], u: &[Block2x2], x_true: &[(f64, f64)],
+        l: &[Block2x2],
+        d: &[Block2x2],
+        u: &[Block2x2],
+        x_true: &[(f64, f64)],
     ) -> Vec<(f64, f64)> {
         let n = d.len();
-        (0..n).map(|i| {
-            let dx = d[i].mul_vec(x_true[i]);
-            let lx = if i == 0 { (0.0, 0.0) } else { l[i].mul_vec(x_true[i - 1]) };
-            let ux = if i + 1 == n { (0.0, 0.0) } else { u[i].mul_vec(x_true[i + 1]) };
-            (dx.0 + lx.0 + ux.0, dx.1 + lx.1 + ux.1)
-        }).collect()
+        (0..n)
+            .map(|i| {
+                let dx = d[i].mul_vec(x_true[i]);
+                let lx = if i == 0 {
+                    (0.0, 0.0)
+                } else {
+                    l[i].mul_vec(x_true[i - 1])
+                };
+                let ux = if i + 1 == n {
+                    (0.0, 0.0)
+                } else {
+                    u[i].mul_vec(x_true[i + 1])
+                };
+                (dx.0 + lx.0 + ux.0, dx.1 + lx.1 + ux.1)
+            })
+            .collect()
     }
 
     /// Property (decoupled): when L = U = 0, each block solves independently.
     #[test]
     fn diagonal_only_system_decouples() {
         let d = vec![
-            Block2x2 { a: 2.0, b: 0.0, c: 0.0, d: 4.0 },
-            Block2x2 { a: 1.0, b: 0.0, c: 0.0, d: 2.0 },
-            Block2x2 { a: 5.0, b: 0.0, c: 0.0, d: 1.0 },
+            Block2x2 {
+                a: 2.0,
+                b: 0.0,
+                c: 0.0,
+                d: 4.0,
+            },
+            Block2x2 {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 2.0,
+            },
+            Block2x2 {
+                a: 5.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+            },
         ];
         let l = vec![Block2x2::zero(); 3];
         let u = vec![Block2x2::zero(); 3];
@@ -191,7 +233,9 @@ mod tests {
         for i in 0..3 {
             assert!(
                 approx_pair(x[i], x_true[i], 1e-12),
-                "row {i}: got {:?}, want {:?}", x[i], x_true[i]
+                "row {i}: got {:?}, want {:?}",
+                x[i],
+                x_true[i]
             );
         }
     }
@@ -202,17 +246,52 @@ mod tests {
     fn round_trip_recovers_x_dense_blocks() {
         let l = vec![
             Block2x2::zero(),
-            Block2x2 { a: -0.4, b: 0.1, c: -0.05, d: -0.3 },
-            Block2x2 { a: -0.6, b: -0.1, c: 0.0, d: -0.5 },
+            Block2x2 {
+                a: -0.4,
+                b: 0.1,
+                c: -0.05,
+                d: -0.3,
+            },
+            Block2x2 {
+                a: -0.6,
+                b: -0.1,
+                c: 0.0,
+                d: -0.5,
+            },
         ];
         let d = vec![
-            Block2x2 { a: 3.0, b: 0.2, c: 0.1, d: 4.0 },
-            Block2x2 { a: 2.5, b: 0.0, c: 0.05, d: 3.5 },
-            Block2x2 { a: 4.0, b: -0.1, c: 0.0, d: 5.0 },
+            Block2x2 {
+                a: 3.0,
+                b: 0.2,
+                c: 0.1,
+                d: 4.0,
+            },
+            Block2x2 {
+                a: 2.5,
+                b: 0.0,
+                c: 0.05,
+                d: 3.5,
+            },
+            Block2x2 {
+                a: 4.0,
+                b: -0.1,
+                c: 0.0,
+                d: 5.0,
+            },
         ];
         let u = vec![
-            Block2x2 { a: -0.5, b: 0.0, c: 0.05, d: -0.4 },
-            Block2x2 { a: -0.6, b: -0.05, c: 0.0, d: -0.5 },
+            Block2x2 {
+                a: -0.5,
+                b: 0.0,
+                c: 0.05,
+                d: -0.4,
+            },
+            Block2x2 {
+                a: -0.6,
+                b: -0.05,
+                c: 0.0,
+                d: -0.5,
+            },
             Block2x2::zero(),
         ];
         let x_true = vec![(1.0, 0.5), (-0.3, 0.7), (2.0, -0.4)];
@@ -236,12 +315,27 @@ mod tests {
         let mut u = vec![Block2x2::zero(); n];
         for i in 0..n {
             let s = (i as f64 + 1.0) * 0.1;
-            d[i] = Block2x2 { a: 5.0 + s, b: 0.2 * s, c: 0.1 * s, d: 6.0 + s };
+            d[i] = Block2x2 {
+                a: 5.0 + s,
+                b: 0.2 * s,
+                c: 0.1 * s,
+                d: 6.0 + s,
+            };
             if i > 0 {
-                l[i] = Block2x2 { a: -1.0 - 0.1*s, b: 0.05*s, c: 0.0, d: -1.5 };
+                l[i] = Block2x2 {
+                    a: -1.0 - 0.1 * s,
+                    b: 0.05 * s,
+                    c: 0.0,
+                    d: -1.5,
+                };
             }
             if i + 1 < n {
-                u[i] = Block2x2 { a: -1.0 - 0.1*s, b: 0.0, c: 0.05*s, d: -1.5 };
+                u[i] = Block2x2 {
+                    a: -1.0 - 0.1 * s,
+                    b: 0.0,
+                    c: 0.05 * s,
+                    d: -1.5,
+                };
             }
         }
         let x_true: Vec<(f64, f64)> = (0..n)
@@ -263,15 +357,35 @@ mod tests {
     #[test]
     fn n2_scalar_reduction_hand_check() {
         let d = vec![
-            Block2x2 { a: 2.0, b: 0.0, c: 0.0, d: 2.0 },
-            Block2x2 { a: 2.0, b: 0.0, c: 0.0, d: 2.0 },
+            Block2x2 {
+                a: 2.0,
+                b: 0.0,
+                c: 0.0,
+                d: 2.0,
+            },
+            Block2x2 {
+                a: 2.0,
+                b: 0.0,
+                c: 0.0,
+                d: 2.0,
+            },
         ];
         let l = vec![
             Block2x2::zero(),
-            Block2x2 { a: -1.0, b: 0.0, c: 0.0, d: -1.0 },
+            Block2x2 {
+                a: -1.0,
+                b: 0.0,
+                c: 0.0,
+                d: -1.0,
+            },
         ];
         let u = vec![
-            Block2x2 { a: -1.0, b: 0.0, c: 0.0, d: -1.0 },
+            Block2x2 {
+                a: -1.0,
+                b: 0.0,
+                c: 0.0,
+                d: -1.0,
+            },
             Block2x2::zero(),
         ];
         let b = vec![(1.0, 1.0), (1.0, 1.0)];
@@ -285,14 +399,17 @@ mod tests {
     fn singular_diagonal_reports_row() {
         let d = vec![
             Block2x2::identity(),
-            Block2x2::zero(),  // becomes singular after elimination too
+            Block2x2::zero(), // becomes singular after elimination too
         ];
         let l = vec![Block2x2::zero(), Block2x2::zero()];
         let u = vec![Block2x2::zero(), Block2x2::zero()];
         let b = vec![(1.0, 1.0), (1.0, 1.0)];
         let res = solve(&l, &d, &u, &b);
-        assert!(matches!(res, Err(SolverError::Singular { row: 1 })),
-                "expected Singular {{ row: 1 }}, got {:?}", res);
+        assert!(
+            matches!(res, Err(SolverError::Singular { row: 1 })),
+            "expected Singular {{ row: 1 }}, got {:?}",
+            res
+        );
     }
 
     #[test]
@@ -307,8 +424,18 @@ mod tests {
         let n = 5;
         let r = 0.25; // α Δt / Δx²
         // Diagonal: 1 + 2r in the T channel, 1 in the φ channel (decoupled).
-        let d_block = Block2x2 { a: 1.0 + 2.0 * r, b: 0.0, c: 0.0, d: 1.0 };
-        let off_block = Block2x2 { a: -r, b: 0.0, c: 0.0, d: 0.0 };
+        let d_block = Block2x2 {
+            a: 1.0 + 2.0 * r,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+        };
+        let off_block = Block2x2 {
+            a: -r,
+            b: 0.0,
+            c: 0.0,
+            d: 0.0,
+        };
         let mut diag = vec![d_block; n];
         // Boundary rows (i=0, n-1): the off-diagonal beyond the boundary is
         // absent, so we model Dirichlet T=0 by leaving the corresponding
@@ -320,8 +447,18 @@ mod tests {
 
         // Make endpoints Dirichlet by tweaking the boundary diagonals so the
         // tridiag is exactly representing zero outside.
-        diag[0] = Block2x2 { a: 1.0 + 2.0 * r, b: 0.0, c: 0.0, d: 1.0 };
-        diag[n - 1] = Block2x2 { a: 1.0 + 2.0 * r, b: 0.0, c: 0.0, d: 1.0 };
+        diag[0] = Block2x2 {
+            a: 1.0 + 2.0 * r,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+        };
+        diag[n - 1] = Block2x2 {
+            a: 1.0 + 2.0 * r,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+        };
 
         // Pick a smooth interior solution.
         let x_true: Vec<(f64, f64)> = (0..n)
@@ -336,8 +473,16 @@ mod tests {
         let mut b = vec![(0.0, 0.0); n];
         for i in 0..n {
             let dx = diag[i].mul_vec(x_true[i]);
-            let lx = if i == 0 { (0.0, 0.0) } else { lower[i].mul_vec(x_true[i - 1]) };
-            let ux = if i == n - 1 { (0.0, 0.0) } else { upper[i].mul_vec(x_true[i + 1]) };
+            let lx = if i == 0 {
+                (0.0, 0.0)
+            } else {
+                lower[i].mul_vec(x_true[i - 1])
+            };
+            let ux = if i == n - 1 {
+                (0.0, 0.0)
+            } else {
+                upper[i].mul_vec(x_true[i + 1])
+            };
             b[i] = (dx.0 + lx.0 + ux.0, dx.1 + lx.1 + ux.1);
         }
 
@@ -345,7 +490,9 @@ mod tests {
         for i in 0..n {
             assert!(
                 approx_pair(x[i], x_true[i], 1e-10),
-                "i={i} got {:?} want {:?}", x[i], x_true[i]
+                "i={i} got {:?} want {:?}",
+                x[i],
+                x_true[i]
             );
         }
     }

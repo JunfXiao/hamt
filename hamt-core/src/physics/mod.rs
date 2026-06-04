@@ -1,11 +1,8 @@
 //! Contains pure physics and psychrometric functions for the HAMT model.
 
-use crate::uom::constants::VAPOR_GAS_CONSTANT;
 use crate::uom::Quantity;
-use crate::uom::dimensions::{
-    Density, Dimensionless, Pressure, Temperature,
-    VaporPermeability,
-};
+use crate::uom::constants::VAPOR_GAS_CONSTANT;
+use crate::uom::dimensions::{Density, Dimensionless, Pressure, Temperature, VaporPermeability};
 use crate::uom::units::{self, kelvin, kg_per_m_s_pa, kg_per_m3, pascals};
 
 mod curve;
@@ -14,8 +11,6 @@ pub use curve::*;
 
 /// Kelvin conversion constant.
 pub const KELVIN_CONV: f64 = 273.15;
-
-
 
 pub const ECLIPSE: f64 = 1e-16;
 

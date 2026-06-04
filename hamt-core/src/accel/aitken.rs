@@ -27,19 +27,14 @@ impl Aitken {
 
 impl Accelerator for Aitken {
     fn relax(&mut self, next: &mut Surface, curr: &Surface, iter: i32, knobs: RelaxKnobs) {
-        for (i, (cell_next, cell_curr)) in next
-            .cells
-            .iter_mut()
-            .zip(curr.cells.iter())
-            .enumerate()
+        for (i, (cell_next, cell_curr)) in next.cells.iter_mut().zip(curr.cells.iter()).enumerate()
         {
             if !matches!(cell_next.cell_type, CellType::Material(_)) {
                 continue;
             }
 
             // Extract scalar increments (strip units for pure numerical ratio calculations)
-            let delta_t_curr =
-                (cell_next.cell_temp - cell_curr.cell_temp).value_in(kelvin); // strip: numerical ratio
+            let delta_t_curr = (cell_next.cell_temp - cell_curr.cell_temp).value_in(kelvin); // strip: numerical ratio
             let delta_rh_curr = (cell_next.cell_rh - cell_curr.cell_rh).value(); // strip: numerical ratio
 
             let mut next_alpha = cell_curr.relaxation_factor;
@@ -144,7 +139,11 @@ mod tests {
             .filter(|(_, c)| matches!(c.cell_type, CellType::Material(_)))
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(mat_indices.len(), 3, "fixture should have exactly 3 material cells");
+        assert_eq!(
+            mat_indices.len(),
+            3,
+            "fixture should have exactly 3 material cells"
+        );
 
         let n_cells = curr_surface.cells.len();
 
@@ -157,13 +156,15 @@ mod tests {
             // cell 0: delta_t = +0.05 K, delta_rh = +0.005
             let i0 = mat_indices[0];
             cells_next[i0].cell_temp = cells_curr[i0].cell_temp + 0.05 * kelvin;
-            cells_next[i0].cell_rh = cells_curr[i0].cell_rh + 0.005 * crate::uom::units::dimensionless;
+            cells_next[i0].cell_rh =
+                cells_curr[i0].cell_rh + 0.005 * crate::uom::units::dimensionless;
             cells_next[i0].relaxation_factor = 1.0;
 
             // cell 1: delta_t = +0.11 K (diverging), delta_rh = +0.005
             let i1 = mat_indices[1];
             cells_next[i1].cell_temp = cells_curr[i1].cell_temp + 0.11 * kelvin;
-            cells_next[i1].cell_rh = cells_curr[i1].cell_rh + 0.005 * crate::uom::units::dimensionless;
+            cells_next[i1].cell_rh =
+                cells_curr[i1].cell_rh + 0.005 * crate::uom::units::dimensionless;
             cells_next[i1].relaxation_factor = 1.0;
 
             // cell 2: delta_t = 0.0, delta_rh = 0.0 (no movement)
@@ -179,7 +180,10 @@ mod tests {
         // We need curr cells' relaxation_factor = 1.0 for the formula.
         // The fixture initialises them to 1.0 by default, so this should already be true.
 
-        let knobs = RelaxKnobs { min_alpha: 0.1, max_alpha: 1.5 };
+        let knobs = RelaxKnobs {
+            min_alpha: 0.1,
+            max_alpha: 1.5,
+        };
 
         // Prime with iter=0 (records deltas, does NOT apply Aitken).
         // prev_delta after iter=0: cell0: 0.05, cell1: 0.11, cell2: 0.0

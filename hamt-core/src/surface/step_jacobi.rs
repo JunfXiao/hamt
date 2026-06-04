@@ -1,12 +1,17 @@
 use crate::{
-    parallel::{par_or_seq, par_or_seq_mut}, uom::{
-        Quantity, constants::{WATER_LATENT_HEAT, WATER_SPECIFIC_HEAT}, dimensions::{
-            HeatCapacity, Mass, MassFlux, MassFluxPerTemperature, Power, SpecificEnergy, ThermalConductance, Time, VaporConductance
-        }, units::{
-            dimensionless, j_per_kg, k_per_w, kelvin, kg_per_m3, kg_per_s,
-            kilograms, pa_s_per_kg, pascals, seconds, w_per_k, watts
-        }
-    }
+    parallel::{par_or_seq, par_or_seq_mut},
+    uom::{
+        Quantity,
+        constants::{WATER_LATENT_HEAT, WATER_SPECIFIC_HEAT},
+        dimensions::{
+            HeatCapacity, Mass, MassFlux, MassFluxPerTemperature, Power, SpecificEnergy,
+            ThermalConductance, Time, VaporConductance,
+        },
+        units::{
+            dimensionless, j_per_kg, k_per_w, kelvin, kg_per_m3, kg_per_s, kilograms, pa_s_per_kg,
+            pascals, seconds, w_per_k, watts,
+        },
+    },
 };
 
 use super::*;
@@ -47,8 +52,16 @@ pub(super) fn relax_write_cell(
     settings: &HamtSettings,
 ) {
     let alpha = cell.relaxation_factor;
-    let relaxed_t = if next_t.is_finite() { next_t * alpha + curr_t * (1.0 - alpha) } else { curr_t };
-    let relaxed_rh = if next_rh.is_finite() { next_rh * alpha + curr_rh * (1.0 - alpha) } else { curr_rh };
+    let relaxed_t = if next_t.is_finite() {
+        next_t * alpha + curr_t * (1.0 - alpha)
+    } else {
+        curr_t
+    };
+    let relaxed_rh = if next_rh.is_finite() {
+        next_rh * alpha + curr_rh * (1.0 - alpha)
+    } else {
+        curr_rh
+    };
     cell.cell_temp = relaxed_t;
     cell.cell_rh = relaxed_rh.clamp(Quantity(0.0), Quantity(1.01));
     cell.calc_dependent_state(bc, settings);
@@ -205,12 +218,7 @@ impl Surface {
     }
 
     /// Cell-local heat sources `(q_adds, q_boundary)` for cell `i`.
-    fn cell_sources(
-        &self,
-        i: usize,
-        surf_curr: &Surface,
-        bc: &BoundaryCondition,
-    ) -> CellSources {
+    fn cell_sources(&self, i: usize, surf_curr: &Surface, bc: &BoundaryCondition) -> CellSources {
         let q_weight = surf_curr
             .user_defined_cell_idx
             .as_ref()
@@ -253,14 +261,22 @@ impl Surface {
         let a_tt: ThermalConductance<f64> = sums.oorsum + inertia.tcap / dt + l_eff * cross;
         let a_tp: Power<f64> = l_eff * sums.vpoosum * cell_curr.vp_sat;
         let a_pt: MassFluxPerTemperature<f64> = cross;
-        let a_pp: MassFlux<f64> = sums.phioosum + sums.vpoosum * cell_curr.vp_sat + inertia.wcap / dt;
-        let b_t: Power<f64> = sources.q_adds + sources.q_boundary
+        let a_pp: MassFlux<f64> =
+            sums.phioosum + sums.vpoosum * cell_curr.vp_sat + inertia.wcap / dt;
+        let b_t: Power<f64> = sources.q_adds
+            + sources.q_boundary
             + inertia.tcap * cell_prev.cell_temp / dt
             + l_eff * (cross * cell_curr.cell_temp);
-        let b_p: MassFlux<f64> = inertia.wcap * cell_prev.cell_rh / dt + cross * cell_curr.cell_temp;
+        let b_p: MassFlux<f64> =
+            inertia.wcap * cell_prev.cell_rh / dt + cross * cell_curr.cell_temp;
         // strip: linear-algebra-kernel boundary (typed in, typed out at caller)
         (
-            crate::solver::block_2x2::Block2x2 { a: a_tt.0, b: a_tp.0, c: a_pt.0, d: a_pp.0 },
+            crate::solver::block_2x2::Block2x2 {
+                a: a_tt.0,
+                b: a_tp.0,
+                c: a_pt.0,
+                d: a_pp.0,
+            },
             (b_t.0, b_p.0),
         )
     }
@@ -470,8 +486,12 @@ impl Surface {
                 let curr_rh = surface_curr.cells[[i, 0, 0]].cell_rh;
                 relax_write_cell(
                     &mut self.cells[[i, 0, 0]],
-                    next_temp, next_rh, curr_temp, curr_rh,
-                    bc, settings,
+                    next_temp,
+                    next_rh,
+                    curr_temp,
+                    curr_rh,
+                    bc,
+                    settings,
                 );
             }
         }
@@ -504,21 +524,29 @@ mod relax_write_cell_tests {
         // ── Case 1: normal blend ────────────────────────────────────────
         let mut cell = make_material_cell();
         cell.relaxation_factor = 0.5;
-        let next_t   = 300.0 * kelvin;
-        let curr_t   = 290.0 * kelvin;
-        let next_rh  = 0.8 * dimensionless;
-        let curr_rh  = 0.4 * dimensionless;
+        let next_t = 300.0 * kelvin;
+        let curr_t = 290.0 * kelvin;
+        let next_rh = 0.8 * dimensionless;
+        let curr_rh = 0.4 * dimensionless;
         relax_write_cell(&mut cell, next_t, next_rh, curr_t, curr_rh, bc, settings);
-        let t_out  = cell.cell_temp.value_in(kelvin);
+        let t_out = cell.cell_temp.value_in(kelvin);
         let rh_out = cell.cell_rh.value();
-        assert!((t_out - 295.0).abs() < 1e-9,  "expected 295 K, got {t_out}");
-        assert!((rh_out - 0.6).abs() < 1e-9,   "expected 0.6 RH, got {rh_out}");
+        assert!((t_out - 295.0).abs() < 1e-9, "expected 295 K, got {t_out}");
+        assert!((rh_out - 0.6).abs() < 1e-9, "expected 0.6 RH, got {rh_out}");
 
         // ── Case 2: next_rh = 2.0 → clamped to 1.01 ───────────────────
         let mut cell2 = make_material_cell();
         cell2.relaxation_factor = 0.5;
-        let next_rh_high = 2.0 * dimensionless;   // blended = 0.5*2.0 + 0.5*0.4 = 1.2 > 1.01
-        relax_write_cell(&mut cell2, next_t, next_rh_high, curr_t, curr_rh, bc, settings);
+        let next_rh_high = 2.0 * dimensionless; // blended = 0.5*2.0 + 0.5*0.4 = 1.2 > 1.01
+        relax_write_cell(
+            &mut cell2,
+            next_t,
+            next_rh_high,
+            curr_t,
+            curr_rh,
+            bc,
+            settings,
+        );
         let rh_clamped = cell2.cell_rh.value();
         assert!(
             (rh_clamped - 1.01).abs() < 1e-9,
@@ -542,8 +570,8 @@ mod relax_write_cell_tests {
 mod build_cell_block_tests {
     use super::*;
     use crate::uom::units::{
-        dimensionless, j_per_k, j_per_kg, kelvin, kg_per_s, kilograms, pa_per_k, pascals,
-        seconds, w_per_k, watts,
+        dimensionless, j_per_k, j_per_kg, kelvin, kg_per_s, kilograms, pa_per_k, pascals, seconds,
+        w_per_k, watts,
     };
 
     /// `build_cell_block` must reproduce regression-pinned against the implementation
@@ -594,23 +622,53 @@ mod build_cell_block_tests {
         let exp_a_pt: MassFluxPerTemperature<f64> = cross;
         let exp_a_pp: MassFlux<f64> =
             sums.phioosum + sums.vpoosum * cell_curr.vp_sat + inertia.wcap / dt;
-        let exp_b_t: Power<f64> = sources.q_adds + sources.q_boundary
+        let exp_b_t: Power<f64> = sources.q_adds
+            + sources.q_boundary
             + inertia.tcap * cell_prev.cell_temp / dt
             + l_eff * (cross * cell_curr.cell_temp);
         let exp_b_p: MassFlux<f64> =
             inertia.wcap * cell_prev.cell_rh / dt + cross * cell_curr.cell_temp;
 
-        let (diag, (b_t0, b_p0)) = Surface::build_cell_block(
-            &sums, &inertia, &sources, &cell_curr, &cell_prev, l_eff, dt,
-        );
+        let (diag, (b_t0, b_p0)) =
+            Surface::build_cell_block(&sums, &inertia, &sources, &cell_curr, &cell_prev, l_eff, dt);
 
         let rel = |got: f64, exp: f64| (got - exp).abs() / exp.abs().max(1.0);
-        assert!(rel(diag.a, exp_a_tt.0) < 1e-6, "a_tt: {} vs {}", diag.a, exp_a_tt.0);
-        assert!(rel(diag.b, exp_a_tp.0) < 1e-6, "a_tp: {} vs {}", diag.b, exp_a_tp.0);
-        assert!(rel(diag.c, exp_a_pt.0) < 1e-6, "a_pt: {} vs {}", diag.c, exp_a_pt.0);
-        assert!(rel(diag.d, exp_a_pp.0) < 1e-6, "a_pp: {} vs {}", diag.d, exp_a_pp.0);
-        assert!(rel(b_t0, exp_b_t.0) < 1e-6, "b_t0: {} vs {}", b_t0, exp_b_t.0);
-        assert!(rel(b_p0, exp_b_p.0) < 1e-6, "b_p0: {} vs {}", b_p0, exp_b_p.0);
+        assert!(
+            rel(diag.a, exp_a_tt.0) < 1e-6,
+            "a_tt: {} vs {}",
+            diag.a,
+            exp_a_tt.0
+        );
+        assert!(
+            rel(diag.b, exp_a_tp.0) < 1e-6,
+            "a_tp: {} vs {}",
+            diag.b,
+            exp_a_tp.0
+        );
+        assert!(
+            rel(diag.c, exp_a_pt.0) < 1e-6,
+            "a_pt: {} vs {}",
+            diag.c,
+            exp_a_pt.0
+        );
+        assert!(
+            rel(diag.d, exp_a_pp.0) < 1e-6,
+            "a_pp: {} vs {}",
+            diag.d,
+            exp_a_pp.0
+        );
+        assert!(
+            rel(b_t0, exp_b_t.0) < 1e-6,
+            "b_t0: {} vs {}",
+            b_t0,
+            exp_b_t.0
+        );
+        assert!(
+            rel(b_p0, exp_b_p.0) < 1e-6,
+            "b_p0: {} vs {}",
+            b_p0,
+            exp_b_p.0
+        );
 
         // ── End-to-end: add neighbour terms + Cramer-solve, compare with a
         //    direct 2×2 solve of the same fully-assembled system. ───────────
@@ -627,7 +685,13 @@ mod build_cell_block_tests {
         let inv = diag.try_inv(1e-30).expect("non-singular");
         let (t_ref, p_ref) = inv.mul_vec((b_t, b_p));
 
-        assert!((t_solver - t_ref).abs() < 1e-9, "T solve mismatch: {t_solver} vs {t_ref}");
-        assert!((p_solver - p_ref).abs() < 1e-9, "phi solve mismatch: {p_solver} vs {p_ref}");
+        assert!(
+            (t_solver - t_ref).abs() < 1e-9,
+            "T solve mismatch: {t_solver} vs {t_ref}"
+        );
+        assert!(
+            (p_solver - p_ref).abs() < 1e-9,
+            "phi solve mismatch: {p_solver} vs {p_ref}"
+        );
     }
 }

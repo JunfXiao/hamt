@@ -1,7 +1,7 @@
 use crate::uom::units::{dimensionless, k_per_w, kelvin, pa_s_per_kg, pascals};
 
-use super::*;
 use super::step_jacobi::relax_write_cell;
+use super::*;
 
 use anyhow::Result;
 
@@ -56,7 +56,12 @@ impl Surface {
         // Collect (virtual_li, [nbr_li, ...]) before any cell borrows to avoid
         // simultaneous &self and &self.cells conflicts in the inner loop.
         let virtual_nbr_pairs: Vec<(usize, Vec<usize>)> = (0..self.cells.len())
-            .filter(|&li| matches!(self.cells[[li, 0, 0]].cell_type, crate::cell::CellType::Virtual(_)))
+            .filter(|&li| {
+                matches!(
+                    self.cells[[li, 0, 0]].cell_type,
+                    crate::cell::CellType::Virtual(_)
+                )
+            })
             .map(|li| {
                 let nbrs: Vec<usize> = self.neighbor_indices(li, nx, 0).collect();
                 (li, nbrs)
@@ -75,9 +80,8 @@ impl Surface {
 
             for nbr_li in nbr_indices {
                 let nbr = &self.cells[[nbr_li, 0, 0]];
-                let (therm_r, vapor_r) = Surface::calculate_resistance_pair(
-                    cell, nbr, bc.pressure_air, 0,
-                );
+                let (therm_r, vapor_r) =
+                    Surface::calculate_resistance_pair(cell, nbr, bc.pressure_air, 0);
                 if vapor_r > 1e-12 * pa_s_per_kg {
                     let inv_v = 1.0 / vapor_r.value_in(pa_s_per_kg);
                     sum_inv_v += inv_v;
@@ -102,9 +106,12 @@ impl Surface {
             } else {
                 cell.cell_vp.value_in(pascals)
             };
-            let psat = crate::physics::psy_psat_fn_temp(new_t * kelvin)
-                .value_in(pascals);
-            let new_rh = if psat > 0.0 { (new_vp / psat).max(0.0).min(1.01) } else { 0.0 };
+            let psat = crate::physics::psy_psat_fn_temp(new_t * kelvin).value_in(pascals);
+            let new_rh = if psat > 0.0 {
+                (new_vp / psat).max(0.0).min(1.01)
+            } else {
+                0.0
+            };
             virtual_updates.push((li, new_vp, new_t, new_rh));
         }
 
@@ -125,11 +132,12 @@ impl Surface {
         // two (sync_state_from copied them and update_cell_properties is idempotent
         // on that data), so this only swaps lagged BC/Virtual coefficients for
         // current-iter ones — restoring near-Newton convergence.
-        let system = crate::solver::assembly::assemble_1d(
-            self, surface_prev, bc, settings,
-        );
+        let system = crate::solver::assembly::assemble_1d(self, surface_prev, bc, settings);
         let solution = crate::solver::block_tridiag::solve(
-            &system.lower, &system.diag, &system.upper, &system.rhs,
+            &system.lower,
+            &system.diag,
+            &system.upper,
+            &system.rhs,
         )
         .map_err(|e| anyhow::anyhow!("block-tridiag solve failed: {:?}", e))?;
 
@@ -156,7 +164,15 @@ impl Surface {
             let t_new_typed = t_new_k * crate::uom::units::kelvin;
             let phi_new_typed = phi_new_raw * crate::uom::units::dimensionless;
 
-            relax_write_cell(cell, t_new_typed, phi_new_typed, curr_temp, curr_rh, bc, settings);
+            relax_write_cell(
+                cell,
+                t_new_typed,
+                phi_new_typed,
+                curr_temp,
+                curr_rh,
+                bc,
+                settings,
+            );
         }
 
         Ok(())
@@ -196,33 +212,42 @@ mod block_tridiag_tests {
         }
         // Apply BCs and refresh dependent state in surface_curr/prev so
         // boundary cells (incl. virtual) reflect the symmetric BC.
-        mgr.surface_curr.apply_boundary_coefficients(
-            &mgr.boundary_condition, &mgr.settings,
-        ).unwrap();
-        mgr.surface_prev.apply_boundary_coefficients(
-            &mgr.boundary_condition, &mgr.settings,
-        ).unwrap();
-        mgr.surface_curr.update_cell_properties(
-            &mgr.boundary_condition, &mgr.settings,
-        ).unwrap();
-        mgr.surface_prev.update_cell_properties(
-            &mgr.boundary_condition, &mgr.settings,
-        ).unwrap();
+        mgr.surface_curr
+            .apply_boundary_coefficients(&mgr.boundary_condition, &mgr.settings)
+            .unwrap();
+        mgr.surface_prev
+            .apply_boundary_coefficients(&mgr.boundary_condition, &mgr.settings)
+            .unwrap();
+        mgr.surface_curr
+            .update_cell_properties(&mgr.boundary_condition, &mgr.settings)
+            .unwrap();
+        mgr.surface_prev
+            .update_cell_properties(&mgr.boundary_condition, &mgr.settings)
+            .unwrap();
 
         // surface_next is scratch; clone from surface_curr.
         let mut surface_next = mgr.surface_curr.clone();
-        surface_next.calculate_iteration_block_tridiag(
-            &mgr.settings, &mgr.boundary_condition,
-            &mgr.surface_prev, &mgr.surface_curr,
-        ).unwrap();
+        surface_next
+            .calculate_iteration_block_tridiag(
+                &mgr.settings,
+                &mgr.boundary_condition,
+                &mgr.surface_prev,
+                &mgr.surface_curr,
+            )
+            .unwrap();
 
         for (cell_n, cell_c) in surface_next.cells.iter().zip(mgr.surface_curr.cells.iter()) {
-            if !matches!(cell_n.cell_type, crate::cell::CellType::Material(_)) { continue; }
+            if !matches!(cell_n.cell_type, crate::cell::CellType::Material(_)) {
+                continue;
+            }
             let dt_k = (cell_n.cell_temp - cell_c.cell_temp)
-                .value_in(crate::uom::units::kelvin).abs();
+                .value_in(crate::uom::units::kelvin)
+                .abs();
             let drh = (cell_n.cell_rh - cell_c.cell_rh).value().abs();
-            assert!(dt_k < 1e-5 && drh < 1e-5,
-                    "ΔT={dt_k}, Δφ={drh} at supposed equilibrium");
+            assert!(
+                dt_k < 1e-5 && drh < 1e-5,
+                "ΔT={dt_k}, Δφ={drh} at supposed equilibrium"
+            );
         }
     }
 
@@ -245,7 +270,8 @@ mod block_tridiag_tests {
                     cell.cell_rh = phi_wall;
                 }
             }
-            s.update_cell_properties(&mgr.boundary_condition, &mgr.settings).unwrap();
+            s.update_cell_properties(&mgr.boundary_condition, &mgr.settings)
+                .unwrap();
         }
         mgr.boundary_condition.temp_inside_air = celsius_to_kelvin(15.0);
         mgr.boundary_condition.temp_inside_air_moisture = celsius_to_kelvin(15.0);
@@ -255,16 +281,24 @@ mod block_tridiag_tests {
         mgr.boundary_condition.rh_outside_air = 0.3 * crate::uom::units::dimensionless;
 
         let mut surface_next = mgr.surface_curr.clone();
-        surface_next.calculate_iteration_block_tridiag(
-            &mgr.settings, &mgr.boundary_condition,
-            &mgr.surface_prev, &mgr.surface_curr,
-        ).unwrap();
+        surface_next
+            .calculate_iteration_block_tridiag(
+                &mgr.settings,
+                &mgr.boundary_condition,
+                &mgr.surface_prev,
+                &mgr.surface_curr,
+            )
+            .unwrap();
 
         for cell in surface_next.cells.iter() {
-            if !matches!(cell.cell_type, crate::cell::CellType::Material(_)) { continue; }
+            if !matches!(cell.cell_type, crate::cell::CellType::Material(_)) {
+                continue;
+            }
             let t_new = cell.cell_temp.value_in(crate::uom::units::kelvin);
-            assert!(t_new <= t_wall.value_in(crate::uom::units::kelvin) + 1e-3,
-                    "T_next {t_new} K > T_curr 298.15 K — wrong direction");
+            assert!(
+                t_new <= t_wall.value_in(crate::uom::units::kelvin) + 1e-3,
+                "T_next {t_new} K > T_curr 298.15 K — wrong direction"
+            );
         }
     }
 
@@ -351,9 +385,7 @@ mod block_tridiag_tests {
                     cell.cell_temp = bogus_t;
                     poked_conv = true;
                 }
-                crate::cell::CellType::Virtual(
-                    crate::cell::BoundaryLocation::Interior,
-                ) => {
+                crate::cell::CellType::Virtual(crate::cell::BoundaryLocation::Interior) => {
                     cell.cell_temp = bogus_t;
                     poked_virt = true;
                 }
@@ -376,7 +408,9 @@ mod block_tridiag_tests {
             .unwrap();
 
         for (cf, cs) in next_fresh.cells.iter().zip(next_stale.cells.iter()) {
-            if !matches!(cf.cell_type, crate::cell::CellType::Material(_)) { continue; }
+            if !matches!(cf.cell_type, crate::cell::CellType::Material(_)) {
+                continue;
+            }
             let dt = (cf.cell_temp - cs.cell_temp)
                 .value_in(crate::uom::units::kelvin)
                 .abs();

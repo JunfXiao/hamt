@@ -1,10 +1,10 @@
 //! Simulation-wide settings and solver-method enum.
 
-use crate::uom::dimensions::{Dimensionless, Power, Temperature, Time};
-use crate::uom::units::{dimensionless, kelvin};
-use crate::uom::dimensions::Length;
 use crate::physics::geometry::{Pt3D, Size3D};
+use crate::uom::dimensions::Length;
+use crate::uom::dimensions::{Dimensionless, Power, Temperature, Time};
 use crate::uom::units;
+use crate::uom::units::{dimensionless, kelvin};
 use std::ops::Div;
 
 pub const MAX_ALPHA: f64 = 1.5;

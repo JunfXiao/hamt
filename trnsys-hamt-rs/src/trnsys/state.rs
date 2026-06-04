@@ -3,14 +3,12 @@ use std::path::{Path, PathBuf};
 
 use csv::Writer;
 
+use crate::trnsys::iteration_mode::IterationMode;
+use crate::trnsys::param::TrnSysValue;
+use crate::trnsys::{get_input_value, get_output_value, get_parameter_value};
 use hamt_core::hamt_manager::HamtManager;
 use hamt_core::uom::dimensions::Time;
 use hamt_core::uom::units::hours;
-use crate::trnsys::iteration_mode::IterationMode;
-use crate::trnsys::param::TrnSysValue;
-use crate::trnsys::{
-    get_input_value, get_output_value, get_parameter_value,
-};
 
 const OUTPUT_SIZE: usize = 11;
 
@@ -82,7 +80,6 @@ impl TrnSysState {
                 value: get_parameter_value(i),
             })
             .collect();
-
     }
 
     pub fn read_input_values(&mut self) {

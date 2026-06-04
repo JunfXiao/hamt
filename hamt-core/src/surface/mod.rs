@@ -5,7 +5,8 @@ use serde::Serialize;
 use crate::cell::{BoundaryLocation, Cell, CellType};
 use crate::physics::geometry::Size3D;
 use crate::uom::dimensions::{
-    Area, Density, Dimensionless, EnergyFluxDensity, Length, Mass, MassFluxDensity, Temperature, VaporTransportCoeff
+    Area, Density, Dimensionless, EnergyFluxDensity, Length, Mass, MassFluxDensity, Temperature,
+    VaporTransportCoeff,
 };
 use crate::{boundary::BoundaryCondition, hamt_manager::HamtSettings, physics};
 use anyhow::Result;
@@ -69,7 +70,6 @@ pub struct Surface {
 
     // ========= Cell Index Helpers =========
     cells_idx_map: HashMap<CellType, Vec<[usize; 3]>>,
-
 
     // ========= Boundary-adjacent material cell indices =========
     /// Index (x-axis) of the outermost interior material cell (last Material cell in x).

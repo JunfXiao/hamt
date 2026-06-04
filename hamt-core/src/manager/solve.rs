@@ -1,19 +1,19 @@
 //! Outer-loop driver and per-solver dispatch functions.
 
-use crate::accel::{Accelerator, Aitken, RelaxKnobs};
 use crate::accel::anderson::AndersonAccelerator;
+use crate::accel::{Accelerator, Aitken, RelaxKnobs};
 use crate::cell::CellType;
 use crate::surface::Surface;
+use crate::uom;
 use crate::uom::constants::VAPOR_GAS_CONSTANT;
 use crate::uom::units::{hours, kelvin, m_per_s};
-use crate::uom;
 use anyhow::Result;
 use std::mem;
 use tracing::debug;
 use tracing::warn;
 
-use super::settings::{HamtSettings, MAX_ALPHA, SolverMethod};
 use super::HamtManager;
+use super::settings::{HamtSettings, MAX_ALPHA, SolverMethod};
 
 /// Option-(2) adaptive min-iteration guard for the BlockJacobi outer loop.
 /// BlockJacobi with neighbour lagging propagates a BC perturbation exactly one
@@ -340,9 +340,7 @@ impl HamtManager {
                     return Ok(true);
                 }
 
-                if !criterion_met
-                    && let Some(stall_patience) = exit.stall_patience
-                {
+                if !criterion_met && let Some(stall_patience) = exit.stall_patience {
                     let current_max = stats.max_delta_t_k.max(stats.max_delta_rh * 1000.0);
                     if current_max < best_max_delta * 0.99 {
                         best_max_delta = current_max;

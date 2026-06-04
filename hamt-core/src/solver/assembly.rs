@@ -22,8 +22,8 @@ use crate::hamt_manager::HamtSettings;
 use crate::surface::Surface;
 use crate::uom::constants::{WATER_LATENT_HEAT, WATER_SPECIFIC_HEAT};
 use crate::uom::units::{
-    dimensionless, j_per_kg, k_per_w, kelvin, kg_per_m3, kg_per_s,
-    kilograms, m2_per_s, pa_s_per_kg, pascals, s_per_kg, w_per_k, watts,
+    dimensionless, j_per_kg, k_per_w, kelvin, kg_per_m3, kg_per_s, kilograms, m2_per_s,
+    pa_s_per_kg, pascals, s_per_kg, w_per_k, watts,
 };
 
 use super::block_2x2::Block2x2;
@@ -33,9 +33,9 @@ use super::block_2x2::Block2x2;
 /// zero-filled per the `block_tridiag::solve` API contract.
 pub(crate) struct AssembledSystem {
     pub(crate) lower: Vec<Block2x2>,
-    pub(crate) diag:  Vec<Block2x2>,
+    pub(crate) diag: Vec<Block2x2>,
     pub(crate) upper: Vec<Block2x2>,
-    pub(crate) rhs:   Vec<(f64, f64)>,
+    pub(crate) rhs: Vec<(f64, f64)>,
     /// Material cells' linear indices into `surface.cells`, in the
     /// same order as `diag` rows. Used to scatter the solve result back.
     pub(crate) material_indices: Vec<usize>,
@@ -59,7 +59,9 @@ pub(crate) fn assemble_1d(
     // Lookup table to recognise material-material vs material-boundary
     // neighbours during assembly.
     let mut is_material_at = vec![false; surface.cells.len()];
-    for &li in &mat_idx { is_material_at[li] = true; }
+    for &li in &mat_idx {
+        is_material_at[li] = true;
+    }
     // Map material-cell linear-index → row in the tridiag system.
     let mut row_of = vec![usize::MAX; surface.cells.len()];
     for (row, &li) in mat_idx.iter().enumerate() {
@@ -67,9 +69,9 @@ pub(crate) fn assemble_1d(
     }
 
     let mut lower = vec![Block2x2::zero(); n];
-    let mut diag  = vec![Block2x2::zero(); n];
+    let mut diag = vec![Block2x2::zero(); n];
     let mut upper = vec![Block2x2::zero(); n];
-    let mut rhs   = vec![(0.0, 0.0); n];
+    let mut rhs = vec![(0.0, 0.0); n];
 
     let dt_s = settings.timestep;
     let nx = surface.cells.raw_dim()[0];
@@ -84,8 +86,11 @@ pub(crate) fn assemble_1d(
         // When latent_heat_enabled is false the cross-coupling vanishes entirely.
         let l_eff: crate::uom::dimensions::SpecificEnergy<f64> = if settings.latent_heat_enabled {
             1.0 * WATER_LATENT_HEAT
-                + if settings.sorption_enthalpy_enabled { cell_curr.h_sorp_diff }
-                  else { 0.0 * j_per_kg }
+                + if settings.sorption_enthalpy_enabled {
+                    cell_curr.h_sorp_diff
+                } else {
+                    0.0 * j_per_kg
+                }
         } else {
             0.0 * j_per_kg
         };
@@ -99,13 +104,15 @@ pub(crate) fn assemble_1d(
             * cell_curr.volume;
         let wcap = if cell_curr.dwd_phi > 1e-10 * kg_per_m3 {
             cell_curr.dwd_phi * cell_curr.volume
-        } else { 1.0e-10 * kilograms };
+        } else {
+            1.0e-10 * kilograms
+        };
 
         // Local 2×2 diagonal scalars (f64).
         let mut d_tt: f64 = 0.0; // [W/K]
         let mut d_pp: f64 = 0.0; // [kg/s]
-        let mut b_t:  f64 = 0.0; // [W]
-        let mut b_p:  f64 = 0.0; // [kg/s]
+        let mut b_t: f64 = 0.0; // [W]
+        let mut b_p: f64 = 0.0; // [kg/s]
 
         // Inertial terms — always go to diagonal + RHS.
         // strip: assemble enters the linear-algebra kernel
@@ -114,21 +121,28 @@ pub(crate) fn assemble_1d(
         d_tt += tcap_per_dt;
         d_pp += wcap_per_dt;
         // strip: kernel boundary
-        b_t  += tcap_per_dt * cell_prev.cell_temp.value_in(kelvin);
-        b_p  += wcap_per_dt * cell_prev.cell_rh.value();
+        b_t += tcap_per_dt * cell_prev.cell_temp.value_in(kelvin);
+        b_p += wcap_per_dt * cell_prev.cell_rh.value();
 
         // Boundary-deposit and user-defined source on cell i.
         let q_weight = surface
             .user_defined_cell_idx
             .as_ref()
-            .map(|w| w.iter().filter(|(idx, _)| idx[0] == i).map(|(_, w)| w).sum::<f64>())
+            .map(|w| {
+                w.iter()
+                    .filter(|(idx, _)| idx[0] == i)
+                    .map(|(_, w)| w)
+                    .sum::<f64>()
+            })
             .unwrap_or(0.0);
         let q_adds = bc.q_addition_userdef * q_weight;
         let q_boundary_energy = if Some(i) == surface.interior_surface_material_idx {
             bc.additional_energy_int
         } else if Some(i) == surface.exterior_surface_material_idx {
             bc.additional_energy_ext
-        } else { 0.0 * watts };
+        } else {
+            0.0 * watts
+        };
         // strip: kernel boundary
         b_t += (q_adds + q_boundary_energy).value_in(watts);
 
@@ -152,43 +166,53 @@ pub(crate) fn assemble_1d(
             let nbr_curr = &surface.cells[[nbr_li, 0, 0]];
 
             // Resistance pair using the lagged state.
-            let (therm_r, vapor_r) = Surface::calculate_resistance_pair(
-                cell_curr, nbr_curr, bc.pressure_air, 0,
-            );
+            let (therm_r, vapor_r) =
+                Surface::calculate_resistance_pair(cell_curr, nbr_curr, bc.pressure_air, 0);
 
             // Conductances (zero-on-degeneracy guards mirror the existing path).
             // strip: kernel boundary
             let inv_th = if therm_r > 1e-12 * k_per_w {
                 1.0 / therm_r.value_in(k_per_w)
-            } else { 0.0 };
+            } else {
+                0.0
+            };
             let inv_vapor = if vapor_r > 1e-12 * pa_s_per_kg {
                 1.0 / vapor_r.value_in(pa_s_per_kg)
-            } else { 0.0 };
+            } else {
+                0.0
+            };
 
             // Liquid (RH-driven) inter-cell resistance — mirrors the
             // existing per-cell branch in calculate_physics_step.
-            let overlap_area = cell_curr.size.area_along(0).min(nbr_curr.size.area_along(0));
-            let rh_r1 = if cell_curr.dw > 1e-20 * m2_per_s
-                          && cell_curr.dwd_phi > 1e-20 * kg_per_m3 {
-                (cell_curr.size.x().abs() * 0.5)
-                    / (overlap_area * cell_curr.dw * cell_curr.dwd_phi)
-            } else { 0.0f64 * s_per_kg };
-            let rh_r2 = if nbr_curr.dw > 1e-20 * m2_per_s
-                          && nbr_curr.dwd_phi > 1e-20 * kg_per_m3 {
-                (nbr_curr.size.x().abs() * 0.5)
-                    / (overlap_area * nbr_curr.dw * nbr_curr.dwd_phi)
-            } else { 0.0f64 * s_per_kg };
+            let overlap_area = cell_curr
+                .size
+                .area_along(0)
+                .min(nbr_curr.size.area_along(0));
+            let rh_r1 = if cell_curr.dw > 1e-20 * m2_per_s && cell_curr.dwd_phi > 1e-20 * kg_per_m3
+            {
+                (cell_curr.size.x().abs() * 0.5) / (overlap_area * cell_curr.dw * cell_curr.dwd_phi)
+            } else {
+                0.0f64 * s_per_kg
+            };
+            let rh_r2 = if nbr_curr.dw > 1e-20 * m2_per_s && nbr_curr.dwd_phi > 1e-20 * kg_per_m3 {
+                (nbr_curr.size.x().abs() * 0.5) / (overlap_area * nbr_curr.dw * nbr_curr.dwd_phi)
+            } else {
+                0.0f64 * s_per_kg
+            };
             let r_total_phi = (rh_r1 + rh_r2) * dimensionless;
             let inv_phi = if r_total_phi > 1e-13 * dimensionless / kg_per_s
-                            && r_total_phi < f64::MAX * dimensionless / kg_per_s {
+                && r_total_phi < f64::MAX * dimensionless / kg_per_s
+            {
                 // strip: kernel boundary
                 (1.0 / r_total_phi).value_in(kg_per_s)
-            } else { 0.0 };
+            } else {
+                0.0
+            };
 
             // Local Psat / dPsat-dT for the NEIGHBOUR (lagged).
             // strip: kernel boundary
-            let psat_n  = nbr_curr.vp_sat.value_in(pascals);
-            let temp_n  = nbr_curr.cell_temp.value_in(kelvin); // strip: kernel boundary
+            let psat_n = nbr_curr.vp_sat.value_in(pascals);
+            let temp_n = nbr_curr.cell_temp.value_in(kelvin); // strip: kernel boundary
             // Use cell_vp directly: boundary cells set cell_vp explicitly
             // (e.g. Radiation cell sets cell_vp = 0), so psat_n * phi_n
             // is wrong for them. The material-neighbour off-diagonals still
@@ -248,18 +272,17 @@ pub(crate) fn assemble_1d(
                 d_pp += inv_phi + inv_vapor * psat_curr.value_in(pascals); // strip: kernel boundary
                 // RHS additions for the boundary side.
                 // strip: kernel boundary
-                b_t += inv_th * temp_n
-                    + l_eff.value_in(j_per_kg) * inv_vapor * vp_n;
+                b_t += inv_th * temp_n + l_eff.value_in(j_per_kg) * inv_vapor * vp_n;
                 b_p += inv_phi * phi_b + inv_vapor * vp_n;
             }
         }
 
         // Cell-local Taylor cross-coupling. Uses sum over ALL neighbours.
-        let l_eff_v      = l_eff.value_in(j_per_kg);          // strip
-        let psat_curr_v  = psat_curr.value_in(pascals);         // strip
+        let l_eff_v = l_eff.value_in(j_per_kg); // strip
+        let psat_curr_v = psat_curr.value_in(pascals); // strip
         let dpsdt_curr_v = d_psat_d_t.value_in(crate::uom::units::pa_per_k); // strip
-        let cross        = vpoosum_si * phi_k.value() * dpsdt_curr_v;
-        let t_curr_v     = cell_curr.cell_temp.value_in(kelvin); // strip
+        let cross = vpoosum_si * phi_k.value() * dpsdt_curr_v;
+        let t_curr_v = cell_curr.cell_temp.value_in(kelvin); // strip
 
         // Diagonal cross terms (within the same cell — they are NOT
         // attached to a neighbour, they're the local linearisation).
@@ -274,11 +297,22 @@ pub(crate) fn assemble_1d(
         b_t += l_eff_v * cross * t_curr_v;
         b_p += cross * t_curr_v;
 
-        diag[row] = Block2x2 { a: d_tt, b: d_tp, c: d_pt, d: d_pp };
+        diag[row] = Block2x2 {
+            a: d_tt,
+            b: d_tp,
+            c: d_pt,
+            d: d_pp,
+        };
         rhs[row] = (b_t, b_p);
     }
 
-    AssembledSystem { lower, diag, upper, rhs, material_indices: mat_idx }
+    AssembledSystem {
+        lower,
+        diag,
+        upper,
+        rhs,
+        material_indices: mat_idx,
+    }
 }
 
 #[cfg(test)]
@@ -295,8 +329,10 @@ mod tests {
     fn material_indices_consistent_with_assembled_size() {
         let mgr = fixture(5);
         let sys = assemble_1d(
-            &mgr.surface_curr, &mgr.surface_prev,
-            &mgr.boundary_condition, &mgr.settings,
+            &mgr.surface_curr,
+            &mgr.surface_prev,
+            &mgr.boundary_condition,
+            &mgr.settings,
         );
         assert_eq!(sys.material_indices.len(), sys.diag.len());
         assert_eq!(sys.lower.len(), sys.diag.len());
@@ -314,17 +350,29 @@ mod tests {
     fn boundary_off_diagonals_are_zero_blocks() {
         let mgr = fixture(5);
         let sys = assemble_1d(
-            &mgr.surface_curr, &mgr.surface_prev,
-            &mgr.boundary_condition, &mgr.settings,
+            &mgr.surface_curr,
+            &mgr.surface_prev,
+            &mgr.boundary_condition,
+            &mgr.settings,
         );
         let n = sys.diag.len();
         let z = crate::solver::block_2x2::Block2x2::zero();
-        assert!(sys.lower[0].a == z.a && sys.lower[0].b == z.b
-                && sys.lower[0].c == z.c && sys.lower[0].d == z.d,
-                "lower[0] must be zero, got {:?}", sys.lower[0]);
-        assert!(sys.upper[n - 1].a == z.a && sys.upper[n - 1].b == z.b
-                && sys.upper[n - 1].c == z.c && sys.upper[n - 1].d == z.d,
-                "upper[N-1] must be zero, got {:?}", sys.upper[n - 1]);
+        assert!(
+            sys.lower[0].a == z.a
+                && sys.lower[0].b == z.b
+                && sys.lower[0].c == z.c
+                && sys.lower[0].d == z.d,
+            "lower[0] must be zero, got {:?}",
+            sys.lower[0]
+        );
+        assert!(
+            sys.upper[n - 1].a == z.a
+                && sys.upper[n - 1].b == z.b
+                && sys.upper[n - 1].c == z.c
+                && sys.upper[n - 1].d == z.d,
+            "upper[N-1] must be zero, got {:?}",
+            sys.upper[n - 1]
+        );
     }
 
     /// Property: with a tiny wall (n_div = 1) every material cell has
@@ -333,8 +381,10 @@ mod tests {
     fn single_material_cell_has_no_off_diagonals() {
         let mgr = fixture(1);
         let sys = assemble_1d(
-            &mgr.surface_curr, &mgr.surface_prev,
-            &mgr.boundary_condition, &mgr.settings,
+            &mgr.surface_curr,
+            &mgr.surface_prev,
+            &mgr.boundary_condition,
+            &mgr.settings,
         );
         // (n_div=1 may still produce >1 cell after subdivision rules;
         //  the property holds even when n_mat = 1 — test gracefully.)
@@ -355,23 +405,35 @@ mod tests {
     fn assembled_system_residual_is_zero_at_solution() {
         let mgr = fixture(8);
         let sys = assemble_1d(
-            &mgr.surface_curr, &mgr.surface_prev,
-            &mgr.boundary_condition, &mgr.settings,
+            &mgr.surface_curr,
+            &mgr.surface_prev,
+            &mgr.boundary_condition,
+            &mgr.settings,
         );
-        let x = crate::solver::block_tridiag::solve(
-            &sys.lower, &sys.diag, &sys.upper, &sys.rhs,
-        ).expect("solve failed");
+        let x = crate::solver::block_tridiag::solve(&sys.lower, &sys.diag, &sys.upper, &sys.rhs)
+            .expect("solve failed");
         let n = sys.diag.len();
         let mut max_r = 0.0_f64;
         for i in 0..n {
             let dx = sys.diag[i].mul_vec(x[i]);
-            let lx = if i == 0 { (0.0, 0.0) } else { sys.lower[i].mul_vec(x[i - 1]) };
-            let ux = if i + 1 == n { (0.0, 0.0) } else { sys.upper[i].mul_vec(x[i + 1]) };
+            let lx = if i == 0 {
+                (0.0, 0.0)
+            } else {
+                sys.lower[i].mul_vec(x[i - 1])
+            };
+            let ux = if i + 1 == n {
+                (0.0, 0.0)
+            } else {
+                sys.upper[i].mul_vec(x[i + 1])
+            };
             let r0 = dx.0 + lx.0 + ux.0 - sys.rhs[i].0;
             let r1 = dx.1 + lx.1 + ux.1 - sys.rhs[i].1;
             max_r = max_r.max(r0.abs()).max(r1.abs());
         }
-        assert!(max_r < 1e-6, "assembled-system residual {max_r} exceeds 1e-6");
+        assert!(
+            max_r < 1e-6,
+            "assembled-system residual {max_r} exceeds 1e-6"
+        );
     }
 
     /// Property: at thermal-and-vapour equilibrium with the BCs, solving
@@ -401,12 +463,12 @@ mod tests {
                 cell.cell_rh = bc_rh;
             }
         }
-        mgr.surface_curr.update_cell_properties(
-            &mgr.boundary_condition, &mgr.settings,
-        ).unwrap();
-        mgr.surface_prev.update_cell_properties(
-            &mgr.boundary_condition, &mgr.settings,
-        ).unwrap();
+        mgr.surface_curr
+            .update_cell_properties(&mgr.boundary_condition, &mgr.settings)
+            .unwrap();
+        mgr.surface_prev
+            .update_cell_properties(&mgr.boundary_condition, &mgr.settings)
+            .unwrap();
 
         // Re-apply BCs now that temps/RH are uniform so boundary cells
         // see the consistent state.
@@ -418,12 +480,13 @@ mod tests {
             .unwrap();
 
         let sys = assemble_1d(
-            &mgr.surface_curr, &mgr.surface_prev,
-            &mgr.boundary_condition, &mgr.settings,
+            &mgr.surface_curr,
+            &mgr.surface_prev,
+            &mgr.boundary_condition,
+            &mgr.settings,
         );
-        let x = crate::solver::block_tridiag::solve(
-            &sys.lower, &sys.diag, &sys.upper, &sys.rhs,
-        ).expect("solve failed");
+        let x = crate::solver::block_tridiag::solve(&sys.lower, &sys.diag, &sys.upper, &sys.rhs)
+            .expect("solve failed");
         for (row, &li) in sys.material_indices.iter().enumerate() {
             let cell = mgr.surface_curr.cells.iter().nth(li).unwrap();
             let t_curr = cell.cell_temp.value_in(crate::uom::units::kelvin);
@@ -443,5 +506,6 @@ mod tests {
     /// Mass conservation property — covered by Phase-5 integration.
     #[test]
     #[ignore = "covered by Phase-5 integration; see comment"]
-    fn mass_conservation_property() { /* placeholder */ }
+    fn mass_conservation_property() { /* placeholder */
+    }
 }

@@ -1,6 +1,7 @@
 //! Adaptive sub-stepping state and flux accumulator.
 
 use crate::cell::{BoundaryLocation, CellType};
+use crate::error;
 use crate::surface::Surface;
 use crate::uom::dimensions::{
     ArealEnergyDensity, ArealMassDensity, Dimensionless, EnergyFluxDensity, MassFluxDensity, Time,
@@ -9,12 +10,11 @@ use crate::uom::units::{
     dimensionless, hours, j_per_m2, kelvin, kg_per_m2, kg_per_m2_s, seconds, w_per_m2,
 };
 use crate::uom::{Quantity, units};
-use crate::error;
 use anyhow::Result;
 use std::mem;
 
-use super::settings::{RhRate, TempRate};
 use super::HamtManager;
+use super::settings::{RhRate, TempRate};
 
 /// Accumulates time-weighted boundary fluxes across adaptive substeps.
 /// After all substeps, dividing each `*_dt` field by `total_time` yields the
@@ -197,7 +197,6 @@ impl HamtManager {
                 }
             }
 
-
             // Predictor Warm-Start
             // Use the predicted surface as the initial guess for the current step.
             //This can significantly reduce iterations for small steps, especially in the early phase of a macro-step where the state changes rapidly.
@@ -224,12 +223,17 @@ impl HamtManager {
                 continue;
             }
 
-
             // Decouple Integration Tolerance
             // Instead of using the global convergence tolerances, we define separate integration tolerances for temperature and relative humidity that are more lenient.
             // This allows the PI controller to make informed decisions based on the physical changes rather than strict solver convergence, which can be too tight for adaptive stepping.
-            let integ_tol_t: crate::uom::dimensions::Temperature<f64> = self.settings.temp_convergence_tolerance.max(self.settings.pi.integ_tol_t_floor);
-            let integ_tol_rh: Dimensionless<f64> = self.settings.rh_convergence_tolerance.max(self.settings.pi.integ_tol_rh_floor);
+            let integ_tol_t: crate::uom::dimensions::Temperature<f64> = self
+                .settings
+                .temp_convergence_tolerance
+                .max(self.settings.pi.integ_tol_t_floor);
+            let integ_tol_rh: Dimensionless<f64> = self
+                .settings
+                .rh_convergence_tolerance
+                .max(self.settings.pi.integ_tol_rh_floor);
 
             let mut max_lte: f64 = 1e-12;
             for (cell_pred, cell_curr) in predicted_surface
@@ -238,8 +242,10 @@ impl HamtManager {
                 .zip(self.surface_curr.cells.iter())
             {
                 if matches!(cell_curr.cell_type, CellType::Material(_)) {
-                    let lte_t:Dimensionless<f64> = (cell_pred.cell_temp - cell_curr.cell_temp).abs() / integ_tol_t;
-                    let lte_rh:Dimensionless<f64> = (cell_pred.cell_rh - cell_curr.cell_rh).abs() / integ_tol_rh;
+                    let lte_t: Dimensionless<f64> =
+                        (cell_pred.cell_temp - cell_curr.cell_temp).abs() / integ_tol_t;
+                    let lte_rh: Dimensionless<f64> =
+                        (cell_pred.cell_rh - cell_curr.cell_rh).abs() / integ_tol_rh;
 
                     let cell_lte = lte_t.max(lte_rh).value();
                     if cell_lte > max_lte {
@@ -255,8 +261,11 @@ impl HamtManager {
                 // Update the prediction rates.
                 for (idx, cell_prev) in self.surface_prev.cells.indexed_iter() {
                     if matches!(cell_prev.cell_type, CellType::Material(_)) {
-                        (*rate_t)[idx] = (self.surface_curr.cells[idx].cell_temp - cell_prev.cell_temp) / dt_step;
-                        (*rate_rh)[idx] = (self.surface_curr.cells[idx].cell_rh - cell_prev.cell_rh) / dt_step;
+                        (*rate_t)[idx] = (self.surface_curr.cells[idx].cell_temp
+                            - cell_prev.cell_temp)
+                            / dt_step;
+                        (*rate_rh)[idx] =
+                            (self.surface_curr.cells[idx].cell_rh - cell_prev.cell_rh) / dt_step;
                     }
                 }
 
@@ -305,7 +314,11 @@ impl HamtManager {
                     // Asymmetric Clamping
                     // Allow more aggressive amplification on the first successful step after a failure to quickly recover,
                     // but clamp more conservatively after that to ensure stability.
-                    let max_amp = if adaptive_state.prev_lte.is_none() { amp_max_first } else { amp_max };
+                    let max_amp = if adaptive_state.prev_lte.is_none() {
+                        amp_max_first
+                    } else {
+                        amp_max
+                    };
                     amplification = (amplification * safety).clamp(amp_min, max_amp);
 
                     current_dt = dt_step * amplification;
@@ -315,7 +328,11 @@ impl HamtManager {
                 // REJECT
 
                 // In cold start, be more forgiving to allow the controller to gather data. After that, be more conservative to ensure stability.
-                let min_shrink = if adaptive_state.prev_lte.is_none() { 0.5 } else { 0.1 };
+                let min_shrink = if adaptive_state.prev_lte.is_none() {
+                    0.5
+                } else {
+                    0.1
+                };
                 let shrink_factor = (0.8 / max_lte.sqrt()).clamp(min_shrink, 0.9);
 
                 current_dt = dt_step * shrink_factor;

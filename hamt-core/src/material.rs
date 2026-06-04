@@ -12,8 +12,8 @@ use crate::{
     error::{Error, InvalidInputReason},
     physics::{Curve, LogY},
     uom::{
-        DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_SPECIFIC_ENERGY, DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT,
-        Quantity,
+        DIM_DIMENSIONLESS, DIM_LIQUID_TRANSPORT_COEFF, DIM_SPECIFIC_ENERGY,
+        DIM_THERMAL_CONDUCTIVITY, DIM_WATER_CONTENT, Quantity,
         dimensions::{Density, Dimensionless, Length, SpecificHeatCapacity, Temperature},
     },
 };
