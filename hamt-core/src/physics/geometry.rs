@@ -42,6 +42,26 @@ impl Pt3D {
         }
     }
 
+    /// Return the extent (size component) along the given axis.
+    ///
+    /// - axis 0 → x (depth / thickness direction)
+    /// - axis 1 → y (width direction)
+    /// - axis 2 → z (height direction)
+    ///
+    /// Mirrors [`area_along`]; used by the axis-aware resistance helpers
+    /// so half-distances are computed along the transport direction.
+    pub fn extent_along(&self, axis: usize) -> Length<f64> {
+        match axis {
+            0 => self.0,
+            1 => self.1,
+            2 => self.2,
+            _ => {
+                error!("Invalid axis for extent: {}", axis);
+                Length::<f64>::zero()
+            }
+        }
+    }
+
     pub fn volume(&self) -> Volume<f64> {
         self.0 * self.1 * self.2
     }

@@ -2,7 +2,7 @@
 //!
 //! The HAMT solver iterates a map `G : x ↦ G(x)` (a single
 //! `Surface::calculate_iteration` plus the per-cell-α write-back). For stiff
-//! parabolic operators the spectral radius approaches 1 and Picard convergence
+//! parabolic operators the spectral radius approaches 1 and block-Jacobi convergence
 //! stalls. AA(m) extrapolates from the last `m+1` iterates and their residuals
 //! to find a better next guess.
 //!
@@ -262,7 +262,7 @@ mod tests {
     use super::*;
 
     /// Slow linear iteration `x ← 0.95·x + 0.05` (fixed point at 1, contraction
-    /// ratio 0.95). Plain Picard needs ~540 iterations to reach 1e-12; AA(m≥1)
+    /// ratio 0.95). Plain block-Jacobi needs ~540 iterations to reach 1e-12; AA(m>=1)
     /// solves an affine 1-D map exactly after the first usable iteration, so it
     /// converges in 2-3 iterations. This is the regime AA is designed for —
     /// stiff parabolic operators with spectral radius near 1, like the HAMT
@@ -279,7 +279,7 @@ mod tests {
         let max_iters = 1000;
         let tol: f64 = 1e-12;
 
-        // Plain Picard.
+        // Plain block-Jacobi.
         let mut plain_iters = 0;
         let mut x = 0.0;
         while (x - target).abs() > tol && plain_iters < max_iters {
@@ -302,7 +302,7 @@ mod tests {
         }
         let aa_err = (x_aa - target).abs();
 
-        assert!(plain_err <= tol, "plain Picard should converge");
+        assert!(plain_err <= tol, "plain block-Jacobi should converge");
         assert!(aa_err <= tol, "AA should converge to within tolerance");
         assert!(
             plain_iters > 200,

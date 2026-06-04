@@ -37,7 +37,11 @@ impl std::fmt::Display for CurveError {
                 row
             ),
             CurveError::NegativeY { row } => {
-                write!(f, "Curve has negative y at row {} (LogY requires y >= 0)", row)
+                write!(
+                    f,
+                    "Curve has negative y at row {} (LogY requires y >= 0)",
+                    row
+                )
             }
         }
     }
@@ -72,10 +76,7 @@ pub trait CurveScale {
     /// runtime metadata stored on the curve. For `LogY`, leading zero-y rows
     /// are stripped and their last x becomes the threshold; below the
     /// threshold, `interpolate` short-circuits to `(0, 0)`.
-    fn preprocess(
-        x: &[f64],
-        y: &[f64],
-    ) -> Result<(Vec<f64>, Vec<f64>, Self::Extra), CurveError>;
+    fn preprocess(x: &[f64], y: &[f64]) -> Result<(Vec<f64>, Vec<f64>, Self::Extra), CurveError>;
 
     /// Return the below-threshold cutoff, if any. `LinearY` always returns
     /// `None` (inlined identity → LLVM eliminates the check).
@@ -99,10 +100,7 @@ impl CurveScale for LinearY {
     type Extra = ();
 
     #[inline]
-    fn preprocess(
-        x: &[f64],
-        y: &[f64],
-    ) -> Result<(Vec<f64>, Vec<f64>, Self::Extra), CurveError> {
+    fn preprocess(x: &[f64], y: &[f64]) -> Result<(Vec<f64>, Vec<f64>, Self::Extra), CurveError> {
         if x.len() != y.len() {
             return Err(CurveError::LengthMismatch {
                 x_len: x.len(),
@@ -132,10 +130,7 @@ impl CurveScale for LogY {
     type Extra = Option<f64>;
 
     #[inline]
-    fn preprocess(
-        x: &[f64],
-        y: &[f64],
-    ) -> Result<(Vec<f64>, Vec<f64>, Self::Extra), CurveError> {
+    fn preprocess(x: &[f64], y: &[f64]) -> Result<(Vec<f64>, Vec<f64>, Self::Extra), CurveError> {
         if x.len() != y.len() {
             return Err(CurveError::LengthMismatch {
                 x_len: x.len(),
@@ -361,6 +356,9 @@ where
                 } else {
                     zero_grad
                 };
+                // strip: PCHIP reverse-interp kernel — diman cannot canonicalise
+                // Quantity<f64, {DX.sub(DY)}> * Quantity<f64, DY> -> Quantity<f64, DX>
+                // across generic const parameters; inner arithmetic stays raw f64.
                 let val = x1.0 + grad.0 * (in_y.0 - y1.0);
                 (Quantity::<f64, DX>(val), grad)
             }
@@ -377,10 +375,7 @@ where
     /// Infallible `LinearY` constructor — `LinearY::preprocess` only fails on
     /// length mismatch, which is a programmer error. Existing call sites that
     /// pass hand-picked monotone data continue to use this.
-    pub fn new(
-        x_series: Vec<Quantity<f64, DX>>,
-        y_series: Vec<Quantity<f64, DY>>,
-    ) -> Self {
+    pub fn new(x_series: Vec<Quantity<f64, DX>>, y_series: Vec<Quantity<f64, DY>>) -> Self {
         Self::try_new(x_series, y_series).expect("valid LinearY curve inputs")
     }
 }
@@ -465,12 +460,7 @@ fn calculate_pchip_tangents(x: &[f64], y: &[f64]) -> Vec<f64> {
 
 /// PCHIP interpolation on raw `f64` slices. Returns `(y, dy/dx)` in internal
 /// space; for `LogY` the caller decodes through `exp` + chain rule.
-fn pchip_interp_raw(
-    target_x: f64,
-    x_data: &[f64],
-    y_data: &[f64],
-    tangents: &[f64],
-) -> (f64, f64) {
+fn pchip_interp_raw(target_x: f64, x_data: &[f64], y_data: &[f64], tangents: &[f64]) -> (f64, f64) {
     if x_data.is_empty() {
         return (0.0, 0.0);
     } else if x_data.len() == 1 {
@@ -789,7 +779,11 @@ mod tests {
         for (xs, ys) in [
             // Multi-row all-zero (e.g. PE_Folie Suction with one entry).
             (
-                vec![0.0 * dimensionless, 1.0 * dimensionless, 2.0 * dimensionless],
+                vec![
+                    0.0 * dimensionless,
+                    1.0 * dimensionless,
+                    2.0 * dimensionless,
+                ],
                 vec![0.0 * kg_per_m3, 0.0 * kg_per_m3, 0.0 * kg_per_m3],
             ),
             // Single-row all-zero (the IDF "1 entry" case that triggered the bug).
