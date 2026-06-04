@@ -11,6 +11,7 @@ use crate::uom::dimensions::{
 use crate::{boundary::BoundaryCondition, config::HamtSettings, physics};
 use anyhow::Result;
 pub mod boundary;
+pub mod grid;
 pub mod init;
 pub mod query;
 pub mod step_jacobi;
