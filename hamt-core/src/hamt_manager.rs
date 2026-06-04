@@ -700,10 +700,10 @@ impl HamtManager {
 
 
             // Decouple Integration Tolerance
-            // Instead of using the global convergence tolerances, we define separate integration tolerances for temperature and relative humidity that are more lenient. 
+            // Instead of using the global convergence tolerances, we define separate integration tolerances for temperature and relative humidity that are more lenient.
             // This allows the PI controller to make informed decisions based on the physical changes rather than strict solver convergence, which can be too tight for adaptive stepping.
-            let integ_tol_t: Temperature<f64> = self.settings.temp_convergence_tolerance.max(0.25 * kelvin); 
-            let integ_tol_rh: Dimensionless<f64> = self.settings.rh_convergence_tolerance.max(0.02 * dimensionless);
+            let integ_tol_t: Temperature<f64> = self.settings.temp_convergence_tolerance.max(self.settings.pi.integ_tol_t_floor);
+            let integ_tol_rh: Dimensionless<f64> = self.settings.rh_convergence_tolerance.max(self.settings.pi.integ_tol_rh_floor);
 
             let mut max_lte: f64 = 1e-12;
             for (cell_pred, cell_curr) in predicted_surface
@@ -764,20 +764,23 @@ impl HamtManager {
 
                 // PI Controller
                 if !is_boundary_step {
-                    let k_i = 0.15; 
-                    let k_p = 0.05; 
-                    let safety = 0.8; 
+                    let k_i = self.settings.pi.k_i;
+                    let k_p = self.settings.pi.k_p;
+                    let safety = self.settings.pi.safety;
+                    let amp_min = self.settings.pi.amp_min;
+                    let amp_max_first = self.settings.pi.amp_max_first;
+                    let amp_max = self.settings.pi.amp_max;
 
                     let mut amplification = (1.0 / max_lte).powf(k_i);
                     if let Some(pe) = adaptive_state.prev_lte {
                         amplification *= (pe / max_lte).powf(k_p);
                     }
-                    
+
                     // Asymmetric Clamping
-                    // Allow more aggressive amplification on the first successful step after a failure to quickly recover, 
+                    // Allow more aggressive amplification on the first successful step after a failure to quickly recover,
                     // but clamp more conservatively after that to ensure stability.
-                    let max_amp = if adaptive_state.prev_lte.is_none() { 2.0 } else { 1.5 };
-                    amplification = (amplification * safety).clamp(0.25, max_amp);
+                    let max_amp = if adaptive_state.prev_lte.is_none() { amp_max_first } else { amp_max };
+                    amplification = (amplification * safety).clamp(amp_min, max_amp);
 
                     current_dt = dt_step * amplification;
                     adaptive_state.prev_lte = Some(max_lte);
@@ -936,6 +939,49 @@ pub enum SolverMethod {
     BlockTridiagonal,
 }
 
+/// Tunable gains for the PI adaptive sub-stepper (`solve_timestep_adaptive`).
+///
+/// All fields have `Default` values that are identical to the hard-coded
+/// literals that existed before this struct was introduced, so the default
+/// configuration is behaviour-preserving.
+#[derive(Debug, Clone)]
+pub struct PiControllerSettings {
+    /// Integral gain applied to `(1/LTE)^k_i`.
+    pub k_i: f64,
+    /// Proportional gain applied to `(prev_LTE/LTE)^k_p`.
+    pub k_p: f64,
+    /// Safety factor applied to the raw amplification before clamping.
+    pub safety: f64,
+    /// Lower clamp on the amplification (minimum step-size growth/shrink factor).
+    pub amp_min: f64,
+    /// Upper clamp on amplification for the very first accepted step after a
+    /// failure (when `prev_lte` is `None`).
+    pub amp_max_first: f64,
+    /// Upper clamp on amplification for subsequent accepted steps.
+    pub amp_max: f64,
+    /// Floor for the temperature integration tolerance used in the LTE check
+    /// (independent of the solver convergence tolerance).
+    pub integ_tol_t_floor: Temperature<f64>,
+    /// Floor for the relative-humidity integration tolerance used in the LTE
+    /// check (independent of the solver convergence tolerance).
+    pub integ_tol_rh_floor: Dimensionless<f64>,
+}
+
+impl Default for PiControllerSettings {
+    fn default() -> Self {
+        Self {
+            k_i: 0.15,
+            k_p: 0.05,
+            safety: 0.8,
+            amp_min: 0.25,
+            amp_max_first: 2.0,
+            amp_max: 1.5,
+            integ_tol_t_floor: 0.25 * kelvin,
+            integ_tol_rh_floor: 0.02 * dimensionless,
+        }
+    }
+}
+
 /// Global settings for the HAMT simulation.
 #[derive(Debug, Clone)]
 pub struct HamtSettings {
@@ -1004,6 +1050,9 @@ pub struct HamtSettings {
 
     /// Inner linear-solver method. See `SolverMethod`.
     pub solver_method: SolverMethod,
+
+    /// Settings for the PI adaptive sub-stepper (`solve_timestep_adaptive`).
+    pub pi: PiControllerSettings,
 }
 
 impl Default for HamtSettings {
@@ -1029,6 +1078,7 @@ impl Default for HamtSettings {
             anderson_enabled: true,
             anderson_history_depth: 3,
             solver_method: SolverMethod::BlockTridiagonal,
+            pi: PiControllerSettings::default(),
         }
     }
 }
