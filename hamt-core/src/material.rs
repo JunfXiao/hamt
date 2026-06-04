@@ -238,7 +238,7 @@ impl MaterialLibrary {
         self.materials
             .read()
             .map_err(|_| Error::LockError("Material Library".to_string()))
-            .with_context(|| "Failed to acquire write lock on Material Library")
+            .with_context(|| "Failed to acquire read lock on Material Library")
     }
 
     fn get_construction_write_lock(
@@ -247,7 +247,7 @@ impl MaterialLibrary {
         self.constructions
             .write()
             .map_err(|_| Error::LockError("Construction Library".to_string()))
-            .with_context(|| "Failed to acquire write lock on Material Library")
+            .with_context(|| "Failed to acquire write lock on Construction Library")
     }
 
     pub fn get_construction_read_lock(
@@ -256,7 +256,7 @@ impl MaterialLibrary {
         self.constructions
             .read()
             .map_err(|_| Error::LockError("Construction Library".to_string()))
-            .with_context(|| "Failed to acquire write lock on Material Library")
+            .with_context(|| "Failed to acquire read lock on Construction Library")
     }
 
     pub fn add_material(&self, material: Material) -> Result<Arc<Material>> {
