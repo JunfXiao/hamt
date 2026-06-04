@@ -14,6 +14,7 @@ pub mod boundary;
 pub mod grid;
 pub mod init;
 pub mod query;
+pub mod step_adi;
 pub mod step_jacobi;
 pub mod step_tridiag;
 use std::{collections::HashMap, sync::Arc};
@@ -24,6 +25,7 @@ use crate::parallel::{par_or_seq, par_or_seq_mut};
 use rayon::prelude::*;
 
 // Re-export step types so external code can use crate::surface::BlockJacobiStep etc.
+pub use step_adi::AdiStep;
 pub use step_jacobi::{BlockJacobiStep, CellInertia, CellSources, NeighborSums};
 pub use step_tridiag::BlockTridiagStep;
 

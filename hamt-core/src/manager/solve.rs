@@ -427,9 +427,31 @@ impl HamtManager {
     pub(super) fn solve_timestep_adi(&mut self) -> Result<bool> {
         let dim = self.surface_curr.cells.raw_dim();
         if dim[1] == 1 && dim[2] == 1 {
+            // 1-D grid: a single x-sweep with no cross coupling is byte-identical
+            // to the block-tridiag path. Delegate to guarantee 1-D equivalence.
             return self.solve_timestep_block_tridiag();
         }
-        unimplemented!("2-D/3-D ADI (AdiStep) lands in Phase 2a Task 8")
+
+        // Genuine 2-D/3-D: alternating x→y line sweeps, iterated on the
+        // cross-axis lag (and the nonlinearity) by the shared outer loop.
+        let n_cells = self.surface_curr.cells.len();
+        let mut aitken = Aitken::new(n_cells);
+        let mut anderson = AndersonAccelerator::new(self.settings.anderson_history_depth);
+
+        self.run_outer_loop(
+            &crate::surface::AdiStep,
+            &mut aitken,
+            if self.settings.anderson_enabled {
+                Some(&mut anderson as &mut dyn Accelerator)
+            } else {
+                None
+            },
+            ExitPolicy {
+                max_iter: 200,
+                min_iter_guard: None,
+                stall_patience: None,
+            },
+        )
     }
 
     /// Direct block-tridiagonal solve. See `solver::block_tridiag` for the
