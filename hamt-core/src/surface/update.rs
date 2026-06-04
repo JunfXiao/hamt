@@ -1,7 +1,7 @@
 use crate::{
     parallel::{par_or_seq, par_or_seq_mut}, uom::{
         Quantity, constants::{WATER_LATENT_HEAT, WATER_SPECIFIC_HEAT}, dimensions::{
-            HeatTransferCoeff, MassFlux, MassFluxPerTemperature, Power, SpecificEnergy, ThermalConductance, VaporConductance, VaporTransportCoeff
+            HeatCapacity, HeatTransferCoeff, Mass, MassFlux, MassFluxPerTemperature, Power, SpecificEnergy, ThermalConductance, Time, VaporConductance, VaporTransportCoeff
         }, units::{
             dimensionless, j_per_kg, k_per_w, kelvin, kg_per_m2_s_pa, kg_per_m3, kg_per_s,
             kilograms, pa_s_per_kg, pascals, seconds, w_per_k, w_per_m2_k, watts
@@ -35,6 +35,40 @@ fn relax_write_cell(
     cell.cell_temp = relaxed_t;
     cell.cell_rh = relaxed_rh.clamp(Quantity(0.0), Quantity(1.01));
     cell.calc_dependent_state(bc, settings);
+}
+
+/// Conductance-weighted neighbour sums accumulated in a single pass over a
+/// cell's neighbours (see [`Surface::accumulate_neighbor_sums`]). These feed
+/// both the coupled 2×2 block solve and the legacy staggered scalar solve.
+///
+///   Heat:    `oorsum` (Σ 1/R_th), `torsum` (Σ T_nbr/R_th)
+///   Vapor:   `vapor_diffusion_net_flux` (Σ (P_nbr−P)/R_v), `vpoosum` (Σ 1/R_v),
+///            `vporsum` (Σ P_nbr/R_v)
+///   Liquid:  `phioosum` (Σ 1/R_φ), `phiorsum` (Σ φ_nbr/R_φ)
+pub struct NeighborSums {
+    pub oorsum: ThermalConductance<f64>,
+    pub torsum: Power<f64>,
+    pub vapor_diffusion_net_flux: MassFlux<f64>,
+    pub vpoosum: VaporConductance<f64>,
+    pub vporsum: MassFlux<f64>,
+    pub phioosum: MassFlux<f64>,
+    pub phiorsum: MassFlux<f64>,
+}
+
+/// Cell-local inertial capacities for the implicit-Euler step.
+pub struct CellInertia {
+    /// Effective heat capacity `(ρ·c_dry + w·c_w)·V` [J/K].
+    pub tcap: HeatCapacity<f64>,
+    /// Moisture capacity `ξ·V = (∂w/∂φ)·V` [kg], floored to avoid singularity.
+    pub wcap: Mass<f64>,
+}
+
+/// Cell-local heat sources for the energy balance.
+pub struct CellSources {
+    /// User-defined additional heat deposited at this cell [W].
+    pub q_adds: Power<f64>,
+    /// Absorbed boundary radiation deposited into the surface-adjacent cell [W].
+    pub q_boundary: Power<f64>,
 }
 
 impl Surface {
@@ -216,6 +250,148 @@ impl Surface {
         Ok(())
     }
 
+    /// Accumulate the seven conductance-weighted neighbour sums for cell `i`
+    /// in a single pass. `surf_curr` provides the lagged neighbour state read
+    /// during a block-Jacobi / Picard sweep. The guards
+    /// (`1e-12*k_per_w`, `1e-12*pa_s_per_kg`, the liquid `r_total` bounds)
+    /// drop degenerate / zero-coupling interfaces.
+    fn accumulate_neighbor_sums(
+        &self,
+        i: usize,
+        surf_curr: &Surface,
+        bc: &BoundaryCondition,
+    ) -> NeighborSums {
+        let nx = self.cells.raw_dim()[0];
+        let cell_curr = &surf_curr.cells[[i, 0, 0]];
+
+        let mut oorsum: ThermalConductance<f64> = 0.0 * w_per_k;
+        let mut torsum: Power<f64> = 0.0 * watts;
+        let mut vapor_diffusion_net_flux: MassFlux<f64> = 0.0 * kilograms / seconds;
+        let mut vpoosum: VaporConductance<f64> = 0.0 * kg_per_s / pascals;
+        let mut vporsum: MassFlux<f64> = 0.0 * kg_per_s;
+        let mut phioosum: MassFlux<f64> = 0.0 * kg_per_s;
+        let mut phiorsum: MassFlux<f64> = 0.0 * kg_per_s;
+
+        let curr_vp_pa = cell_curr.cell_vp;
+
+        for nbr_i in surf_curr.neighbor_indices(i, nx) {
+            let nbr_curr = &surf_curr.cells[[nbr_i, 0, 0]];
+
+            let r = Self::calculate_resistance_triple(cell_curr, nbr_curr, bc.pressure_air);
+
+            if r.therm > 1e-12 * k_per_w {
+                oorsum += 1.0 / r.therm;
+                torsum += nbr_curr.cell_temp / r.therm;
+            }
+
+            if r.vapor > 1e-12 * pa_s_per_kg {
+                let nbr_vp = nbr_curr.cell_vp;
+                let vc = 1.0 / r.vapor;
+                vapor_diffusion_net_flux += (nbr_vp - curr_vp_pa) / r.vapor;
+                vpoosum += vc;
+                vporsum += nbr_vp * vc;
+            }
+
+            let r_total: Quantity<f64, _> = r.liquid * dimensionless;
+            if r_total < f64::MAX * dimensionless / kg_per_s
+                && r_total > 1e-13 * dimensionless / kg_per_s
+            {
+                let cond: MassFlux<f64> = 1.0 / r_total;
+                phioosum += cond;
+                phiorsum += nbr_curr.cell_rh * cond;
+            }
+        }
+
+        NeighborSums {
+            oorsum,
+            torsum,
+            vapor_diffusion_net_flux,
+            vpoosum,
+            vporsum,
+            phioosum,
+            phiorsum,
+        }
+    }
+
+    /// Cell-local inertial capacities `(tcap, wcap)` for the implicit step.
+    fn cell_inertia(cell_curr: &Cell) -> CellInertia {
+        let tcap = (cell_curr.density * cell_curr.spech
+            + cell_curr.volumetric_water * WATER_SPECIFIC_HEAT)
+            * cell_curr.volume;
+
+        let wcap = if cell_curr.dwd_phi > 1e-10 * kg_per_m3 {
+            cell_curr.dwd_phi * cell_curr.volume
+        } else {
+            debug!(
+                "Cell has very low dwd_phi, using fallback moisture capacity to prevent instability"
+            );
+            1.0e-10 * kilograms
+        };
+
+        CellInertia { tcap, wcap }
+    }
+
+    /// Cell-local heat sources `(q_adds, q_boundary)` for cell `i`.
+    fn cell_sources(
+        &self,
+        i: usize,
+        surf_curr: &Surface,
+        bc: &BoundaryCondition,
+    ) -> CellSources {
+        let q_weight = surf_curr
+            .user_defined_cell_idx
+            .as_ref()
+            .map(|weights| {
+                weights
+                    .iter()
+                    .filter(|(idx, _)| idx[0] == i)
+                    .map(|(_, w)| w)
+                    .sum::<f64>()
+            })
+            .unwrap_or(0.0);
+        let q_adds = bc.q_addition_userdef * q_weight;
+
+        // Deposit absorbed radiation into the boundary-adjacent material cell.
+        let q_boundary: Power<f64> = if Some(i) == surf_curr.interior_surface_material_idx {
+            bc.additional_energy_int
+        } else if Some(i) == surf_curr.exterior_surface_material_idx {
+            bc.additional_energy_ext
+        } else {
+            0.0 * watts
+        };
+
+        CellSources { q_adds, q_boundary }
+    }
+
+    /// Cell-local diagonal 2×2 block + cell-local RHS (capacities, Taylor cross,
+    /// inertial + source biases). NEIGHBOUR-VALUE coupling (torsum / l_eff*vporsum
+    /// into b_t; phiorsum / vporsum into b_p) is added by the caller.
+    fn build_cell_block(
+        sums: &NeighborSums,
+        inertia: &CellInertia,
+        sources: &CellSources,
+        cell_curr: &Cell,
+        cell_prev: &Cell,
+        l_eff: SpecificEnergy<f64>,
+        dt: Time<f64>,
+    ) -> (crate::solver::block_2x2::Block2x2, (f64, f64)) {
+        let phi_k = cell_curr.cell_rh;
+        let cross: MassFluxPerTemperature<f64> = sums.vpoosum * phi_k * cell_curr.d_psat_d_t;
+        let a_tt: ThermalConductance<f64> = sums.oorsum + inertia.tcap / dt + l_eff * cross;
+        let a_tp: Power<f64> = l_eff * sums.vpoosum * cell_curr.vp_sat;
+        let a_pt: MassFluxPerTemperature<f64> = cross;
+        let a_pp: MassFlux<f64> = sums.phioosum + sums.vpoosum * cell_curr.vp_sat + inertia.wcap / dt;
+        let b_t: Power<f64> = sources.q_adds + sources.q_boundary
+            + inertia.tcap * cell_prev.cell_temp / dt
+            + l_eff * (cross * cell_curr.cell_temp);
+        let b_p: MassFlux<f64> = inertia.wcap * cell_prev.cell_rh / dt + cross * cell_curr.cell_temp;
+        // strip: linear-algebra-kernel boundary (typed in, typed out at caller)
+        (
+            crate::solver::block_2x2::Block2x2 { a: a_tt.0, b: a_tp.0, c: a_pt.0, d: a_pp.0 },
+            (b_t.0, b_p.0),
+        )
+    }
+
     /// Combined Heat and Moisture step: compute next T and RH for all cells.
     fn calculate_physics_step(
         &mut self,
@@ -237,91 +413,12 @@ impl Surface {
                     let cell_prev = &surface_prev.cells[[i, 0, 0]];
                     let is_material = matches!(cell_curr.cell_type, CellType::Material(_));
 
-                    // =========================================================
-                    // Build all neighbor sums in a single pass
-                    //   Heat:     oorsum, torsum, vapor_diffusion_net_flux
-                    //   Vapor:    vpoosum, vporsum
-                    //   Liquid:   phioosum, phiorsum
-                    // Merging the two former loops avoids calling
-                    // calculate_resistance_pair twice per neighbor per cell.
-                    // =========================================================
-                    let mut oorsum: ThermalConductance<f64> = 0.0 * w_per_k;
-                    let mut torsum: Power<f64> = 0.0 * watts;
-                    let mut vapor_diffusion_net_flux: MassFlux<f64> = 0.0 * kilograms / seconds;
-                    let mut vpoosum: VaporConductance<f64> = 0.0 * kg_per_s / pascals;
-                    let mut vporsum: MassFlux<f64> = 0.0 * kg_per_s;
-                    let mut phioosum: MassFlux<f64> = 0.0 * kg_per_s;
-                    let mut phiorsum: MassFlux<f64> = 0.0 * kg_per_s;
-
-                    let curr_vp_pa = cell_curr.cell_vp;
-
-                    for nbr_i in surface_curr.neighbor_indices(i, nx) {
-                        let nbr_curr = &surface_curr.cells[[nbr_i, 0, 0]];
-
-                        let r = Self::calculate_resistance_triple(cell_curr, nbr_curr, bc.pressure_air);
-
-                        if r.therm > 1e-12 * k_per_w {
-                            oorsum += 1.0 / r.therm;
-                            torsum += nbr_curr.cell_temp / r.therm;
-                        }
-
-                        if r.vapor > 1e-12 * pa_s_per_kg {
-                            let nbr_vp = nbr_curr.cell_vp;
-                            let vc = 1.0 / r.vapor;
-                            vapor_diffusion_net_flux += (nbr_vp - curr_vp_pa) / r.vapor;
-                            vpoosum += vc;
-                            vporsum += nbr_vp * vc;
-                        }
-
-                        let r_total: Quantity<f64, _> = r.liquid * dimensionless;
-                        if r_total < f64::MAX * dimensionless / kg_per_s
-                            && r_total > 1e-13 * dimensionless / kg_per_s
-                        {
-                            let cond: MassFlux<f64> = 1.0 / r_total;
-                            phioosum += cond;
-                            phiorsum += nbr_curr.cell_rh * cond;
-                        }
-                    }
-
-                    // =========================================================
-                    // Cell-level scalars (independent of solver path)
-                    // =========================================================
-                    let tcap_j_per_k = (cell_curr.density * cell_curr.spech
-                        + cell_curr.volumetric_water * WATER_SPECIFIC_HEAT)
-                        * cell_curr.volume;
-
-                    let wcap = if cell_curr.dwd_phi > 1e-10 * kg_per_m3 {
-                        cell_curr.dwd_phi * cell_curr.volume
-                    } else {
-                        debug!(
-                            "Cell {} has very low dwd_phi, using fallback moisture capacity to prevent instability",
-                            i
-                        );
-                        1.0e-10 * kilograms
-                    };
-
-                    let q_weight = surface_curr
-                        .user_defined_cell_idx
-                        .as_ref()
-                        .map(|weights| {
-                            weights
-                                .iter()
-                                .filter(|(idx, _)| idx[0] == i)
-                                .map(|(_, w)| w)
-                                .sum::<f64>()
-                        })
-                        .unwrap_or(0.0);
-                    let q_adds = bc.q_addition_userdef * q_weight;
-
-                    // Deposit absorbed radiation into the boundary-adjacent material cell.
-                    let q_boundary_energy: Power<f64> =
-                        if Some(i) == surface_curr.interior_surface_material_idx {
-                            bc.additional_energy_int
-                        } else if Some(i) == surface_curr.exterior_surface_material_idx {
-                            bc.additional_energy_ext
-                        } else {
-                            0.0 * watts
-                        };
+                    // Conductance-weighted neighbour sums, cell-local inertia, and
+                    // heat sources are extracted into testable helpers. The sums read
+                    // lagged neighbour state from `surface_curr` (block-Jacobi sweep).
+                    let sums = surface_curr.accumulate_neighbor_sums(i, surface_curr, bc);
+                    let inertia = Self::cell_inertia(cell_curr);
+                    let sources = surface_curr.cell_sources(i, surface_curr, bc);
 
                     let t_curr = cell_curr.cell_temp;
                     let vpsat_curr = cell_curr.vp_sat;
@@ -341,18 +438,10 @@ impl Surface {
                         //  ┌ A_tt  A_tp ┐ ┌ T_next ┐   ┌ b_t ┐
                         //  └ A_pt  A_pp ┘ └ φ_next ┘ = └ b_p ┘
                         //
-                        //   A_tt : ThermalConductance      [W/K]   = oorsum + tcap/dt + L_eff·cross
-                        //   A_tp : Power                   [W]     = L_eff · vpoosum · Psat
-                        //   A_pt : MassFluxPerTemperature  [kg/(s·K)] = cross
-                        //   A_pp : MassFlux                [kg/s]  = phioosum + vpoosum·Psat + wcap/dt
-                        //   b_t  : Power                   [W]
-                        //   b_p  : MassFlux                [kg/s]
-                        //   cross = vpoosum · φ_k · dPsat/dT       [kg/(s·K)]
-                        //   L_eff = L_v + H_diff(φ)                [J/kg]
-                        //
-                        // Cramer's rule produces composite intermediate dimensions
-                        // (W·kg/s and W·kg/(s·K)); diman tracks them anonymously, and
-                        // the divisions resolve to Temperature and Dimensionless.
+                        // `build_cell_block` assembles the cell-local diagonal block and
+                        // the cell-local RHS (capacities, Taylor cross, inertial + source
+                        // biases). The neighbour-VALUE coupling (torsum + l_eff·vporsum
+                        // into b_t; phiorsum + vporsum into b_p) is added here at the caller.
 
                         // WATER_LATENT_HEAT is declared as a `constant` in unit_system!
                         // and is therefore a Unit, not a Quantity — coerce via `1.0 *`.
@@ -363,53 +452,28 @@ impl Surface {
                                 0.0 * j_per_kg
                             };
 
-                        let phi_k    = cell_curr.cell_rh;          // Dimensionless
-                        let phi_prev = cell_prev.cell_rh;          // Dimensionless
-                        let t_prev   = cell_prev.cell_temp;        // Temperature
+                        let phi_k = cell_curr.cell_rh;
 
-                        // cross = vpoosum · φ_k · dPsat/dT  →  MassFluxPerTemperature
-                        let cross: MassFluxPerTemperature<f64> = vpoosum * phi_k * d_psat_d_t;
+                        let (diag, (b_t0, b_p0)) = Self::build_cell_block(
+                            &sums, &inertia, &sources, cell_curr, cell_prev, l_eff, dt_s,
+                        );
 
-                        // Explicit annotations force diman to reduce composite dimension
-                        // expressions to their canonical Dimension struct, which is what
-                        // the subsequent Cramer subtractions need to type-check.
-                        let a_tt: ThermalConductance<f64> =
-                            oorsum + tcap_j_per_k / dt_s + l_eff * cross;
-                        let a_tp: Power<f64> = l_eff * vpoosum * vpsat_curr;
-                        let a_pt: MassFluxPerTemperature<f64> = cross;
-                        let a_pp: MassFlux<f64> =
-                            phioosum + vpoosum * vpsat_curr + wcap / dt_s;
-
-                        let b_t: Power<f64> = torsum
-                            + q_adds
-                            + q_boundary_energy
-                            + tcap_j_per_k * t_prev / dt_s
-                            + l_eff * (vporsum + cross * t_curr);
-                        let b_p: MassFlux<f64> = phiorsum
-                            + vporsum
-                            + wcap * phi_prev / dt_s
-                            + cross * t_curr;
+                        // Add the neighbour-VALUE RHS coupling.
+                        // strip: kernel boundary
+                        let b_t = b_t0 + sums.torsum.0 + (l_eff * sums.vporsum).0;
+                        // strip: kernel boundary
+                        let b_p = b_p0 + sums.phiorsum.0 + sums.vporsum.0;
 
                         // ── Linear algebra kernel ─────────────────────────────────────
-                        // Cramer's rule mixes composite dimensions (W·kg/s and W·kg/(s·K))
-                        // that diman cannot canonicalise across the subtractions in the
-                        // determinant and numerators. We treat the 2×2 solve like a call
-                        // into a BLAS routine: enter with typed magnitudes (.0 = SI value),
-                        // do unit-agnostic arithmetic, re-tag the typed outputs on exit.
-                        // Inputs and outputs above this block are fully typed.
-                        let a_tt_v = a_tt.0;
-                        let a_tp_v = a_tp.0;
-                        let a_pt_v = a_pt.0;
-                        let a_pp_v = a_pp.0;
-                        let b_t_v  = b_t.0;
-                        let b_p_v  = b_p.0;
-
-                        let det_v = a_tt_v * a_pp_v - a_tp_v * a_pt_v;
+                        // Cramer's rule on the 2×2 diagonal block + assembled RHS. We
+                        // treat it like a BLAS call: arithmetic on SI magnitudes, re-tag
+                        // the typed outputs on exit. Same singular fallback as before.
+                        let det = diag.a * diag.d - diag.b * diag.c;
 
                         let (t_n_typed, p_n_typed): (Temperature<f64>, Dimensionless<f64>) =
-                            if det_v.abs() > 1e-30 {
-                                let t_n_v = (b_t_v * a_pp_v - a_tp_v * b_p_v) / det_v;
-                                let p_n_v = (a_tt_v * b_p_v - a_pt_v * b_t_v) / det_v;
+                            if det.abs() > 1e-30 {
+                                let t_n_v = (b_t * diag.d - diag.b * b_p) / det;
+                                let p_n_v = (diag.a * b_p - diag.c * b_t) / det;
                                 (t_n_v * kelvin, p_n_v * dimensionless)
                             } else {
                                 // Near-singular (e.g. no vapor coupling): fall back to current
@@ -434,9 +498,9 @@ impl Surface {
                         // P_v^{k+1} ≈ Psat(T^k)·φ^{k+1} + φ^k·(dPsat/dT)·(T^{k+1} − T^k)
                         let mut q_vapor: Power<f64> = 0.0 * watts;
                         if is_material && settings.latent_heat_enabled {
-                            q_vapor = vapor_diffusion_net_flux * WATER_LATENT_HEAT;
+                            q_vapor = sums.vapor_diffusion_net_flux * WATER_LATENT_HEAT;
                             if settings.sorption_enthalpy_enabled {
-                                q_vapor += vapor_diffusion_net_flux * cell_curr.h_sorp_diff;
+                                q_vapor += sums.vapor_diffusion_net_flux * cell_curr.h_sorp_diff;
                             }
                             if q_vapor.abs() > settings.max_latent_heat {
                                 // strip: signum() is only defined on the inner f64;
@@ -446,10 +510,11 @@ impl Surface {
                             }
                         }
 
-                        let denom_t: ThermalConductance<f64> = oorsum + tcap_j_per_k / dt_s;
+                        let denom_t: ThermalConductance<f64> = sums.oorsum + inertia.tcap / dt_s;
                         let t_next_s: Temperature<f64> = if denom_t > 1e-10 * w_per_k {
-                            let inertial = tcap_j_per_k * cell_prev.cell_temp / dt_s;
-                            (torsum + q_vapor + q_adds + q_boundary_energy + inertial) / denom_t
+                            let inertial = inertia.tcap * cell_prev.cell_temp / dt_s;
+                            (sums.torsum + q_vapor + sources.q_adds + sources.q_boundary + inertial)
+                                / denom_t
                         } else {
                             t_curr
                         };
@@ -466,12 +531,12 @@ impl Surface {
                         let delta_t = t_next - t_curr;
                         let p_sat_thermal_correction =
                             cell_curr.cell_rh * d_psat_d_t * delta_t;
-                        let thermal_source_term = vpoosum * p_sat_thermal_correction;
+                        let thermal_source_term = sums.vpoosum * p_sat_thermal_correction;
                         let denom_rh: MassFlux<f64> =
-                            phioosum + vpoosum * vpsat_curr + wcap / dt_s;
+                            sums.phioosum + sums.vpoosum * vpsat_curr + inertia.wcap / dt_s;
 
                         let rh_next_s: Dimensionless<f64> = if denom_rh > 1e-20 * kg_per_s {
-                            (phiorsum + vporsum + (wcap * cell_prev.cell_rh) / dt_s
+                            (sums.phiorsum + sums.vporsum + (inertia.wcap * cell_prev.cell_rh) / dt_s
                                 - thermal_source_term)
                                 / denom_rh
                         } else {
@@ -768,6 +833,101 @@ mod relax_write_cell_tests {
             (t_nan_fallback - 290.0).abs() < 1e-9,
             "expected fallback to 290 K, got {t_nan_fallback}"
         );
+    }
+}
+
+#[cfg(test)]
+mod build_cell_block_tests {
+    use super::*;
+    use crate::uom::units::{
+        dimensionless, j_per_k, j_per_kg, kelvin, kg_per_s, kilograms, pa_per_k, pascals,
+        seconds, w_per_k, watts,
+    };
+
+    /// `build_cell_block` must reproduce the hand-derived typed 2×2 block and
+    /// cell-local RHS, and the full Cramer solve (after adding the neighbour-value
+    /// RHS terms) must match a direct 2×2 solve of the same system.
+    #[test]
+    fn build_cell_block_matches_reference() {
+        // ── Known typed inputs ─────────────────────────────────────────
+        let sums = NeighborSums {
+            oorsum: 3.0 * w_per_k,
+            torsum: 900.0 * watts,
+            vapor_diffusion_net_flux: 0.0 * kg_per_s,
+            vpoosum: 2.0e-7 * (kg_per_s / pascals),
+            vporsum: 1.5e-4 * kg_per_s,
+            phioosum: 5.0e-6 * kg_per_s,
+            phiorsum: 2.0e-6 * kg_per_s,
+        };
+        let inertia = CellInertia {
+            tcap: 4000.0 * j_per_k,
+            wcap: 0.02 * kilograms,
+        };
+        let sources = CellSources {
+            q_adds: 10.0 * watts,
+            q_boundary: 5.0 * watts,
+        };
+
+        let cell_curr = Cell {
+            cell_rh: 0.6 * dimensionless,
+            cell_temp: 295.0 * kelvin,
+            vp_sat: 2600.0 * pascals,
+            d_psat_d_t: 160.0 * pa_per_k,
+            ..Cell::default()
+        };
+
+        let cell_prev = Cell {
+            cell_rh: 0.55 * dimensionless,
+            cell_temp: 293.0 * kelvin,
+            ..Cell::default()
+        };
+
+        let l_eff = 2.5e6 * j_per_kg;
+        let dt = 3600.0 * seconds;
+
+        // ── Hand-derived expected block + cell-local RHS (typed formulas) ──
+        let phi_k = cell_curr.cell_rh;
+        let cross: MassFluxPerTemperature<f64> = sums.vpoosum * phi_k * cell_curr.d_psat_d_t;
+        let exp_a_tt: ThermalConductance<f64> = sums.oorsum + inertia.tcap / dt + l_eff * cross;
+        let exp_a_tp: Power<f64> = l_eff * sums.vpoosum * cell_curr.vp_sat;
+        let exp_a_pt: MassFluxPerTemperature<f64> = cross;
+        let exp_a_pp: MassFlux<f64> =
+            sums.phioosum + sums.vpoosum * cell_curr.vp_sat + inertia.wcap / dt;
+        let exp_b_t: Power<f64> = sources.q_adds + sources.q_boundary
+            + inertia.tcap * cell_prev.cell_temp / dt
+            + l_eff * (cross * cell_curr.cell_temp);
+        let exp_b_p: MassFlux<f64> =
+            inertia.wcap * cell_prev.cell_rh / dt + cross * cell_curr.cell_temp;
+
+        let (diag, (b_t0, b_p0)) = Surface::build_cell_block(
+            &sums, &inertia, &sources, &cell_curr, &cell_prev, l_eff, dt,
+        );
+
+        let rel = |got: f64, exp: f64| (got - exp).abs() / exp.abs().max(1.0);
+        assert!(rel(diag.a, exp_a_tt.0) < 1e-6, "a_tt: {} vs {}", diag.a, exp_a_tt.0);
+        assert!(rel(diag.b, exp_a_tp.0) < 1e-6, "a_tp: {} vs {}", diag.b, exp_a_tp.0);
+        assert!(rel(diag.c, exp_a_pt.0) < 1e-6, "a_pt: {} vs {}", diag.c, exp_a_pt.0);
+        assert!(rel(diag.d, exp_a_pp.0) < 1e-6, "a_pp: {} vs {}", diag.d, exp_a_pp.0);
+        assert!(rel(b_t0, exp_b_t.0) < 1e-6, "b_t0: {} vs {}", b_t0, exp_b_t.0);
+        assert!(rel(b_p0, exp_b_p.0) < 1e-6, "b_p0: {} vs {}", b_p0, exp_b_p.0);
+
+        // ── End-to-end: add neighbour terms + Cramer-solve, compare with a
+        //    direct 2×2 solve of the same fully-assembled system. ───────────
+        let b_t = b_t0 + sums.torsum.0 + (l_eff * sums.vporsum).0;
+        let b_p = b_p0 + sums.phiorsum.0 + sums.vporsum.0;
+
+        let det = diag.a * diag.d - diag.b * diag.c;
+        assert!(det.abs() > 1e-30, "test matrix must be non-singular");
+        let t_solver = (b_t * diag.d - diag.b * b_p) / det;
+        let p_solver = (diag.a * b_p - diag.c * b_t) / det;
+
+        // Independent direct solve via matrix inversion (different code path
+        // than the inline Cramer numerators): x = M^-1 · (b_t, b_p).
+        let inv = diag.try_inv(1e-30).expect("non-singular");
+        let (t_ref, p_ref) = inv.mul_vec((b_t, b_p));
+
+        assert!((t_solver - t_ref).abs() < 1e-9, "T solve mismatch: {t_solver} vs {t_ref}");
+        assert!((p_solver - p_ref).abs() < 1e-9, "phi solve mismatch: {p_solver} vs {p_ref}");
     }
 }
 
