@@ -143,22 +143,22 @@ impl Surface {
 
         // Scatter solution back, applying per-cell α relaxation
         // (consistent with the BlockJacobi write-back behaviour).
-        for (row, &li) in system.material_indices.iter().enumerate() {
+        for (row, &triplet) in system.material_indices.iter().enumerate() {
             let (t_new_k, phi_new_raw) = solution[row];
             let curr_temp = surface_curr
                 .cells
-                .get([li, 0, 0])
-                .ok_or_else(|| anyhow::anyhow!("invalid linear index {li}"))?
+                .get(triplet)
+                .ok_or_else(|| anyhow::anyhow!("invalid cell index {:?}", triplet))?
                 .cell_temp;
             let curr_rh = surface_curr
                 .cells
-                .get([li, 0, 0])
-                .ok_or_else(|| anyhow::anyhow!("invalid linear index {li}"))?
+                .get(triplet)
+                .ok_or_else(|| anyhow::anyhow!("invalid cell index {:?}", triplet))?
                 .cell_rh;
             let cell = self
                 .cells
-                .get_mut([li, 0, 0])
-                .ok_or_else(|| anyhow::anyhow!("invalid linear index {li}"))?;
+                .get_mut(triplet)
+                .ok_or_else(|| anyhow::anyhow!("invalid cell index {:?}", triplet))?;
 
             // re-tag at kernel boundary
             let t_new_typed = t_new_k * crate::uom::units::kelvin;

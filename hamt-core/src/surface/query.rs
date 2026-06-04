@@ -483,19 +483,44 @@ impl Surface {
         })
     }
 
-    /// Linear indices into `self.cells` of every material cell, in
-    /// `cells.indexed_iter()` order. Used by the block-tridiagonal
-    /// assembler to walk the wall in physical order without having to
-    /// re-filter on every iteration. Cached state is intentionally not
-    /// stored here — the caller can memoize across an outer iteration.
-    pub fn material_cell_indices(&self) -> Vec<usize> {
+    /// Material cell indices as [i,j,k] triplets, in cells.indexed_iter() order.
+    /// Used by the block-tridiagonal assembler to walk the wall in physical order
+    /// without having to re-filter on every iteration. Cached state is intentionally
+    /// not stored here — the caller can memoize across an outer iteration.
+    pub fn material_cell_indices(&self) -> Vec<[usize; 3]> {
         let mut idx = Vec::new();
-        for (lin, cell) in self.cells.iter().enumerate() {
+        for ((x, y, z), cell) in self.cells.indexed_iter() {
             if matches!(cell.cell_type, CellType::Material(_)) {
-                idx.push(lin);
+                idx.push([x, y, z]);
             }
         }
         idx
+    }
+
+    /// Material-cell lines parallel to `axis` (0=x,1=y,2=z). Each line is the set of
+    /// material cells sharing the other two coordinates, ordered by increasing coord
+    /// along `axis`. Drives the per-axis ADI sweeps.
+    pub fn material_lines_along(&self, axis: usize) -> Vec<Vec<[usize; 3]>> {
+        use std::collections::BTreeMap;
+        // key = the two fixed coords (the non-`axis` indices), value = cells on that line
+        let mut lines: BTreeMap<(usize, usize), Vec<[usize; 3]>> = BTreeMap::new();
+        for ((x, y, z), cell) in self.cells.indexed_iter() {
+            if !matches!(cell.cell_type, CellType::Material(_)) {
+                continue;
+            }
+            let key = match axis {
+                0 => (y, z),
+                1 => (x, z),
+                2 => (x, y),
+                _ => continue,
+            };
+            lines.entry(key).or_default().push([x, y, z]);
+        }
+        let mut out: Vec<Vec<[usize; 3]>> = lines.into_values().collect();
+        for line in &mut out {
+            line.sort_by_key(|idx| idx[axis]);
+        }
+        out
     }
 
     /// Calculate thermal, vapor, and liquid resistance between two cells.
@@ -627,6 +652,25 @@ impl Surface {
     ) -> (ThermalResistance<f64>, VaporResistance<f64>) {
         let t = Self::calculate_resistance_triple(cell1, cell2, pressure_air, axis);
         (t.therm, t.vapor)
+    }
+}
+
+#[cfg(test)]
+mod material_index_tests {
+    #[test]
+    fn material_indices_and_lines_1d() {
+        let mgr = crate::solver::test_fixtures::build_fixture_manager(6);
+        let s = &mgr.surface_curr;
+        let mat = s.material_cell_indices();
+        assert!(mat.iter().all(|t| t[1] == 0 && t[2] == 0)); // all on x-axis
+        assert!(mat.windows(2).all(|w| w[0][0] < w[1][0])); // x-ordered
+        let n = mat.len();
+        let lines_x = s.material_lines_along(0);
+        assert_eq!(lines_x.len(), 1); // one x-line
+        assert_eq!(lines_x[0].len(), n); // all material cells
+        let lines_y = s.material_lines_along(1);
+        assert_eq!(lines_y.len(), n); // n singleton y-lines
+        assert!(lines_y.iter().all(|l| l.len() == 1));
     }
 }
 

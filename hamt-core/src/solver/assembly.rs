@@ -39,9 +39,9 @@ pub(crate) struct AssembledSystem {
     pub(crate) diag: Vec<Block2x2>,
     pub(crate) upper: Vec<Block2x2>,
     pub(crate) rhs: Vec<(f64, f64)>,
-    /// Material cells' linear indices into `surface.cells`, in the
+    /// Material cells' [i,j,k] indices into `surface.cells`, in the
     /// same order as `diag` rows. Used to scatter the solve result back.
-    pub(crate) material_indices: Vec<usize>,
+    pub(crate) material_indices: Vec<[usize; 3]>,
 }
 
 /// Build the system from `surface` (the freshly-prepared iteration state:
@@ -57,19 +57,15 @@ pub(crate) fn assemble_1d(
     bc: &BoundaryCondition,
     settings: &HamtSettings,
 ) -> AssembledSystem {
+    use std::collections::{HashMap, HashSet};
     let mat_idx = surface.material_cell_indices();
     let n = mat_idx.len();
     // Lookup table to recognise material-material vs material-boundary
-    // neighbours during assembly.
-    let mut is_material_at = vec![false; surface.cells.len()];
-    for &li in &mat_idx {
-        is_material_at[li] = true;
-    }
-    // Map material-cell linear-index → row in the tridiag system.
-    let mut row_of = vec![usize::MAX; surface.cells.len()];
-    for (row, &li) in mat_idx.iter().enumerate() {
-        row_of[li] = row;
-    }
+    // neighbours during assembly, keyed by [i,j,k] triplet.
+    let is_material_at: HashSet<[usize; 3]> = mat_idx.iter().copied().collect();
+    // Map material-cell [i,j,k] triplet → row in the tridiag system.
+    let row_of: HashMap<[usize; 3], usize> =
+        mat_idx.iter().copied().enumerate().map(|(r, t)| (t, r)).collect();
 
     let mut lower = vec![Block2x2::zero(); n];
     let mut diag = vec![Block2x2::zero(); n];
@@ -79,11 +75,11 @@ pub(crate) fn assemble_1d(
     let dt_s = settings.timestep;
     let nx = surface.cells.raw_dim()[0];
 
-    for (row, &li) in mat_idx.iter().enumerate() {
-        // For a 1-D wall (ny=1, nz=1) the linear index equals the x-axis index.
-        let i = li;
-        let cell_curr = &surface.cells[[i, 0, 0]];
-        let cell_prev = &surface_prev.cells[[i, 0, 0]];
+    for (row, &triplet) in mat_idx.iter().enumerate() {
+        // For a 1-D wall (ny=1, nz=1) triplet = [i,0,0]; i is the x-axis index.
+        let i = triplet[0];
+        let cell_curr = &surface.cells[triplet];
+        let cell_prev = &surface_prev.cells[triplet];
 
         // L_eff at lagged state. When latent_heat_enabled is false the
         // cross-coupling vanishes entirely.
@@ -124,7 +120,9 @@ pub(crate) fn assemble_1d(
         // block for a material-material edge carries the NEGATIVE of those same
         // conductances; boundary neighbours contribute only to diagonal + RHS.
         for nbr_li in surface.neighbor_indices(i, nx, 0) {
-            let nbr_curr = &surface.cells[[nbr_li, 0, 0]];
+            // neighbor_indices returns flat x-index (1-D shim); map to triplet for lookup.
+            let nbr_triplet: [usize; 3] = [nbr_li, 0, 0];
+            let nbr_curr = &surface.cells[nbr_triplet];
 
             // Resistance triple using the lagged state — identical to the
             // BlockJacobi `accumulate_neighbor_sums` path (same guards).
@@ -157,7 +155,7 @@ pub(crate) fn assemble_1d(
             vpoosum += cond_vapor;
             phioosum += cond_phi;
 
-            if is_material_at[nbr_li] {
+            if is_material_at.contains(&nbr_triplet) {
                 // ── Material neighbour: contributions go to OFF-DIAGONAL ──
                 // Off-diag block for this side:
                 //   block_tt = -inv_th
@@ -186,7 +184,7 @@ pub(crate) fn assemble_1d(
                     d: -(inv_phi + inv_vapor * psat_n),
                 };
 
-                let nbr_row = row_of[nbr_li];
+                let nbr_row = row_of[&nbr_triplet];
                 if nbr_row == row + 1 {
                     upper[row] = off;
                 } else if nbr_row + 1 == row {
@@ -245,7 +243,7 @@ pub(crate) fn assemble_1d(
         diag,
         upper,
         rhs,
-        material_indices: mat_idx,
+        material_indices: mat_idx, // Vec<[usize;3]> triplets
     }
 }
 
@@ -272,8 +270,8 @@ mod tests {
         assert_eq!(sys.lower.len(), sys.diag.len());
         assert_eq!(sys.upper.len(), sys.diag.len());
         assert_eq!(sys.rhs.len(), sys.diag.len());
-        for &li in &sys.material_indices {
-            let cell = mgr.surface_curr.cells.iter().nth(li).unwrap();
+        for &triplet in &sys.material_indices {
+            let cell = mgr.surface_curr.cells.get(triplet).unwrap();
             assert!(matches!(cell.cell_type, crate::cell::CellType::Material(_)));
         }
     }
@@ -421,8 +419,8 @@ mod tests {
         );
         let x = crate::solver::block_tridiag::solve(&sys.lower, &sys.diag, &sys.upper, &sys.rhs)
             .expect("solve failed");
-        for (row, &li) in sys.material_indices.iter().enumerate() {
-            let cell = mgr.surface_curr.cells.iter().nth(li).unwrap();
+        for (row, &triplet) in sys.material_indices.iter().enumerate() {
+            let cell = mgr.surface_curr.cells.get(triplet).unwrap();
             let t_curr = cell.cell_temp.value_in(crate::uom::units::kelvin);
             let phi_curr = cell.cell_rh.value();
             let (t_new, phi_new) = x[row];
