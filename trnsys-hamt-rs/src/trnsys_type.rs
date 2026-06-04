@@ -238,32 +238,27 @@ impl TrnSysType {
                 .map(|i| format!("{}", cells_ref[[i, 0, 0]].cell_type)),
         );
 
+        let headers = [
+            cell_table_titles.collect::<Vec<_>>(),
+            cell_depth_titles.collect::<Vec<_>>(),
+            cell_thickness_titles.collect::<Vec<_>>(),
+            cell_material_titles.collect::<Vec<_>>(),
+        ];
+
         if let Some(writer) = &mut state.t_csv_writer {
-            writer.write_record(cell_table_titles.clone())?;
-            writer.write_record(cell_depth_titles.clone())?;
-            writer.write_record(cell_thickness_titles.clone())?;
-            writer.write_record(cell_material_titles.clone())?;
+            Self::write_cell_header(writer, &headers)?;
         }
 
         if let Some(writer) = &mut state.rh_csv_writer {
-            writer.write_record(cell_table_titles.clone())?;
-            writer.write_record(cell_depth_titles.clone())?;
-            writer.write_record(cell_thickness_titles.clone())?;
-            writer.write_record(cell_material_titles.clone())?;
+            Self::write_cell_header(writer, &headers)?;
         }
 
         if let Some(writer) = &mut state.water_csv_writer {
-            writer.write_record(cell_table_titles.clone())?;
-            writer.write_record(cell_depth_titles.clone())?;
-            writer.write_record(cell_thickness_titles.clone())?;
-            writer.write_record(cell_material_titles.clone())?;
+            Self::write_cell_header(writer, &headers)?;
         }
 
         if let Some(writer) = &mut state.vp_csv_writer {
-            writer.write_record(cell_table_titles)?;
-            writer.write_record(cell_depth_titles)?;
-            writer.write_record(cell_thickness_titles)?;
-            writer.write_record(cell_material_titles)?;
+            Self::write_cell_header(writer, &headers)?;
         }
 
         // Boundary condition debug output
@@ -451,81 +446,78 @@ impl TrnSysType {
         Ok(())
     }
 
+    /// Write the four standard header rows (table titles, depth, thickness, material) to a
+    /// per-cell CSV writer. Each element of `headers` is one full row (already collected).
+    fn write_cell_header<W: std::io::Write>(
+        writer: &mut Writer<W>,
+        headers: &[Vec<String>; 4],
+    ) -> Result<()> {
+        for row in headers {
+            writer.write_record(row)?;
+        }
+        Ok(())
+    }
+
+    /// Write one data row to a per-cell CSV writer: `time` followed by one formatted value per
+    /// cell (produced by `fmt_cell`), then flush. Returns the result of the write so callers can
+    /// attach their own `.context(...)`.
+    fn write_cell_row<W: std::io::Write, F: Fn(&hamt_core::cell::Cell) -> String>(
+        writer: &mut Writer<W>,
+        time: f64,
+        cells: &[hamt_core::cell::Cell],
+        fmt_cell: F,
+    ) -> Result<()> {
+        let row = iter::once(time.to_string()).chain(cells.iter().map(fmt_cell));
+        writer.write_record(row)?;
+        writer.flush()?;
+        Ok(())
+    }
+
     pub fn output_cell_states(&self, state: &mut TrnSysState) -> Result<()> {
+        let cells = state
+            .hamt_manager
+            .as_ref()
+            .unwrap()
+            .surface_curr
+            .cells
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+
         // Output cell RH
         if let Some(writer) = &mut state.rh_csv_writer {
             let time = get_simulation_time();
-            let cell_rh_rows = iter::once(time.to_string()).chain(
-                state
-                    .hamt_manager
-                    .as_ref()
-                    .unwrap()
-                    .surface_curr
-                    .cells
-                    .iter()
-                    .map(|c| format!("{:.3e}", c.cell_rh.value())),
-            );
-            writer
-                .write_record(cell_rh_rows)
-                .context("Error writing cell RH row")?;
-            writer.flush()?;
+            Self::write_cell_row(writer, time, &cells, |c| {
+                format!("{:.3e}", c.cell_rh.value())
+            })
+            .context("Error writing cell RH row")?;
         }
 
         // Output cell temperature
         if let Some(writer) = &mut state.t_csv_writer {
             let time = get_simulation_time();
-            let cell_temp_rows = iter::once(time.to_string()).chain(
-                state
-                    .hamt_manager
-                    .as_ref()
-                    .unwrap()
-                    .surface_curr
-                    .cells
-                    .iter()
-                    .map(|c| format!("{:.3e}", kelvin_to_celsius(c.cell_temp))),
-            );
-            writer
-                .write_record(cell_temp_rows)
-                .context("Error writing cell temperature row")?;
-            writer.flush()?;
+            Self::write_cell_row(writer, time, &cells, |c| {
+                format!("{:.3e}", kelvin_to_celsius(c.cell_temp))
+            })
+            .context("Error writing cell temperature row")?;
         }
 
         // Output cell water content
         if let Some(writer) = &mut state.water_csv_writer {
             let time = get_simulation_time();
-            let cell_water_rows = iter::once(time.to_string()).chain(
-                state
-                    .hamt_manager
-                    .as_ref()
-                    .unwrap()
-                    .surface_curr
-                    .cells
-                    .iter()
-                    .map(|c| format!("{:.3e}", c.volumetric_water.value_in(kg_per_m3))),
-            );
-            writer
-                .write_record(cell_water_rows)
-                .context("Error writing cell water content row")?;
-            writer.flush()?;
+            Self::write_cell_row(writer, time, &cells, |c| {
+                format!("{:.3e}", c.volumetric_water.value_in(kg_per_m3))
+            })
+            .context("Error writing cell water content row")?;
         }
 
         // Output cell vapor pressure [Pa]
         if let Some(writer) = &mut state.vp_csv_writer {
             let time = get_simulation_time();
-            let cell_vp_rows = iter::once(time.to_string()).chain(
-                state
-                    .hamt_manager
-                    .as_ref()
-                    .unwrap()
-                    .surface_curr
-                    .cells
-                    .iter()
-                    .map(|c| format!("{:.3e}", c.cell_vp.value_in(pascals))),
-            );
-            writer
-                .write_record(cell_vp_rows)
-                .context("Error writing cell VP row")?;
-            writer.flush()?;
+            Self::write_cell_row(writer, time, &cells, |c| {
+                format!("{:.3e}", c.cell_vp.value_in(pascals))
+            })
+            .context("Error writing cell VP row")?;
         }
 
         Ok(())
