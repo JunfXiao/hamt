@@ -1,5 +1,6 @@
 //! The main orchestrator for the HAMT simulation.
 
+use crate::accel::{Accelerator, Aitken, RelaxKnobs};
 use crate::anderson::AndersonAccelerator;
 use crate::boundary::BoundaryCondition;
 use crate::cell::CellType;
@@ -143,10 +144,8 @@ impl HamtManager {
         let mut stats = ConvergenceStats::default();
 
         // Fully utilize the dimension definition of surface_curr.
-        // Allocate iteration history buffers outside the loop to avoid reallocation.
         let n_cells = self.surface_curr.cells.len();
-        let mut prev_delta_t = vec![0.0f64; n_cells];
-        let mut prev_delta_rh = vec![0.0f64; n_cells];
+        let mut aitken = Aitken::new(n_cells);
 
         for iter in 0..MAX_OUTER {
             // 1. Pass surface_prev (physical time t-1) for the inertial term (tcap/dt).
@@ -161,79 +160,16 @@ impl HamtManager {
 
             stats = convergence_stats(&self.surface_next, &self.surface_curr, &self.settings);
 
-            // Aitken Δ² dynamic relaxation calculation (Component-wise)
-            for (i, (cell_next, cell_curr)) in self
-                .surface_next
-                .cells
-                .iter_mut()
-                .zip(self.surface_curr.cells.iter())
-                .enumerate()
-            {
-                if !matches!(cell_next.cell_type, CellType::Material(_)) {
-                    continue;
-                }
-
-                // Extract scalar increments (strip units for pure numerical ratio calculations)
-                let delta_t_curr =
-                    (cell_next.cell_temp - cell_curr.cell_temp).value_in(crate::uom::units::kelvin);
-                let delta_rh_curr = (cell_next.cell_rh - cell_curr.cell_rh).value();
-
-                let mut next_alpha = cell_curr.relaxation_factor;
-
-                if iter > 0 {
-                    let delta_t_prev = prev_delta_t[i];
-                    let delta_rh_prev = prev_delta_rh[i];
-
-                    let mut alpha_t = next_alpha;
-                    let mut alpha_rh = next_alpha;
-
-                    // Calculate the Aitken decay rate for temperature
-                    if delta_t_prev.abs() > 1e-12 {
-                        let r_t = delta_t_curr / delta_t_prev;
-                        if (1.0 - r_t) > 1e-3 {
-                            alpha_t = next_alpha / (1.0 - r_t);
-                        } else {
-                            // r_t >= 1.0 (diverging) or r_t approaches 1 (stagnation)
-                            // Strictly enforce minimum damping to brake
-                            alpha_t = 0.0;
-                        }
-                    }
-
-                    // Calculate the Aitken decay rate for relative humidity
-                    if delta_rh_prev.abs() > 1e-12 {
-                        let r_rh = delta_rh_curr / delta_rh_prev;
-                        if (1.0 - r_rh) > 1e-3 {
-                            alpha_rh = next_alpha / (1.0 - r_rh);
-                        } else {
-                            alpha_rh = 0.0;
-                        }
-                    }
-
-                    // Catch negative overshoot and strictly clamp to the minimum safe value
-                    if alpha_t <= 0.0 {
-                        alpha_t = self.settings.min_relaxation_factor;
-                    }
-                    if alpha_rh <= 0.0 {
-                        alpha_rh = self.settings.min_relaxation_factor;
-                    }
-
-                    // Conservative strategy: take the smaller alpha between temperature and humidity
-                    // to ensure the overall stability of the cross-coupled system
-                    next_alpha = alpha_t.min(alpha_rh);
-                }
-
-                // Apply slight inertial smoothing to alpha itself to prevent excessive
-                // acceleration/deceleration jumps at extreme nonlinear breakpoints
-                let smoothed_alpha = 0.5 * cell_curr.relaxation_factor + 0.5 * next_alpha;
-
-                // Assign the safely clamped dynamic alpha to the next iteration
-                cell_next.relaxation_factor =
-                    smoothed_alpha.clamp(self.settings.min_relaxation_factor, MAX_ALPHA);
-
-                // Update history buffers for the next iteration's calculation
-                prev_delta_t[i] = delta_t_curr;
-                prev_delta_rh[i] = delta_rh_curr;
-            }
+            // Aitken Δ² dynamic relaxation (Component-wise)
+            aitken.relax(
+                &mut self.surface_next,
+                &self.surface_curr,
+                iter,
+                RelaxKnobs {
+                    min_alpha: self.settings.min_relaxation_factor,
+                    max_alpha: MAX_ALPHA,
+                },
+            );
 
             // Iteration advancement: overwrite the k state with the k+1 state for the next loop
             std::mem::swap(&mut self.surface_curr, &mut self.surface_next);
@@ -347,13 +283,9 @@ impl HamtManager {
         let mut x_prev_iter: Option<Vec<(f64, f64)>> = None;
         let mut material_indices: Option<Vec<usize>> = None;
 
-        // ---------------------------------------------------------------------
         // Aitken Δ² Dynamic Relaxation Setup
-        // Allocate iteration history buffers outside the loop to track increments.
-        // ---------------------------------------------------------------------
         let n_cells = self.surface_curr.cells.len();
-        let mut prev_delta_t = vec![0.0f64; n_cells];
-        let mut prev_delta_rh = vec![0.0f64; n_cells];
+        let mut aitken = Aitken::new(n_cells);
 
         for iter in 0..self.settings.max_iterations {
             self.surface_next.calculate_iteration(
@@ -365,79 +297,16 @@ impl HamtManager {
 
             stats = convergence_stats(&self.surface_next, &self.surface_curr, &self.settings);
 
-            // -----------------------------------------------------------------
-            // Aitken Δ² dynamic relaxation calculation (Component-wise)
-            // Replaces the heuristic 10x tolerance checks.
-            // -----------------------------------------------------------------
-            for (i, (cell_next, cell_curr)) in self
-                .surface_next
-                .cells
-                .iter_mut()
-                .zip(self.surface_curr.cells.iter())
-                .enumerate()
-            {
-                if !matches!(cell_next.cell_type, CellType::Material(_)) {
-                    continue;
-                }
-
-                // Extract scalar increments for the current iteration
-                let delta_t_curr = (cell_next.cell_temp - cell_curr.cell_temp).value_in(kelvin);
-                let delta_rh_curr = (cell_next.cell_rh - cell_curr.cell_rh).value();
-
-                let mut next_alpha = cell_curr.relaxation_factor;
-
-                if iter > 0 {
-                    let delta_t_prev = prev_delta_t[i];
-                    let delta_rh_prev = prev_delta_rh[i];
-
-                    let mut alpha_t = next_alpha;
-                    let mut alpha_rh = next_alpha;
-
-                    // Compute Aitken decay rate for Temperature
-                    if delta_t_prev.abs() > 1e-12 {
-                        let r_t = delta_t_curr / delta_t_prev;
-                        if (1.0 - r_t) > 1e-3 {
-                            alpha_t = next_alpha / (1.0 - r_t);
-                        } else {
-                            // r_t >= 1.0 (diverging) or r_t ~ 1.0 (stagnating): emergency brake
-                            alpha_t = 0.0;
-                        }
-                    }
-
-                    // Compute Aitken decay rate for Relative Humidity
-                    if delta_rh_prev.abs() > 1e-12 {
-                        let r_rh = delta_rh_curr / delta_rh_prev;
-                        if (1.0 - r_rh) > 1e-3 {
-                            alpha_rh = next_alpha / (1.0 - r_rh);
-                        } else {
-                            alpha_rh = 0.0;
-                        }
-                    }
-
-                    // Catch overshoots and fallback to the minimum allowed relaxation factor
-                    if alpha_t <= 0.0 {
-                        alpha_t = min_alpha;
-                    }
-                    if alpha_rh <= 0.0 {
-                        alpha_rh = min_alpha;
-                    }
-
-                    // Conservative approach: take the minimum alpha between T and RH
-                    // to keep the coupled physical system stable.
-                    next_alpha = alpha_t.min(alpha_rh);
-                }
-
-                // Apply mild low-pass filtering to the relaxation factor itself
-                // to prevent erratic jumps across highly nonlinear boundaries.
-                let smoothed_alpha = 0.5 * cell_curr.relaxation_factor + 0.5 * next_alpha;
-
-                // Write back clamped alpha using the globally defined MAX_ALPHA
-                cell_next.relaxation_factor = smoothed_alpha.clamp(min_alpha, MAX_ALPHA);
-
-                // Update history buffers
-                prev_delta_t[i] = delta_t_curr;
-                prev_delta_rh[i] = delta_rh_curr;
-            }
+            // Aitken Δ² dynamic relaxation (Component-wise)
+            aitken.relax(
+                &mut self.surface_next,
+                &self.surface_curr,
+                iter,
+                RelaxKnobs {
+                    min_alpha,
+                    max_alpha: MAX_ALPHA,
+                },
+            );
 
             mem::swap(&mut self.surface_curr, &mut self.surface_next);
 
