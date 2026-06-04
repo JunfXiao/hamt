@@ -76,3 +76,59 @@ pub struct Surface {
 
     pub user_defined_cell_idx: Option<InterpolationWeights>,
 }
+
+/// A single inner-iteration step of the nonlinear outer loop.
+///
+/// Both inner solvers (BlockJacobi and BlockTridiagonal) share an outer-loop
+/// skeleton (step → convergence_stats → aitken.relax → swap → exit test). The
+/// only thing that differs per iteration is *how* the next iterate is computed.
+/// This trait abstracts that step so a single generic driver
+/// (`HamtManager::run_outer_loop`) can host the shared skeleton.
+///
+/// Implementors compute the k+1 iterate into `next`, reading the physical
+/// previous-timestep state from `surface_prev` (inertial term) and the current
+/// iteration-k state from `surface_curr` (nonlinear coefficients / Jacobian).
+pub trait IterativeStep {
+    fn step(
+        &self,
+        next: &mut Surface,
+        settings: &crate::hamt_manager::HamtSettings,
+        bc: &crate::boundary::BoundaryCondition,
+        surface_prev: &Surface,
+        surface_curr: &Surface,
+    ) -> anyhow::Result<()>;
+}
+
+/// Block-Jacobi / Picard inner step: per-cell 2×2 (T, φ) solve with lagged
+/// neighbour values. See [`Surface::calculate_iteration`].
+pub struct BlockJacobiStep;
+
+/// Direct block-tridiagonal inner step: block-Thomas solve of the implicit-Euler
+/// system. See [`Surface::calculate_iteration_block_tridiag`].
+pub struct BlockTridiagStep;
+
+impl IterativeStep for BlockJacobiStep {
+    fn step(
+        &self,
+        next: &mut Surface,
+        settings: &crate::hamt_manager::HamtSettings,
+        bc: &crate::boundary::BoundaryCondition,
+        surface_prev: &Surface,
+        surface_curr: &Surface,
+    ) -> anyhow::Result<()> {
+        next.calculate_iteration(settings, bc, surface_prev, surface_curr)
+    }
+}
+
+impl IterativeStep for BlockTridiagStep {
+    fn step(
+        &self,
+        next: &mut Surface,
+        settings: &crate::hamt_manager::HamtSettings,
+        bc: &crate::boundary::BoundaryCondition,
+        surface_prev: &Surface,
+        surface_curr: &Surface,
+    ) -> anyhow::Result<()> {
+        next.calculate_iteration_block_tridiag(settings, bc, surface_prev, surface_curr)
+    }
+}
