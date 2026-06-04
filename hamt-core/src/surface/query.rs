@@ -4,11 +4,12 @@ use crate::{
     uom::{
         Dimension, Quantity,
         dimensions::{
-            Density, HeatTransferCoeff, MassFlux, Pressure, ThermalConductivity, ThermalResistance,
-            VaporResistance,
+            Density, HeatTransferCoeff, MassFlux, MassResistance, Pressure, ThermalConductivity,
+            ThermalResistance, VaporResistance,
         },
         units::{
-            dimensionless, k_per_w, kg_per_hr, kg_per_m2_s_pa, kg_per_s, meter, pa_s_per_kg, square_meter, w_per_m2_k
+            dimensionless, k_per_w, kg_per_hr, kg_per_m2_s_pa, kg_per_m3, m2_per_s,
+            meter, pa_s_per_kg, s_per_kg, square_meter, w_per_m2_k
         },
     },
 };
@@ -16,6 +17,20 @@ use crate::{
 use super::*;
 use anyhow::{Context, Result};
 use tracing::debug;
+
+/// All three interface resistances between two cells: thermal, vapor, and liquid.
+///
+/// Returned by [`Surface::calculate_resistance_triple`].
+///
+/// # Fields
+/// - `therm`: thermal resistance [K/W]
+/// - `vapor`: vapor (diffusion) resistance [Pa·s/kg]
+/// - `liquid`: liquid (capillary, RH-driven) resistance [s/kg] (= rh_r1 + rh_r2)
+pub struct ResistanceTriple {
+    pub therm: ThermalResistance<f64>,
+    pub vapor: VaporResistance<f64>,
+    pub liquid: MassResistance<f64>,
+}
 
 impl Surface {
     /// Compatibility helper for callers that previously expected a vector of surfaces.
@@ -520,41 +535,49 @@ impl Surface {
         idx
     }
 
-    /// Calculate thermal and vapor resistance between two cells.
+    /// Calculate thermal, vapor, and liquid resistance between two cells.
     ///
-    /// # Returns
-    /// A tuple containing the thermal and vapor resistances.
-    /// - Thermal resistance [K/W] (Absolute)
-    /// - Vapor resistance [Pa·s/kg] (Absolute)
-    pub fn calculate_resistance_pair(
+    /// `therm` and `vapor` are computed identically to `calculate_resistance_pair`.
+    /// `liquid` is `rh_r1 + rh_r2` where each half uses the cell's `dw` and
+    /// `dwd_phi` with the 1e-20 guards from the inline neighbour loop in
+    /// `calculate_physics_step`.
+    pub fn calculate_resistance_triple(
         cell1: &Cell,
         cell2: &Cell,
         pressure_air: Pressure<f64>,
-    ) -> (ThermalResistance<f64>, VaporResistance<f64>) {
+    ) -> ResistanceTriple {
         let overlap: Area<f64> = cell1.size.area_along(0).min(cell2.size.area_along(0));
         let dist1 = cell1.size.x().abs() * 0.5;
         let dist2 = cell2.size.x().abs() * 0.5;
 
         if overlap <= ECLIPSE * square_meter {
             tracing::warn!(
-                "calc_resistance_pair: degenerate geometry no overlap={:?}, cell1={:?}, cell2={:?}",
+                "calc_resistance_triple: degenerate geometry no overlap={:?}, cell1={:?}, cell2={:?}",
                 overlap,
                 cell1.cell_type,
                 cell2.cell_type
             );
-            return (1e100 * k_per_w, 1e100 * pa_s_per_kg);
+            return ResistanceTriple {
+                therm: 1e100 * k_per_w,
+                vapor: 1e100 * pa_s_per_kg,
+                liquid: 0.0 * s_per_kg,
+            };
         }
 
         if dist1 <= ECLIPSE * meter || dist2 <= ECLIPSE * meter {
             tracing::warn!(
-                "calc_resistance_pair: degenerate geometry overlap={:?}, dist1={:?}, dist2={:?}, cell1={:?}, cell2={:?}",
+                "calc_resistance_triple: degenerate geometry overlap={:?}, dist1={:?}, dist2={:?}, cell1={:?}, cell2={:?}",
                 overlap,
                 dist1,
                 dist2,
                 cell1.cell_type,
                 cell2.cell_type
             );
-            return (0.0 * k_per_w, 0.0 * pa_s_per_kg);
+            return ResistanceTriple {
+                therm: 0.0 * k_per_w,
+                vapor: 0.0 * pa_s_per_kg,
+                liquid: 0.0 * s_per_kg,
+            };
         }
 
         let htc1 = cell1.htc;
@@ -598,6 +621,138 @@ impl Surface {
             0.0 * pa_s_per_kg
         };
 
-        (thermr1 + thermr2, vaporr1 + vaporr2)
+        let rh_r1: MassResistance<f64> =
+            if cell1.dw > 1e-20 * m2_per_s && cell1.dwd_phi > 1e-20 * kg_per_m3 {
+                dist1 / (overlap * cell1.dw * cell1.dwd_phi)
+            } else {
+                0.0f64 * s_per_kg
+            };
+        let rh_r2: MassResistance<f64> =
+            if cell2.dw > 1e-20 * m2_per_s && cell2.dwd_phi > 1e-20 * kg_per_m3 {
+                dist2 / (overlap * cell2.dw * cell2.dwd_phi)
+            } else {
+                0.0f64 * s_per_kg
+            };
+
+        ResistanceTriple {
+            therm: thermr1 + thermr2,
+            vapor: vaporr1 + vaporr2,
+            liquid: rh_r1 + rh_r2,
+        }
+    }
+
+    /// Calculate thermal and vapor resistance between two cells.
+    ///
+    /// Thin wrapper around [`calculate_resistance_triple`] — returns `(therm, vapor)`.
+    /// All existing callers (assembly, virtual-cell averaging, block-tridiag path)
+    /// remain byte-identical.
+    ///
+    /// # Returns
+    /// A tuple containing the thermal and vapor resistances.
+    /// - Thermal resistance [K/W] (Absolute)
+    /// - Vapor resistance [Pa·s/kg] (Absolute)
+    pub fn calculate_resistance_pair(
+        cell1: &Cell,
+        cell2: &Cell,
+        pressure_air: Pressure<f64>,
+    ) -> (ThermalResistance<f64>, VaporResistance<f64>) {
+        let t = Self::calculate_resistance_triple(cell1, cell2, pressure_air);
+        (t.therm, t.vapor)
+    }
+}
+
+#[cfg(test)]
+mod resistance_triple_tests {
+    use super::*;
+    use crate::uom::units::{kg_per_m3, m2_per_s, s_per_kg};
+
+    /// Build two material cells from the standard fixture and check:
+    ///   1. `calculate_resistance_triple` therm/vapor == `calculate_resistance_pair`.
+    ///   2. `.liquid` equals the hand-computed rh_r1 + rh_r2.
+    ///   3. `.liquid` is zero when dw or dwd_phi are below the guard threshold.
+    #[test]
+    fn resistance_triple_matches_pair_and_inline_liquid() {
+        let mgr = crate::solver::test_fixtures::build_fixture_manager(2);
+        let bc = &mgr.boundary_condition;
+
+        // Grab two adjacent material cells.
+        let cells: Vec<&crate::cell::Cell> = mgr
+            .surface_curr
+            .cells
+            .iter()
+            .filter(|c| matches!(c.cell_type, crate::cell::CellType::Material(_)))
+            .collect();
+        assert!(cells.len() >= 2, "fixture must have at least 2 material cells");
+        let cell1 = cells[0];
+        let cell2 = cells[1];
+
+        // ── 1. therm/vapor agree with calculate_resistance_pair ────────────────
+        let triple = Surface::calculate_resistance_triple(cell1, cell2, bc.pressure_air);
+        let (therm_pair, vapor_pair) =
+            Surface::calculate_resistance_pair(cell1, cell2, bc.pressure_air);
+
+        assert_eq!(
+            triple.therm.value_unchecked(),
+            therm_pair.value_unchecked(),
+            "therm mismatch"
+        );
+        assert_eq!(
+            triple.vapor.value_unchecked(),
+            vapor_pair.value_unchecked(),
+            "vapor mismatch"
+        );
+
+        // ── 2. liquid == hand-computed rh_r1 + rh_r2 ──────────────────────────
+        let overlap = cell1.size.area_along(0).min(cell2.size.area_along(0));
+        let rh_r1: crate::uom::dimensions::MassResistance<f64> =
+            if cell1.dw > 1e-20 * m2_per_s && cell1.dwd_phi > 1e-20 * kg_per_m3 {
+                (cell1.size.x().abs() * 0.5) / (overlap * cell1.dw * cell1.dwd_phi)
+            } else {
+                0.0f64 * s_per_kg
+            };
+        let rh_r2: crate::uom::dimensions::MassResistance<f64> =
+            if cell2.dw > 1e-20 * m2_per_s && cell2.dwd_phi > 1e-20 * kg_per_m3 {
+                (cell2.size.x().abs() * 0.5) / (overlap * cell2.dw * cell2.dwd_phi)
+            } else {
+                0.0f64 * s_per_kg
+            };
+        let expected_liquid = rh_r1 + rh_r2;
+
+        assert_eq!(
+            triple.liquid.value_unchecked(),
+            expected_liquid.value_unchecked(),
+            "liquid resistance mismatch: triple={:?}, hand={:?}",
+            triple.liquid,
+            expected_liquid,
+        );
+
+        // ── 3. liquid is zero when dw/dwd_phi are below the guard threshold ────
+        // Clone a cell with dw = 0 (below 1e-20 m²/s guard).
+        let mut cell_no_dw = cell1.clone();
+        cell_no_dw.dw = 0.0 * m2_per_s;
+        let triple_no_dw =
+            Surface::calculate_resistance_triple(&cell_no_dw, cell2, bc.pressure_air);
+        // rh_r1 should be zero; only rh_r2 contributes (if cell2.dw is above threshold).
+        let expected_no_dw = if cell2.dw > 1e-20 * m2_per_s && cell2.dwd_phi > 1e-20 * kg_per_m3 {
+            (cell2.size.x().abs() * 0.5) / (overlap * cell2.dw * cell2.dwd_phi)
+        } else {
+            0.0 * s_per_kg
+        };
+        assert_eq!(
+            triple_no_dw.liquid.value_unchecked(),
+            expected_no_dw.value_unchecked(),
+            "liquid should be zero for cell1 side when dw=0"
+        );
+
+        // Clone both cells with dw = 0.
+        let mut cell2_no_dw = cell2.clone();
+        cell2_no_dw.dw = 0.0 * m2_per_s;
+        let triple_both_zero =
+            Surface::calculate_resistance_triple(&cell_no_dw, &cell2_no_dw, bc.pressure_air);
+        assert_eq!(
+            triple_both_zero.liquid.value_unchecked(),
+            0.0,
+            "liquid must be exactly 0 when both cells have dw=0"
+        );
     }
 }

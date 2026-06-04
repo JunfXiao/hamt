@@ -1,10 +1,10 @@
 use crate::{
     parallel::{par_or_seq, par_or_seq_mut}, uom::{
         Quantity, constants::{WATER_LATENT_HEAT, WATER_SPECIFIC_HEAT}, dimensions::{
-            HeatTransferCoeff, MassFlux, MassFluxPerTemperature, MassResistance, Power, SpecificEnergy, ThermalConductance, VaporConductance, VaporTransportCoeff
+            HeatTransferCoeff, MassFlux, MassFluxPerTemperature, Power, SpecificEnergy, ThermalConductance, VaporConductance, VaporTransportCoeff
         }, units::{
             dimensionless, j_per_kg, k_per_w, kelvin, kg_per_m2_s_pa, kg_per_m3, kg_per_s,
-            kilograms, m2_per_s, pa_s_per_kg, pascals, s_per_kg, seconds, w_per_k, w_per_m2_k, watts
+            kilograms, pa_s_per_kg, pascals, seconds, w_per_k, w_per_m2_k, watts
         }
     }
 };
@@ -258,38 +258,22 @@ impl Surface {
                     for nbr_i in surface_curr.neighbor_indices(i, nx) {
                         let nbr_curr = &surface_curr.cells[[nbr_i, 0, 0]];
 
-                        let (therm_r, vapor_r) =
-                            Self::calculate_resistance_pair(cell_curr, nbr_curr, bc.pressure_air);
+                        let r = Self::calculate_resistance_triple(cell_curr, nbr_curr, bc.pressure_air);
 
-                        if therm_r > 1e-12 * k_per_w {
-                            oorsum += 1.0 / therm_r;
-                            torsum += nbr_curr.cell_temp / therm_r;
+                        if r.therm > 1e-12 * k_per_w {
+                            oorsum += 1.0 / r.therm;
+                            torsum += nbr_curr.cell_temp / r.therm;
                         }
 
-                        if vapor_r > 1e-12 * pa_s_per_kg {
+                        if r.vapor > 1e-12 * pa_s_per_kg {
                             let nbr_vp = nbr_curr.cell_vp;
-                            let vc = 1.0 / vapor_r;
-                            vapor_diffusion_net_flux += (nbr_vp - curr_vp_pa) / vapor_r;
+                            let vc = 1.0 / r.vapor;
+                            vapor_diffusion_net_flux += (nbr_vp - curr_vp_pa) / r.vapor;
                             vpoosum += vc;
                             vporsum += nbr_vp * vc;
                         }
 
-                        let overlap_area = cell_curr.size.area_along(0).min(nbr_curr.size.area_along(0));
-                        let rh_r1: MassResistance<f64> =
-                            if cell_curr.dw > 1e-20 * m2_per_s && cell_curr.dwd_phi > 1e-20 * kg_per_m3 {
-                                (cell_curr.size.x().abs() * 0.5)
-                                    / (overlap_area * cell_curr.dw * cell_curr.dwd_phi)
-                            } else {
-                                0.0f64 * s_per_kg
-                            };
-                        let rh_r2: MassResistance<f64> =
-                            if nbr_curr.dw > 1e-20 * m2_per_s && nbr_curr.dwd_phi > 1e-20 * kg_per_m3 {
-                                (nbr_curr.size.x().abs() * 0.5)
-                                    / (overlap_area * nbr_curr.dw * nbr_curr.dwd_phi)
-                            } else {
-                                0.0f64 * s_per_kg
-                            };
-                        let r_total: Quantity<f64, _> = (rh_r1 + rh_r2) * dimensionless;
+                        let r_total: Quantity<f64, _> = r.liquid * dimensionless;
                         if r_total < f64::MAX * dimensionless / kg_per_s
                             && r_total > 1e-13 * dimensionless / kg_per_s
                         {
