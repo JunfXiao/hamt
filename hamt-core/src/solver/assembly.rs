@@ -1,8 +1,12 @@
 //! 1-D block-tridiagonal assembly for the implicit-Euler HAMT step.
 //!
-//! Mirrors the per-cell 2×2 build in `surface::step_jacobi::calculate_physics_step`
-//! but emits one (L, D, U, b) row per material cell and pushes
-//! material-material couplings into the off-diagonals.
+//! Shares the cell-local 2×2 (T, φ) physics with the BlockJacobi path:
+//! the diagonal block and cell-local RHS come from the single source
+//! [`Surface::build_cell_block`] (fed by all-neighbour conductance sums,
+//! [`Surface::cell_inertia`], and [`Surface::cell_sources`]). This module
+//! adds only the tridiag-specific parts — material-material couplings as
+//! off-diagonal blocks and boundary-neighbour RHS contributions — emitting
+//! one (L, D, U, b) row per material cell.
 //!
 //! Strip discipline: typed quantities cross into raw f64 only inside the
 //! 2×2 block construction (the kernel boundary). Each `.value_in(...)`
@@ -13,17 +17,16 @@
 //! This module is hard-coded to the existing 1-D wall geometry. When
 //! the solver moves to 2-D / 3-D walls, ADI sweeps will live in sibling
 //! modules (`assemble_x_sweep`, etc.) and call the same
-//! `block_tridiag::solve` kernel. The 2×2 block construction logic is
-//! not direction-specific and should be factored into a small helper at
-//! that point.
+//! `block_tridiag::solve` kernel. The shared `build_cell_block` is not
+//! direction-specific and is reused as-is by those sweeps.
 
 use crate::boundary::BoundaryCondition;
 use crate::config::HamtSettings;
-use crate::surface::Surface;
-use crate::uom::constants::{WATER_LATENT_HEAT, WATER_SPECIFIC_HEAT};
+use crate::surface::{NeighborSums, Surface};
+use crate::uom::constants::WATER_LATENT_HEAT;
+use crate::uom::dimensions::{MassFlux, ThermalConductance, VaporConductance};
 use crate::uom::units::{
-    dimensionless, j_per_kg, k_per_w, kelvin, kg_per_m3, kg_per_s, kilograms, m2_per_s,
-    pa_s_per_kg, pascals, s_per_kg, w_per_k, watts,
+    dimensionless, j_per_kg, k_per_w, kelvin, kg_per_s, pa_s_per_kg, pascals, w_per_k, watts,
 };
 
 use super::block_2x2::Block2x2;
@@ -82,8 +85,8 @@ pub(crate) fn assemble_1d(
         let cell_curr = &surface.cells[[i, 0, 0]];
         let cell_prev = &surface_prev.cells[[i, 0, 0]];
 
-        // L_eff and Taylor parameters at lagged state.
-        // When latent_heat_enabled is false the cross-coupling vanishes entirely.
+        // L_eff at lagged state. When latent_heat_enabled is false the
+        // cross-coupling vanishes entirely.
         let l_eff: crate::uom::dimensions::SpecificEnergy<f64> = if settings.latent_heat_enabled {
             1.0 * WATER_LATENT_HEAT
                 + if settings.sorption_enthalpy_enabled {
@@ -94,135 +97,65 @@ pub(crate) fn assemble_1d(
         } else {
             0.0 * j_per_kg
         };
-        let phi_k = cell_curr.cell_rh;
-        let psat_curr = cell_curr.vp_sat;
-        let d_psat_d_t = cell_curr.d_psat_d_t;
 
-        // Cell-local capacities.
-        let tcap = (cell_curr.density * cell_curr.spech
-            + cell_curr.volumetric_water * WATER_SPECIFIC_HEAT)
-            * cell_curr.volume;
-        let wcap = if cell_curr.dwd_phi > 1e-10 * kg_per_m3 {
-            cell_curr.dwd_phi * cell_curr.volume
-        } else {
-            1.0e-10 * kilograms
-        };
+        // ── All-neighbour conductance sums (typed) feeding the diagonal ──
+        // `build_cell_block` needs oorsum/vpoosum/phioosum summed over ALL
+        // neighbours (material AND boundary). We accumulate them here in the
+        // same single walk that builds the off-diagonals and the
+        // boundary-neighbour RHS. The or-sums (torsum/vporsum/phiorsum) are
+        // the neighbour-VALUE coupling that `build_cell_block` does NOT
+        // produce; for the tridiag path the material part lives in the
+        // off-diagonal blocks and the boundary part is added to the RHS
+        // below, so the or-sums are left at zero here.
+        let mut oorsum: ThermalConductance<f64> = 0.0 * w_per_k;
+        let mut vpoosum: VaporConductance<f64> = 0.0 * kg_per_s / pascals;
+        let mut phioosum: MassFlux<f64> = 0.0 * kg_per_s;
 
-        // Local 2×2 diagonal scalars (f64).
-        let mut d_tt: f64 = 0.0; // [W/K]
-        let mut d_pp: f64 = 0.0; // [kg/s]
-        let mut b_t: f64 = 0.0; // [W]
-        let mut b_p: f64 = 0.0; // [kg/s]
+        // Boundary-neighbour RHS contributions (stay inline — build_cell_block
+        // does not produce them). Accumulated in raw f64 (kernel boundary).
+        let mut b_t_boundary: f64 = 0.0; // [W]
+        let mut b_p_boundary: f64 = 0.0; // [kg/s]
 
-        // Inertial terms — always go to diagonal + RHS.
-        // strip: assemble enters the linear-algebra kernel
-        let tcap_per_dt = (tcap / dt_s).value_in(w_per_k);
-        let wcap_per_dt = (wcap / dt_s).value_in(kg_per_s);
-        d_tt += tcap_per_dt;
-        d_pp += wcap_per_dt;
-        // strip: kernel boundary
-        b_t += tcap_per_dt * cell_prev.cell_temp.value_in(kelvin);
-        b_p += wcap_per_dt * cell_prev.cell_rh.value();
-
-        // Boundary-deposit and user-defined source on cell i.
-        let q_weight = surface
-            .user_defined_cell_idx
-            .as_ref()
-            .map(|w| {
-                w.iter()
-                    .filter(|(idx, _)| idx[0] == i)
-                    .map(|(_, w)| w)
-                    .sum::<f64>()
-            })
-            .unwrap_or(0.0);
-        let q_adds = bc.q_addition_userdef * q_weight;
-        let q_boundary_energy = if Some(i) == surface.interior_surface_material_idx {
-            bc.additional_energy_int
-        } else if Some(i) == surface.exterior_surface_material_idx {
-            bc.additional_energy_ext
-        } else {
-            0.0 * watts
-        };
-        // strip: kernel boundary
-        b_t += (q_adds + q_boundary_energy).value_in(watts);
-
-        // Cell-local Taylor cross-coupling for vapour: appears in BOTH
-        // diagonal blocks and in the RHS as the linearisation bias.
-        // cross [kg/(s·K)]: vpoosum_local · phi_k · dPsat/dT, where
-        // vpoosum_local must be summed over ALL neighbours (boundary +
-        // material) — we accumulate it as we walk neighbours below.
-        let mut vpoosum_si: f64 = 0.0; // [kg/(s·Pa)]
-
-        // Accumulate diagonal sums for d_tt and d_pp from ALL neighbours
-        // (both material and boundary). The cross-term (d_tp, d_pt) is
-        // computed after the loop using vpoosum_si.
-        // NOTE: d_tt and d_pp get `+ inv_th` and `+ inv_phi + inv_vapor·Psat`
-        // from every neighbour (material and boundary alike). The off-diagonal
+        // Walk the neighbour stencil once: accumulate conductance sums,
+        // build material off-diagonals, and collect boundary RHS.
+        // NOTE: the diagonal gets `+ inv_th` and `+ inv_phi + inv_vapor·Psat`
+        // from every neighbour (material and boundary alike) — that is exactly
+        // what `oorsum`/`phioosum`/`vpoosum·Psat` encode. The off-diagonal
         // block for a material-material edge carries the NEGATIVE of those same
-        // conductances. Boundary neighbours contribute only to diagonal + RHS.
-
-        // Walk the neighbour stencil.
+        // conductances; boundary neighbours contribute only to diagonal + RHS.
         for nbr_li in surface.neighbor_indices(i, nx, 0) {
             let nbr_curr = &surface.cells[[nbr_li, 0, 0]];
 
-            // Resistance pair using the lagged state.
-            let (therm_r, vapor_r) =
-                Surface::calculate_resistance_pair(cell_curr, nbr_curr, bc.pressure_air, 0);
+            // Resistance triple using the lagged state — identical to the
+            // BlockJacobi `accumulate_neighbor_sums` path (same guards).
+            let r =
+                Surface::calculate_resistance_triple(cell_curr, nbr_curr, bc.pressure_air, 0);
 
-            // Conductances (zero-on-degeneracy guards mirror the existing path).
-            // strip: kernel boundary
-            let inv_th = if therm_r > 1e-12 * k_per_w {
-                1.0 / therm_r.value_in(k_per_w)
+            // Typed conductances (zero-on-degeneracy guards mirror the
+            // BlockJacobi path exactly).
+            let cond_th: ThermalConductance<f64> = if r.therm > 1e-12 * k_per_w {
+                1.0 / r.therm
             } else {
-                0.0
+                0.0 * w_per_k
             };
-            let inv_vapor = if vapor_r > 1e-12 * pa_s_per_kg {
-                1.0 / vapor_r.value_in(pa_s_per_kg)
+            let cond_vapor: VaporConductance<f64> = if r.vapor > 1e-12 * pa_s_per_kg {
+                1.0 / r.vapor
             } else {
-                0.0
+                0.0 * kg_per_s / pascals
             };
-
-            // Liquid (RH-driven) inter-cell resistance — mirrors the
-            // existing per-cell branch in calculate_physics_step.
-            let overlap_area = cell_curr
-                .size
-                .area_along(0)
-                .min(nbr_curr.size.area_along(0));
-            let rh_r1 = if cell_curr.dw > 1e-20 * m2_per_s && cell_curr.dwd_phi > 1e-20 * kg_per_m3
-            {
-                (cell_curr.size.x().abs() * 0.5) / (overlap_area * cell_curr.dw * cell_curr.dwd_phi)
-            } else {
-                0.0f64 * s_per_kg
-            };
-            let rh_r2 = if nbr_curr.dw > 1e-20 * m2_per_s && nbr_curr.dwd_phi > 1e-20 * kg_per_m3 {
-                (nbr_curr.size.x().abs() * 0.5) / (overlap_area * nbr_curr.dw * nbr_curr.dwd_phi)
-            } else {
-                0.0f64 * s_per_kg
-            };
-            let r_total_phi = (rh_r1 + rh_r2) * dimensionless;
-            let inv_phi = if r_total_phi > 1e-13 * dimensionless / kg_per_s
+            let r_total_phi = r.liquid * dimensionless;
+            let cond_phi: MassFlux<f64> = if r_total_phi > 1e-13 * dimensionless / kg_per_s
                 && r_total_phi < f64::MAX * dimensionless / kg_per_s
             {
-                // strip: kernel boundary
-                (1.0 / r_total_phi).value_in(kg_per_s)
+                1.0 / r_total_phi
             } else {
-                0.0
+                0.0 * kg_per_s
             };
 
-            // Local Psat / dPsat-dT for the NEIGHBOUR (lagged).
-            // strip: kernel boundary
-            let psat_n = nbr_curr.vp_sat.value_in(pascals);
-            let temp_n = nbr_curr.cell_temp.value_in(kelvin); // strip: kernel boundary
-            // Use cell_vp directly: boundary cells set cell_vp explicitly
-            // (e.g. Radiation cell sets cell_vp = 0), so psat_n * phi_n
-            // is wrong for them. The material-neighbour off-diagonals still
-            // use psat_n (correct: they reference the state variable phi,
-            // not the fixed boundary VP). See surface/update.rs:250.
-            let vp_n = nbr_curr.cell_vp.value_in(pascals); // strip: kernel boundary
-
-            // Always update the LOCAL `vpoosum_si` (cross-coupling uses
-            // sum over ALL neighbours).
-            vpoosum_si += inv_vapor;
+            // All-neighbour conductance sums for the diagonal block.
+            oorsum += cond_th;
+            vpoosum += cond_vapor;
+            phioosum += cond_phi;
 
             if is_material_at[nbr_li] {
                 // ── Material neighbour: contributions go to OFF-DIAGONAL ──
@@ -230,14 +163,15 @@ pub(crate) fn assemble_1d(
                 //   block_tt = -inv_th
                 //   block_pp = -(inv_phi + inv_vapor·Psat_n)
                 //   block_tp = -L_eff · inv_vapor · Psat_n
-                //   block_pt = 0  (neighbour's dPsat/dT and phi_n are the
-                //                  neighbour's state; the off-diagonal only
-                //                  needs the vapour-pressure coupling, which
-                //                  for the φ-equation is via Psat_n·inv_vapor.
-                //                  The Taylor-linearisation cross term a_pt
+                //   block_pt = 0  (the Taylor-linearisation cross term a_pt
                 //                  uses the CELL's own phi·dPsat/dT and goes
                 //                  to the diagonal only, not the off-diagonal.)
-                let l_eff_v = l_eff.value_in(j_per_kg); // strip: kernel boundary
+                // strip: kernel boundary
+                let inv_th = cond_th.value_in(w_per_k);
+                let inv_vapor = cond_vapor.value_in(kg_per_s / pascals);
+                let inv_phi = cond_phi.value_in(kg_per_s);
+                let l_eff_v = l_eff.value_in(j_per_kg);
+                let psat_n = nbr_curr.vp_sat.value_in(pascals);
                 let off = Block2x2 {
                     a: -inv_th,
                     b: -l_eff_v * inv_vapor * psat_n,
@@ -251,9 +185,6 @@ pub(crate) fn assemble_1d(
                     c: 0.0,
                     d: -(inv_phi + inv_vapor * psat_n),
                 };
-                // Diagonal counter-contribution (positive sign).
-                d_tt += inv_th;
-                d_pp += inv_phi + inv_vapor * psat_curr.value_in(pascals); // strip: kernel boundary
 
                 let nbr_row = row_of[nbr_li];
                 if nbr_row == row + 1 {
@@ -267,43 +198,46 @@ pub(crate) fn assemble_1d(
                 }
             } else {
                 // ── Boundary neighbour: contributes to diagonal + RHS ──
-                let phi_b = nbr_curr.cell_rh.value();
-                d_tt += inv_th;
-                d_pp += inv_phi + inv_vapor * psat_curr.value_in(pascals); // strip: kernel boundary
-                // RHS additions for the boundary side.
+                // The diagonal contribution is already folded into the
+                // oorsum/vpoosum/phioosum sums above (build_cell_block applies
+                // them). Only the neighbour-VALUE RHS coupling is inline here.
+                // Use cell_vp directly: boundary cells set cell_vp explicitly
+                // (e.g. Radiation cell sets cell_vp = 0). See surface/update.rs.
                 // strip: kernel boundary
-                b_t += inv_th * temp_n + l_eff.value_in(j_per_kg) * inv_vapor * vp_n;
-                b_p += inv_phi * phi_b + inv_vapor * vp_n;
+                let inv_th = cond_th.value_in(w_per_k);
+                let inv_vapor = cond_vapor.value_in(kg_per_s / pascals);
+                let inv_phi = cond_phi.value_in(kg_per_s);
+                let temp_n = nbr_curr.cell_temp.value_in(kelvin);
+                let vp_n = nbr_curr.cell_vp.value_in(pascals);
+                let phi_b = nbr_curr.cell_rh.value();
+                b_t_boundary += inv_th * temp_n + l_eff.value_in(j_per_kg) * inv_vapor * vp_n;
+                b_p_boundary += inv_phi * phi_b + inv_vapor * vp_n;
             }
         }
 
-        // Cell-local Taylor cross-coupling. Uses sum over ALL neighbours.
-        let l_eff_v = l_eff.value_in(j_per_kg); // strip
-        let psat_curr_v = psat_curr.value_in(pascals); // strip
-        let dpsdt_curr_v = d_psat_d_t.value_in(crate::uom::units::pa_per_k); // strip
-        let cross = vpoosum_si * phi_k.value() * dpsdt_curr_v;
-        let t_curr_v = cell_curr.cell_temp.value_in(kelvin); // strip
-
-        // Diagonal cross terms (within the same cell — they are NOT
-        // attached to a neighbour, they're the local linearisation).
-        let d_tp = l_eff_v * vpoosum_si * psat_curr_v;
-        let d_pt = cross;
-        // Latent-heat contribution to A_tt comes from the cross term:
-        d_tt += l_eff_v * cross;
-
-        // RHS bias from the linearisation: `+ L_eff · cross · T_curr`
-        // and `+ cross · T_curr` are the constants moved over from the
-        // implicit form.
-        b_t += l_eff_v * cross * t_curr_v;
-        b_p += cross * t_curr_v;
-
-        diag[row] = Block2x2 {
-            a: d_tt,
-            b: d_tp,
-            c: d_pt,
-            d: d_pp,
+        // ── Cell-local diagonal block + cell-local RHS via the SHARED builder ──
+        // Single source of the cell-local (T, φ) physics (capacities, Taylor
+        // cross, inertial + source biases). The or-sums (neighbour-VALUE
+        // coupling) are zero here: the material part is in the off-diagonals
+        // and the boundary part is added to the RHS below.
+        let sums = NeighborSums {
+            oorsum,
+            torsum: 0.0 * watts,
+            vapor_diffusion_net_flux: 0.0 * kg_per_s,
+            vpoosum,
+            vporsum: 0.0 * kg_per_s,
+            phioosum,
+            phiorsum: 0.0 * kg_per_s,
         };
-        rhs[row] = (b_t, b_p);
+        let inertia = Surface::cell_inertia(i, cell_curr);
+        let sources = surface.cell_sources(i, surface, bc);
+
+        let (block, (b_t0, b_p0)) =
+            Surface::build_cell_block(&sums, &inertia, &sources, cell_curr, cell_prev, l_eff, dt_s);
+
+        // Start from the cell-local RHS and add the boundary-neighbour coupling.
+        diag[row] = block;
+        rhs[row] = (b_t0 + b_t_boundary, b_p0 + b_p_boundary);
     }
 
     AssembledSystem {

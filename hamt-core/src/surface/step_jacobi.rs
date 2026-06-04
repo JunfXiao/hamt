@@ -139,7 +139,7 @@ impl Surface {
     /// during a block-Jacobi / Picard sweep. The guards
     /// (`1e-12*k_per_w`, `1e-12*pa_s_per_kg`, the liquid `r_total` bounds)
     /// drop degenerate / zero-coupling interfaces.
-    fn accumulate_neighbor_sums(
+    pub(crate) fn accumulate_neighbor_sums(
         &self,
         i: usize,
         surf_curr: &Surface,
@@ -199,7 +199,7 @@ impl Surface {
     }
 
     /// Cell-local inertial capacities `(tcap, wcap)` for the implicit step.
-    fn cell_inertia(i: usize, cell_curr: &Cell) -> CellInertia {
+    pub(crate) fn cell_inertia(i: usize, cell_curr: &Cell) -> CellInertia {
         let tcap = (cell_curr.density * cell_curr.spech
             + cell_curr.volumetric_water * WATER_SPECIFIC_HEAT)
             * cell_curr.volume;
@@ -218,7 +218,12 @@ impl Surface {
     }
 
     /// Cell-local heat sources `(q_adds, q_boundary)` for cell `i`.
-    fn cell_sources(&self, i: usize, surf_curr: &Surface, bc: &BoundaryCondition) -> CellSources {
+    pub(crate) fn cell_sources(
+        &self,
+        i: usize,
+        surf_curr: &Surface,
+        bc: &BoundaryCondition,
+    ) -> CellSources {
         let q_weight = surf_curr
             .user_defined_cell_idx
             .as_ref()
@@ -247,7 +252,7 @@ impl Surface {
     /// Cell-local diagonal 2×2 block + cell-local RHS (capacities, Taylor cross,
     /// inertial + source biases). NEIGHBOUR-VALUE coupling (torsum / l_eff*vporsum
     /// into b_t; phiorsum / vporsum into b_p) is added by the caller.
-    pub(super) fn build_cell_block(
+    pub(crate) fn build_cell_block(
         sums: &NeighborSums,
         inertia: &CellInertia,
         sources: &CellSources,
