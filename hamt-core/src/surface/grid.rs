@@ -190,17 +190,83 @@ pub(super) fn build_x_column(
     Ok(cells)
 }
 
-/// Build a (nx, ny, 1) cell lattice: `ny` x-columns stacked along y, each with
-/// real cross-section (col_y = y_extent/ny, col_z). Column j sits at y-origin
-/// j*col_y. Returns the ArcArray3 ready for Surface assembly.
+/// Build a `(nx, ny, nz)` cell lattice: `ny * nz` x-columns, each with
+/// cross-section `(col_y, col_z) = (y_extent/ny, z_extent/nz)`. Column `(j, k)`
+/// sits at y-origin `j * col_y`, z-origin `k * col_z`.
+///
+/// The flat storage is C-order: `flat[i*ny*nz + j*nz + k] == cell[[i,j,k]]`.
+///
+/// `build_x_column` advances only `base_pt.x`; seeding `base_pt.(y,z)` for each
+/// `(j, k)` pair places the column correctly without any change to `build_x_column`.
+/// Every column has the same `nx` (subdivision is x-only).
+///
+/// The 2-D `(nx, ny, 1)` path is `nz = 1, z_extent = sqrt(area)`.
+/// The 1-D `(N, 1, 1)` path is `ny = 1, nz = 1` with `col_y = col_z = sqrt(area)`.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::needless_range_loop)] // `i` indexes column[j,k][i]; not indexing one collection
+pub(super) fn build_grid_3d(
+    settings: &HamtSettings,
+    construction: &Construction,
+    _surface_area: Area<f64>,
+    ny: usize,
+    y_extent: Length<f64>,
+    nz: usize,
+    z_extent: Length<f64>,
+    init_bc: &BoundaryCondition,
+) -> Result<ndarray::ArcArray3<Cell>> {
+    let boundary_cell_thickness = settings.base_cell_size.x();
+    let col_y = y_extent / ny as f64;
+    let col_z = z_extent / nz as f64;
+
+    // Build ny * nz x-columns keyed by (j, k).
+    // Use a flat Vec<Vec<Cell>> of length ny*nz, accessed as columns[j*nz + k].
+    let mut columns: Vec<Vec<Cell>> = Vec::with_capacity(ny * nz);
+    for k in 0..nz {
+        for j in 0..ny {
+            let mut base_pt = Pt3D::new(
+                -boundary_cell_thickness * 2.0,
+                col_y * j as f64,
+                col_z * k as f64,
+            );
+            let col =
+                build_x_column(settings, construction, &mut base_pt, col_y, col_z, init_bc)?;
+            columns.push(col);
+        }
+    }
+    let nx = columns[0].len();
+    assert!(
+        columns.iter().all(|c| c.len() == nx),
+        "non-uniform column length"
+    );
+
+    // Flatten C-order for shape (nx, ny, nz):
+    //   flat[i*ny*nz + j*nz + k] = cell[[i, j, k]]
+    //   The build loop above is k-outer, j-inner, so column (j,k) sits at
+    //   columns[k*ny + j].
+    let mut flat: Vec<Cell> = Vec::with_capacity(nx * ny * nz);
+    for i in 0..nx {
+        for j in 0..ny {
+            for k in 0..nz {
+                // strip: integer index into column (j,k), no UoM involved.
+                flat.push(columns[k * ny + j][i].clone());
+            }
+        }
+    }
+    Ok(ndarray::ArcArray3::from_shape_vec((nx, ny, nz), flat)?)
+}
+
+/// Build a `(nx, ny, 1)` cell lattice: `ny` x-columns stacked along y, each with
+/// real cross-section `(col_y = y_extent/ny, col_z = sqrt(surface_area))`.
+///
+/// This is the `nz = 1` delegate of [`build_grid_3d`], reproducing the existing
+/// 2-D geometry exactly (same `col_z = sqrt(area)` convention).
 ///
 /// The 1-D path is the `ny = 1` case: one column at y-origin 0 with
 /// `col_y = col_z = sqrt(area)` — byte-identical to the legacy `(N,1,1)` build.
 ///
-/// `build_x_column` advances only `base_pt.x`; the y/z components of `base_pt`
-/// are honoured by `get_origin` (`bp + size/2.0`) for every cell origin, so
-/// seeding `base_pt.y = j*col_y` places column j correctly without any change
-/// to `build_x_column`. Subdivision is x-only, so every column has the same nx.
+/// Kept as a named API for `from_construction_2d` call sites and tests; the
+/// production path calls `build_grid_3d(nz=1)` directly via `from_construction_3d`.
+#[allow(dead_code)] // called from tests and retained as a named 2-D API
 pub(super) fn build_grid_2d(
     settings: &HamtSettings,
     construction: &Construction,
@@ -209,31 +275,18 @@ pub(super) fn build_grid_2d(
     y_extent: Length<f64>,
     init_bc: &BoundaryCondition,
 ) -> Result<ndarray::ArcArray3<Cell>> {
-    let boundary_cell_thickness = settings.base_cell_size.x();
-    let col_y = y_extent / ny as f64;
-    let col_z = surface_area.sqrt(); // 2-D out-of-plane extent (z); unchanged convention
-    let mut columns: Vec<Vec<Cell>> = Vec::with_capacity(ny);
-    for j in 0..ny {
-        // Each column starts at the same x offset as the 1-D path (two exterior
-        // boundary layers worth of negative x), and y-origin j*col_y.
-        let mut base_pt = Pt3D::new(-boundary_cell_thickness * 2.0, col_y * j as f64, 0.0 * meter);
-        let col = build_x_column(settings, construction, &mut base_pt, col_y, col_z, init_bc)?;
-        columns.push(col);
-    }
-    let nx = columns[0].len();
-    // All columns must have identical nx (subdivision is x-only).
-    assert!(
-        columns.iter().all(|c| c.len() == nx),
-        "non-uniform column length"
-    );
-    // Flatten C-order for shape (nx, ny, 1): flat[i*ny + j] = columns[j][i] = cell[[i,j,0]].
-    let mut flat: Vec<Cell> = Vec::with_capacity(nx * ny);
-    for i in 0..nx {
-        for col in columns.iter() {
-            flat.push(col[i].clone());
-        }
-    }
-    Ok(ndarray::ArcArray3::from_shape_vec((nx, ny, 1), flat)?)
+    // Reproduce the existing col_z = sqrt(area) convention exactly.
+    let z_extent = surface_area.sqrt();
+    build_grid_3d(
+        settings,
+        construction,
+        surface_area,
+        ny,
+        y_extent,
+        1,
+        z_extent,
+        init_bc,
+    )
 }
 
 #[cfg(test)]
@@ -309,6 +362,122 @@ mod tests {
         )
         .expect("create construction");
         lib.get_construction("GridTestConstruction").unwrap()
+    }
+
+    /// Verify build_grid_3d produces the correct (nx, ny, nz) shape and that the
+    /// C-order flatten places cell [i,j,k] at z-origin col_z*k.
+    #[test]
+    fn build_grid_3d_has_correct_dims_and_z_origin() {
+        let settings = HamtSettings::default();
+        let bc = BoundaryCondition::default();
+        let construction = build_test_construction();
+        let ny = 2usize;
+        let nz = 3usize;
+        let y_extent = 1.0 * meter;
+        let z_extent = 1.5 * meter;
+        let area = y_extent * z_extent;
+        let col_z = z_extent / nz as f64;
+
+        let cells = build_grid_3d(
+            &settings,
+            &construction,
+            area,
+            ny,
+            y_extent,
+            nz,
+            z_extent,
+            &bc,
+        )
+        .expect("build_grid_3d must succeed");
+
+        let dim = cells.raw_dim();
+        let nx = dim[0];
+        assert!(nx > 1, "expected nx > 1, got {nx}");
+        assert_eq!([dim[0], dim[1], dim[2]], [nx, ny, nz], "shape mismatch");
+
+        // Pick a material cell at each k and verify its z-origin advances by col_z*k.
+        // Find the first material x-index (same for all columns).
+        let first_mat_x = (0..nx)
+            .find(|&x| matches!(cells[[x, 0, 0]].cell_type, CellType::Material(_)))
+            .expect("no material cells found");
+
+        let col_z_m = col_z.value_in(meter); // strip: scalar tolerance compare
+        for k in 0..nz {
+            // z-origin of the cell = col_z * k + col_z/2 (cell is centred within its slab).
+            let expected_z = col_z_m * k as f64 + col_z_m / 2.0;
+            let got = cells[[first_mat_x, 0, k]].origin.z().value_in(meter); // strip: scalar tolerance compare
+            assert!(
+                (got - expected_z).abs() < 1e-9,
+                "k={k}: expected z-origin {expected_z:.6}, got {got:.6}"
+            );
+        }
+    }
+
+    /// Verify build_grid_2d is byte-identical to build_grid_3d with nz=1 and
+    /// z_extent = sqrt(area), at every cell index [i,j,0].
+    #[test]
+    fn build_grid_2d_equals_build_grid_3d_nz1() {
+        use crate::config::FaceBc;
+        let settings = HamtSettings::default();
+        let bc = BoundaryCondition::default();
+        let construction = build_test_construction();
+        let ny = 3usize;
+        let y_extent = 1.2 * meter;
+        let area: crate::uom::dimensions::Area<f64> = 1.0 * square_meter;
+        let z_extent = area.sqrt();
+
+        let cells_2d = build_grid_2d(&settings, &construction, area, ny, y_extent, &bc)
+            .expect("build_grid_2d must succeed");
+
+        let cells_3d = build_grid_3d(
+            &settings,
+            &construction,
+            area,
+            ny,
+            y_extent,
+            1,
+            z_extent,
+            &bc,
+        )
+        .expect("build_grid_3d must succeed");
+
+        let dim2 = cells_2d.raw_dim();
+        let dim3 = cells_3d.raw_dim();
+        assert_eq!(
+            [dim2[0], dim2[1], dim2[2]],
+            [dim3[0], dim3[1], dim3[2]],
+            "shape mismatch between build_grid_2d and build_grid_3d(nz=1)"
+        );
+
+        let (nx, ny_dim, _nz_dim) = (dim2[0], dim2[1], dim2[2]);
+        for i in 0..nx {
+            for j in 0..ny_dim {
+                let c2 = &cells_2d[[i, j, 0]];
+                let c3 = &cells_3d[[i, j, 0]];
+                assert_eq!(
+                    c2.cell_type, c3.cell_type,
+                    "cell_type mismatch at [{i},{j},0]"
+                );
+                let o2 = c2.origin;
+                let o3 = c3.origin;
+                let dx = (o2.x() - o3.x()).value_in(meter).abs(); // strip: scalar tolerance compare
+                let dy = (o2.y() - o3.y()).value_in(meter).abs(); // strip: scalar tolerance compare
+                let dz = (o2.z() - o3.z()).value_in(meter).abs(); // strip: scalar tolerance compare
+                assert!(dx < 1e-12, "[{i},{j},0] x-origin mismatch: {dx}");
+                assert!(dy < 1e-12, "[{i},{j},0] y-origin mismatch: {dy}");
+                assert!(dz < 1e-12, "[{i},{j},0] z-origin mismatch: {dz}");
+                let sz2 = c2.size;
+                let sz3 = c3.size;
+                let sdx = (sz2.x() - sz3.x()).value_in(meter).abs(); // strip: scalar tolerance compare
+                let sdy = (sz2.y() - sz3.y()).value_in(meter).abs(); // strip: scalar tolerance compare
+                let sdz = (sz2.z() - sz3.z()).value_in(meter).abs(); // strip: scalar tolerance compare
+                assert!(sdx < 1e-12, "[{i},{j},0] x-size mismatch: {sdx}");
+                assert!(sdy < 1e-12, "[{i},{j},0] y-size mismatch: {sdy}");
+                assert!(sdz < 1e-12, "[{i},{j},0] z-size mismatch: {sdz}");
+            }
+        }
+        // Also confirm the type is unused here (silence unused import)
+        let _ = FaceBc::Adiabatic;
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub use settings::*;
 
 use crate::boundary::BoundaryCondition;
 use crate::cell::CellType;
+use crate::config::FaceBc;
 use crate::material::{Construction, Material};
 use crate::surface::Surface;
 use crate::uom::Quantity;
@@ -108,6 +109,52 @@ impl HamtManager {
             surface_area,
             ny,
             y_extent,
+            &boundary,
+        )?;
+
+        Ok(Self::from_surface(settings, boundary, construction, surface))
+    }
+
+    /// 3-D variant of [`HamtManager::new`]: builds the three surfaces via
+    /// [`Surface::from_construction_3d`] so the manager owns a `(nx, ny, nz)`
+    /// grid (`ny * nz` x-columns, each `y_extent/ny` tall and `z_extent/nz` wide).
+    ///
+    /// `z_faces` controls the z-min and z-max face boundary conditions.
+    /// Pass `[FaceBc::Adiabatic; 2]` for a sealed (no-flux) z-boundary, or
+    /// `[FaceBc::Active; 2]` to exercise cross-z coupling in tests.
+    ///
+    /// With `ny = 1, nz = 1, y_extent = z_extent = sqrt(area)` this is equivalent
+    /// to `new`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_3d(
+        settings: Option<HamtSettings>,
+        initial_boundary: Option<BoundaryCondition>,
+        construction: Arc<Construction>,
+        surface_name: String,
+        surface_area: Area<f64>,
+        ny: usize,
+        y_extent: Length<f64>,
+        nz: usize,
+        z_extent: Length<f64>,
+        z_faces: [FaceBc; 2],
+    ) -> Result<Self> {
+        let (settings, boundary) = Self::prepare_settings_and_boundary(
+            settings,
+            initial_boundary,
+            &construction,
+            &surface_name,
+        );
+
+        let surface = Surface::from_construction_3d(
+            &settings,
+            construction.clone(),
+            surface_name,
+            surface_area,
+            ny,
+            y_extent,
+            nz,
+            z_extent,
+            z_faces,
             &boundary,
         )?;
 
