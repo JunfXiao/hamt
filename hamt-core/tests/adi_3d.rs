@@ -1,0 +1,640 @@
+#![feature(adt_const_params, generic_const_exprs)]
+#![allow(incomplete_features)]
+
+//! Gating tests for the 3-D ADI path (Phase 2b, Task 4).
+//!
+//! A `(nx, ny, nz)` wall that is **uniform in both y and z** — `ny*nz` identical
+//! x-columns, adiabatic side faces on all four off-axis faces, and 1-D-equivalent
+//! boundary conditions on every column — must reproduce the trusted DIN EN 15026
+//! 1-D analytical benchmark on *every* `(j, k)` line when solved with
+//! `SolverMethod::Adi`. Any spurious y- or z-gradient (a stencil/grid/cross-lag
+//! bug) shows up either as a per-line mismatch against the 1-D reference or as a
+//! non-zero cross-line residual.
+//!
+//! The physics harness (curves, library, BC schedule, preheat + run loop) and
+//! the reference tables are shared via `tests/common`; only the manager
+//! construction (`new_3d`) and the comparison (per-line + cross-line, against the
+//! same tolerances) differ from the 2-D gating test (`adi_2d.rs`).
+
+mod common;
+
+use anyhow::{Ok, Result};
+use common::{
+    CONSTRUCTION_NAME, PERCENTAGE_RANGE_RH, PERCENTAGE_RANGE_T, REF_TEMPERATURE, REF_WATER_CONTENT,
+    create_library, init_tracing,
+};
+use hamt_core::config::FaceBc;
+use hamt_core::uom::dimensions::{Dimensionless, Temperature, Time};
+use hamt_core::uom::units::{
+    days, dimensionless, hours, kelvin, kg_per_m2_s_pa, m_per_s, meter, seconds, square_meter,
+    w_per_m2_k,
+};
+use hamt_core::uom::{Dimension, Quantity};
+use hamt_core::{
+    boundary::{BoundaryCondition, celsius_to_kelvin, kelvin_to_celsius},
+};
+use hamt_core::{
+    cell::CellType,
+    hamt_manager::{AdaptiveState, HamtManager, HamtSettings, SolverMethod},
+};
+use std::collections::HashSet;
+
+// Cross-line uniformity residual: a truly (y,z)-uniform wall must keep every
+// line identical to numerical round-off. Loose enough for f64 accumulation
+// across a year of substeps, tight enough to catch any real coupling leak.
+const CROSS_LINE_TOL_T_K: f64 = 1e-6;
+const CROSS_LINE_TOL_W: f64 = 1e-6; // kg/m3
+
+// ---------------------------------------------------------------------------
+// 3-D comparison helpers.
+// ---------------------------------------------------------------------------
+
+/// Read a material-cell quantity along the `(j, k)` line at the depth nearest
+/// `depth_m`. Returns (value, [i,j,k]). Mirrors `cell_value_at_depth_row` in
+/// `adi_2d.rs` but takes explicit `j` AND `k` indices.
+fn cell_value_at_depth_line<F, const D: Dimension>(
+    surface: &hamt_core::surface::Surface,
+    depth_m: f64,
+    j: usize,
+    k: usize,
+    f: F,
+) -> (f64, [usize; 3])
+where
+    F: Fn(&hamt_core::cell::Cell) -> Quantity<f64, D>,
+{
+    let dims = surface.cells.raw_dim();
+    let nx = dims[0];
+    let target = depth_m * meter;
+    let mut best: Option<([usize; 3], f64, f64)> = None; // (idx, dist, value)
+    for i in 0..nx {
+        let cell = &surface.cells[[i, j, k]];
+        if !matches!(cell.cell_type, CellType::Material(_)) {
+            continue;
+        }
+        // strip: scalar nearest-cell distance compare in metres
+        let dist = (cell.origin.x().value_in(meter) - target.value_in(meter)).abs();
+        let take = match best {
+            Some((_, best_dist, _)) => dist < best_dist,
+            None => true,
+        };
+        if take {
+            best = Some(([i, j, k], dist, f(cell).value_unchecked()));
+        }
+    }
+    let (idx, _, value) = best.expect("no material cell on line");
+    (value, idx)
+}
+
+/// Compare a 3-D uniform surface against the 1-D reference at `duration_day`,
+/// on EVERY `(j, k)` line, plus a cross-line uniformity check.
+/// Returns the number of failures (0 = pass).
+fn compare_3d(surface: &hamt_core::surface::Surface, duration_day: i32) -> u32 {
+    let dims = surface.cells.raw_dim();
+    let ny = dims[1];
+    let nz = dims[2];
+    let mut fail_count = 0u32;
+
+    println!(
+        "=== ADI 3-D comparison at day {} (ny={}, nz={}) ===",
+        duration_day, ny, nz
+    );
+
+    // --- Temperature: each (j,k) line vs 1-D reference. ---
+    println!(
+        "{:>8} {:>6} {:>6} {:>9} {:>9} {:>8} {:>6}",
+        "depth", "j", "k", "T(C)", "ref(C)", "diff%", "ok"
+    );
+    let mut t_xline_max_resid = 0.0_f64;
+    for (d, depth, ref_t) in REF_TEMPERATURE.iter().filter(|(d, _, _)| *d == duration_day) {
+        let _ = d;
+        // Collect every (j,k) line's value.
+        let line_vals: Vec<(usize, usize, f64)> = (0..ny)
+            .flat_map(|j| {
+                (0..nz).map(move |k| {
+                    let (t_k, _) =
+                        cell_value_at_depth_line(surface, *depth, j, k, |c| c.cell_temp);
+                    (j, k, kelvin_to_celsius(t_k * kelvin))
+                })
+            })
+            .collect();
+        let vals: Vec<f64> = line_vals.iter().map(|(_, _, v)| *v).collect();
+        let row_min = vals.iter().cloned().fold(f64::INFINITY, f64::min);
+        let row_max = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        t_xline_max_resid = t_xline_max_resid.max(row_max - row_min);
+
+        for (j, k, cell_t) in &line_vals {
+            let dev = (cell_t - ref_t).abs() / ref_t;
+            let ok = dev <= PERCENTAGE_RANGE_T;
+            if !ok {
+                fail_count += 1;
+            }
+            // Print first (j,k) line and any failures.
+            if (*j == 0 && *k == 0) || !ok {
+                println!(
+                    "{:>8.2} {:>6} {:>6} {:>9.3} {:>9.3} {:>7.2}% {:>6}",
+                    depth,
+                    j,
+                    k,
+                    cell_t,
+                    ref_t,
+                    dev * 100.0,
+                    if ok { "OK" } else { "FAIL" }
+                );
+            }
+        }
+    }
+
+    // --- Water content: each (j,k) line vs 1-D reference. ---
+    println!(
+        "{:>8} {:>6} {:>6} {:>12} {:>12} {:>8} {:>6}",
+        "depth", "j", "k", "W(kg/m3)", "ref", "diff%", "ok"
+    );
+    let mut w_xline_max_resid = 0.0_f64;
+    for (d, depth, ref_wc) in REF_WATER_CONTENT.iter().filter(|(d, _, _)| *d == duration_day) {
+        let _ = d;
+        let line_vals: Vec<(usize, usize, f64)> = (0..ny)
+            .flat_map(|j| {
+                (0..nz).map(move |k| {
+                    let (w, _) = cell_value_at_depth_line(
+                        surface,
+                        *depth,
+                        j,
+                        k,
+                        |c| c.volumetric_water,
+                    );
+                    (j, k, w)
+                })
+            })
+            .collect();
+        let vals: Vec<f64> = line_vals.iter().map(|(_, _, v)| *v).collect();
+        let row_min = vals.iter().cloned().fold(f64::INFINITY, f64::min);
+        let row_max = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        w_xline_max_resid = w_xline_max_resid.max(row_max - row_min);
+
+        for (j, k, cell_w) in &line_vals {
+            let dev = (cell_w - ref_wc).abs() / ref_wc;
+            let ok = dev <= PERCENTAGE_RANGE_RH;
+            if !ok {
+                fail_count += 1;
+            }
+            if (*j == 0 && *k == 0) || !ok {
+                println!(
+                    "{:>8.2} {:>6} {:>6} {:>12.3} {:>12.3} {:>7.2}% {:>6}",
+                    depth,
+                    j,
+                    k,
+                    cell_w,
+                    ref_wc,
+                    dev * 100.0,
+                    if ok { "OK" } else { "FAIL" }
+                );
+            }
+        }
+    }
+
+    println!(
+        "cross-line max residual: ΔT={:.3e} K (tol {:.0e}), ΔW={:.3e} kg/m3 (tol {:.0e})",
+        t_xline_max_resid, CROSS_LINE_TOL_T_K, w_xline_max_resid, CROSS_LINE_TOL_W
+    );
+    if t_xline_max_resid > CROSS_LINE_TOL_T_K {
+        eprintln!(
+            "CROSS-LINE T residual {:.3e} K exceeds {:.0e} — wall is NOT (y,z)-uniform \
+             (stencil/cross-lag bug)",
+            t_xline_max_resid, CROSS_LINE_TOL_T_K
+        );
+        fail_count += 1;
+    }
+    if w_xline_max_resid > CROSS_LINE_TOL_W {
+        eprintln!(
+            "CROSS-LINE W residual {:.3e} kg/m3 exceeds {:.0e} — wall is NOT (y,z)-uniform \
+             (stencil/cross-lag bug)",
+            w_xline_max_resid, CROSS_LINE_TOL_W
+        );
+        fail_count += 1;
+    }
+
+    fail_count
+}
+
+// ---------------------------------------------------------------------------
+// §6.1 Gating test — 3-D uniform grid reduces to the EN 15026 1-D benchmark.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn adi_3d_uniform_reduces_to_1d() -> Result<()> {
+    init_tracing();
+
+    let time_step: Time<f64> = 2.0 * hours;
+    let ny = 2usize;
+    let nz = 2usize;
+    let y_extent = 1.0 * meter;
+    let z_extent = 1.0 * meter;
+
+    // Same 5-layer construction as the 1-D benchmark.
+    let library = create_library(
+        20.0,
+        0.5,
+        vec![0.1, 0.9, 4.0, 10.0, 20.0],
+        vec![Some(60), Some(60), Some(60), Some(60), Some(60)],
+    );
+    let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
+
+    let mut settings = HamtSettings::default();
+    settings.timestep = time_step;
+    settings.max_iterations = 3000;
+    settings.temp_convergence_tolerance = 1e-6 * kelvin;
+    settings.rh_convergence_tolerance = 1e-4 * dimensionless;
+    settings.max_div = 50;
+    settings.min_div = 20;
+    settings.div_length = 1e-5 * meter;
+    settings.adj_length = 1e-4 * meter;
+    settings.min_relaxation_factor = 1.0;
+    settings.solver_method = SolverMethod::Adi;
+
+    let boundary_coeff = BoundaryCondition {
+        heat_transfer_coeff_ext: 9e9 * w_per_m2_k,
+        heat_transfer_coeff_int: 9e-9 * w_per_m2_k,
+        mass_convection_coeff_ext: 9e9 * m_per_s,
+        mass_convection_coeff_int: 9e-9 * m_per_s,
+        vapor_transport_coeff_ext: 9e9 * kg_per_m2_s_pa,
+        vapor_transport_coeff_int: 9e-9 * kg_per_m2_s_pa,
+        ..Default::default()
+    };
+
+    let boundary_condition_init = BoundaryCondition {
+        temp_outside_air: celsius_to_kelvin(20.0),
+        temp_inside_air: celsius_to_kelvin(20.0),
+        temp_outside_air_moisture: celsius_to_kelvin(20.0),
+        temp_inside_air_moisture: celsius_to_kelvin(20.0),
+        rh_outside_air: 0.5 * dimensionless,
+        rh_inside_air: 0.5 * dimensionless,
+        ..boundary_coeff
+    };
+
+    let boundary_condition = BoundaryCondition {
+        temp_outside_air: celsius_to_kelvin(30.0),
+        temp_inside_air: celsius_to_kelvin(20.0),
+        temp_outside_air_moisture: celsius_to_kelvin(30.0),
+        temp_inside_air_moisture: celsius_to_kelvin(20.0),
+        rh_outside_air: 0.95 * dimensionless,
+        rh_inside_air: 0.5 * dimensionless,
+        ..boundary_coeff
+    };
+
+    // 3-D manager: ny*nz identical columns, adiabatic on all side and z-faces.
+    let mut mgr = HamtManager::new_3d(
+        Some(settings.clone()),
+        Some(boundary_condition_init),
+        construction,
+        "Adi3DBenchmarkSurface".to_string(),
+        1.0 * square_meter,
+        ny,
+        y_extent,
+        nz,
+        z_extent,
+        [FaceBc::Adiabatic; 2],
+    )?;
+
+    let dim = mgr.surface_curr.cells.raw_dim();
+    println!(
+        "3-D grid shape: ({}, {}, {}), cells={}",
+        dim[0],
+        dim[1],
+        dim[2],
+        mgr.surface_curr.cells.len()
+    );
+    assert_eq!(dim[1], ny, "expected ny={} columns", ny);
+    assert_eq!(dim[2], nz, "expected nz={} columns", nz);
+
+    // Checkpoint days (union of both reference tables), sorted ascending.
+    let mut checkpoints: Vec<Time<f64>> = REF_TEMPERATURE
+        .iter()
+        .chain(REF_WATER_CONTENT.iter())
+        .map(|(d, _, _)| *d)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(|d| (d as f64) * days)
+        .collect();
+    checkpoints.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    // --- Preheat to a stable uniform initial state (same criterion as 1-D). ---
+    {
+        let mut constant_time: Time<f64> = 0.0 * seconds;
+        let allowed_err: Dimensionless<f64> = 1e-4 * dimensionless;
+        let mut adap_state: AdaptiveState<()> = AdaptiveState::default();
+
+        println!("Preheating (ADI 3-D) ...");
+        while constant_time < 7.0 * days {
+            mgr.solve_timestep_adaptive(&mut adap_state, None)?;
+            mgr.tick_timestep()?;
+
+            let mats = || {
+                mgr.surface_prev
+                    .cells
+                    .iter()
+                    .filter(|c| matches!(c.cell_type, CellType::Material(_)))
+            };
+            let min_rh = mats().map(|c| c.cell_rh).reduce(|a, b| a.min(b)).unwrap_or_default();
+            let max_rh = mats().map(|c| c.cell_rh).reduce(|a, b| a.max(b)).unwrap_or_default();
+            let min_t = mats().map(|c| c.cell_temp).reduce(|a, b| a.min(b)).unwrap_or_default();
+            let max_t = mats().map(|c| c.cell_temp).reduce(|a, b| a.max(b)).unwrap_or_default();
+            let prev_delta_t: Temperature<f64> = (max_t - min_t).abs();
+            let prev_delta_rh: Dimensionless<f64> = (max_rh - min_rh).abs();
+
+            if prev_delta_t.value_in(kelvin) <= allowed_err.value()
+                && prev_delta_rh.value() <= allowed_err.value()
+            {
+                constant_time += mgr.settings.timestep;
+            } else {
+                constant_time = 0.0 * hours;
+            }
+        }
+        println!("Preheat complete.");
+    }
+
+    // --- Simulation run with the EN 15026 step-change BC. ---
+    mgr.boundary_condition = boundary_condition;
+
+    let end_time: Time<f64> = *checkpoints.last().unwrap() + 1.0 * hours;
+    let mut adap_state: AdaptiveState<()> = AdaptiveState::default();
+    let mut current_time: Time<f64> = 0.0 * hours;
+    let mut hit: HashSet<i32> = HashSet::new();
+
+    while current_time <= end_time {
+        mgr.solve_timestep_adaptive(&mut adap_state, None)?;
+        mgr.tick_timestep()?;
+        current_time = adap_state.current_time;
+
+        if let Some(cp) = checkpoints.iter().find(|duration| {
+            (duration.value_in(hours) - current_time.value_in(hours)).abs()
+                <= mgr.settings.timestep.value_in(hours) * 0.5
+        }) {
+            let sim_day = cp.value_in(days) as i32;
+            if !hit.insert(sim_day) {
+                continue;
+            }
+            println!("Checkpoint reached: {} days", sim_day);
+            let fails = compare_3d(&mgr.surface_next, sim_day);
+            if fails > 0 {
+                return Err(anyhow::format_err!(
+                    "ADI 3-D vs 1-D EN 15026 mismatch at day {}: {} failing comparisons \
+                     (per-line T/water or cross-line uniformity). The 3-D ADI path does NOT \
+                     reduce to the 1-D benchmark.",
+                    sim_day,
+                    fails
+                ));
+            }
+        }
+    }
+
+    println!("ADI 3-D uniform grid matches the 1-D EN 15026 benchmark on all (j,k) lines.");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Regression — 3-D manager with DEFAULT solver_method must not panic.
+// ---------------------------------------------------------------------------
+
+/// Regression test: a 3-D manager (ny > 1, nz > 1) constructed with the DEFAULT
+/// `solver_method` must not panic or error when `tick_timestep` / `solve_timestep`
+/// is called. Mirrors `two_d_manager_default_solver_does_not_panic` in `adi_2d.rs`.
+#[test]
+fn three_d_manager_default_solver_does_not_panic() -> Result<()> {
+    init_tracing();
+
+    let ny = 2usize;
+    let nz = 2usize;
+    let y_extent = 1.0 * meter;
+    let z_extent = 1.0 * meter;
+    let time_step: Time<f64> = 2.0 * hours;
+
+    // Small single-layer construction so the test is fast.
+    let library = create_library(20.0, 0.5, vec![0.1], vec![Some(6)]);
+    let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
+
+    // DEFAULT settings — solver_method is BlockTridiagonal; the dispatch guard
+    // must route nz>1 to ADI exactly as it does for the 2-D path.
+    let mut settings = HamtSettings::default();
+    settings.timestep = time_step;
+
+    let bc = BoundaryCondition {
+        temp_outside_air: celsius_to_kelvin(20.0),
+        temp_inside_air: celsius_to_kelvin(20.0),
+        temp_outside_air_moisture: celsius_to_kelvin(20.0),
+        temp_inside_air_moisture: celsius_to_kelvin(20.0),
+        rh_outside_air: 0.5 * dimensionless,
+        rh_inside_air: 0.5 * dimensionless,
+        heat_transfer_coeff_ext: 25.0 * w_per_m2_k,
+        heat_transfer_coeff_int: 25.0 * w_per_m2_k,
+        mass_convection_coeff_ext: 0.0 * m_per_s,
+        mass_convection_coeff_int: 0.0 * m_per_s,
+        vapor_transport_coeff_ext: 1.0e-9 * kg_per_m2_s_pa,
+        vapor_transport_coeff_int: 1.0e-9 * kg_per_m2_s_pa,
+        ..Default::default()
+    };
+
+    let mut mgr = HamtManager::new_3d(
+        Some(settings),
+        Some(bc),
+        construction,
+        "M1Regression3DSurface".to_string(),
+        1.0 * square_meter,
+        ny,
+        y_extent,
+        nz,
+        z_extent,
+        [FaceBc::Adiabatic; 2],
+    )?;
+
+    let dim = mgr.surface_curr.cells.raw_dim();
+    assert_eq!(dim[1], ny, "expected ny={}", ny);
+    assert_eq!(dim[2], nz, "expected nz={}", nz);
+
+    // Run one solve_timestep without a panic or error.
+    let result = mgr.solve_timestep();
+    assert!(result.is_ok(), "solve_timestep returned Err: {:?}", result);
+
+    let converged = result.unwrap();
+    println!(
+        "three_d_manager_default_solver_does_not_panic: converged={}",
+        converged
+    );
+
+    mgr.tick_timestep()?;
+
+    // Sanity: every material cell must have finite T and RH.
+    for cell in mgr.surface_prev.cells.iter() {
+        if matches!(cell.cell_type, CellType::Material(_)) {
+            assert!(
+                cell.cell_temp.value_in(kelvin).is_finite(),
+                "non-finite T after one step"
+            );
+            assert!(
+                cell.cell_rh.value().is_finite(),
+                "non-finite RH after one step"
+            );
+        }
+    }
+
+    println!("3-D no-panic regression PASS: default-solver tick completed without panic.");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ny=nz=1 routing assertion — must still produce the EN 15026 1-D result.
+// ---------------------------------------------------------------------------
+
+/// ny=nz=1 routing: `new_3d` with `ny=1, nz=1` must route to `BlockTridiagonal`
+/// (the 1-D fast path) and match the EN 15026 reference at day 7.
+///
+/// This mirrors the implicit contract checked by the `adi_2d` suite and the
+/// main `din_en_15026_benchmark`, pinned here for `new_3d` specifically.
+#[test]
+fn adi_3d_nynz1_routes_to_1d() -> Result<()> {
+    init_tracing();
+
+    let time_step: Time<f64> = 2.0 * hours;
+    let ny = 1usize;
+    let nz = 1usize;
+    let y_extent = 1.0 * meter;
+    let z_extent = 1.0 * meter;
+
+    let library = create_library(
+        20.0,
+        0.5,
+        vec![0.1, 0.9, 4.0, 10.0, 20.0],
+        vec![Some(60), Some(60), Some(60), Some(60), Some(60)],
+    );
+    let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
+
+    let mut settings = HamtSettings::default();
+    settings.timestep = time_step;
+    settings.max_iterations = 3000;
+    settings.temp_convergence_tolerance = 1e-6 * kelvin;
+    settings.rh_convergence_tolerance = 1e-4 * dimensionless;
+    settings.max_div = 50;
+    settings.min_div = 20;
+    settings.div_length = 1e-5 * meter;
+    settings.adj_length = 1e-4 * meter;
+    settings.min_relaxation_factor = 1.0;
+    settings.solver_method = SolverMethod::Adi;
+
+    let boundary_coeff = BoundaryCondition {
+        heat_transfer_coeff_ext: 9e9 * w_per_m2_k,
+        heat_transfer_coeff_int: 9e-9 * w_per_m2_k,
+        mass_convection_coeff_ext: 9e9 * m_per_s,
+        mass_convection_coeff_int: 9e-9 * m_per_s,
+        vapor_transport_coeff_ext: 9e9 * kg_per_m2_s_pa,
+        vapor_transport_coeff_int: 9e-9 * kg_per_m2_s_pa,
+        ..Default::default()
+    };
+
+    let boundary_condition_init = BoundaryCondition {
+        temp_outside_air: celsius_to_kelvin(20.0),
+        temp_inside_air: celsius_to_kelvin(20.0),
+        temp_outside_air_moisture: celsius_to_kelvin(20.0),
+        temp_inside_air_moisture: celsius_to_kelvin(20.0),
+        rh_outside_air: 0.5 * dimensionless,
+        rh_inside_air: 0.5 * dimensionless,
+        ..boundary_coeff
+    };
+
+    let boundary_condition = BoundaryCondition {
+        temp_outside_air: celsius_to_kelvin(30.0),
+        temp_inside_air: celsius_to_kelvin(20.0),
+        temp_outside_air_moisture: celsius_to_kelvin(30.0),
+        temp_inside_air_moisture: celsius_to_kelvin(20.0),
+        rh_outside_air: 0.95 * dimensionless,
+        rh_inside_air: 0.5 * dimensionless,
+        ..boundary_coeff
+    };
+
+    let mut mgr = HamtManager::new_3d(
+        Some(settings),
+        Some(boundary_condition_init),
+        construction,
+        "Adi3D1x1Surface".to_string(),
+        1.0 * square_meter,
+        ny,
+        y_extent,
+        nz,
+        z_extent,
+        [FaceBc::Adiabatic; 2],
+    )?;
+
+    let dim = mgr.surface_curr.cells.raw_dim();
+    assert_eq!(dim[1], 1, "ny=1 expected");
+    assert_eq!(dim[2], 1, "nz=1 expected");
+
+    // Preheat.
+    {
+        let allowed_err: Dimensionless<f64> = 1e-4 * dimensionless;
+        let mut constant_time: Time<f64> = 0.0 * seconds;
+        let mut adap_state: AdaptiveState<()> = AdaptiveState::default();
+
+        while constant_time < 7.0 * days {
+            mgr.solve_timestep_adaptive(&mut adap_state, None)?;
+            mgr.tick_timestep()?;
+
+            let mats = || {
+                mgr.surface_prev
+                    .cells
+                    .iter()
+                    .filter(|c| matches!(c.cell_type, CellType::Material(_)))
+            };
+            let d_rh = (mats().map(|c| c.cell_rh).reduce(|a, b| a.max(b)).unwrap_or_default()
+                - mats()
+                    .map(|c| c.cell_rh)
+                    .reduce(|a, b| a.min(b))
+                    .unwrap_or_default())
+            .abs();
+            let d_t = (mats()
+                .map(|c| c.cell_temp)
+                .reduce(|a, b| a.max(b))
+                .unwrap_or_default()
+                - mats()
+                    .map(|c| c.cell_temp)
+                    .reduce(|a, b| a.min(b))
+                    .unwrap_or_default())
+            .abs();
+            if d_t.value_in(kelvin) <= allowed_err.value() && d_rh.value() <= allowed_err.value() {
+                constant_time += mgr.settings.timestep;
+            } else {
+                constant_time = 0.0 * hours;
+            }
+        }
+    }
+
+    // Run until day 7 checkpoint.
+    mgr.boundary_condition = boundary_condition;
+    let target_day = 7i32;
+    let target_time: Time<f64> = (target_day as f64) * days;
+    let end_time = target_time + 1.0 * hours;
+    let mut adap_state: AdaptiveState<()> = AdaptiveState::default();
+    let mut current_time: Time<f64> = 0.0 * hours;
+    let mut reached = false;
+
+    while current_time <= end_time {
+        mgr.solve_timestep_adaptive(&mut adap_state, None)?;
+        mgr.tick_timestep()?;
+        current_time = adap_state.current_time;
+
+        let diff_h = (target_time.value_in(hours) - current_time.value_in(hours)).abs();
+        if diff_h <= mgr.settings.timestep.value_in(hours) * 0.5 && !reached {
+            reached = true;
+            let fails = compare_3d(&mgr.surface_next, target_day);
+            if fails > 0 {
+                return Err(anyhow::format_err!(
+                    "ny=nz=1 new_3d mismatch at day {}: {} failing comparisons",
+                    target_day,
+                    fails
+                ));
+            }
+            break;
+        }
+    }
+
+    assert!(reached, "never reached day {} checkpoint", target_day);
+    println!("ny=nz=1 new_3d routes to 1-D correctly: PASS");
+    Ok(())
+}
