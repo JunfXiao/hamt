@@ -255,40 +255,6 @@ pub(super) fn build_grid_3d(
     Ok(ndarray::ArcArray3::from_shape_vec((nx, ny, nz), flat)?)
 }
 
-/// Build a `(nx, ny, 1)` cell lattice: `ny` x-columns stacked along y, each with
-/// real cross-section `(col_y = y_extent/ny, col_z = sqrt(surface_area))`.
-///
-/// This is the `nz = 1` delegate of [`build_grid_3d`], reproducing the existing
-/// 2-D geometry exactly (same `col_z = sqrt(area)` convention).
-///
-/// The 1-D path is the `ny = 1` case: one column at y-origin 0 with
-/// `col_y = col_z = sqrt(area)` — byte-identical to the legacy `(N,1,1)` build.
-///
-/// Kept as a named API for `from_construction_2d` call sites and tests; the
-/// production path calls `build_grid_3d(nz=1)` directly via `from_construction_3d`.
-#[allow(dead_code)] // called from tests and retained as a named 2-D API
-pub(super) fn build_grid_2d(
-    settings: &HamtSettings,
-    construction: &Construction,
-    surface_area: Area<f64>,
-    ny: usize,
-    y_extent: Length<f64>,
-    init_bc: &BoundaryCondition,
-) -> Result<ndarray::ArcArray3<Cell>> {
-    // Reproduce the existing col_z = sqrt(area) convention exactly.
-    let z_extent = surface_area.sqrt();
-    build_grid_3d(
-        settings,
-        construction,
-        surface_area,
-        ny,
-        y_extent,
-        1,
-        z_extent,
-        init_bc,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,73 +377,6 @@ mod tests {
                 "k={k}: expected z-origin {expected_z:.6}, got {got:.6}"
             );
         }
-    }
-
-    /// Verify build_grid_2d is byte-identical to build_grid_3d with nz=1 and
-    /// z_extent = sqrt(area), at every cell index [i,j,0].
-    #[test]
-    fn build_grid_2d_equals_build_grid_3d_nz1() {
-        use crate::config::FaceBc;
-        let settings = HamtSettings::default();
-        let bc = BoundaryCondition::default();
-        let construction = build_test_construction();
-        let ny = 3usize;
-        let y_extent = 1.2 * meter;
-        let area: crate::uom::dimensions::Area<f64> = 1.0 * square_meter;
-        let z_extent = area.sqrt();
-
-        let cells_2d = build_grid_2d(&settings, &construction, area, ny, y_extent, &bc)
-            .expect("build_grid_2d must succeed");
-
-        let cells_3d = build_grid_3d(
-            &settings,
-            &construction,
-            area,
-            ny,
-            y_extent,
-            1,
-            z_extent,
-            &bc,
-        )
-        .expect("build_grid_3d must succeed");
-
-        let dim2 = cells_2d.raw_dim();
-        let dim3 = cells_3d.raw_dim();
-        assert_eq!(
-            [dim2[0], dim2[1], dim2[2]],
-            [dim3[0], dim3[1], dim3[2]],
-            "shape mismatch between build_grid_2d and build_grid_3d(nz=1)"
-        );
-
-        let (nx, ny_dim, _nz_dim) = (dim2[0], dim2[1], dim2[2]);
-        for i in 0..nx {
-            for j in 0..ny_dim {
-                let c2 = &cells_2d[[i, j, 0]];
-                let c3 = &cells_3d[[i, j, 0]];
-                assert_eq!(
-                    c2.cell_type, c3.cell_type,
-                    "cell_type mismatch at [{i},{j},0]"
-                );
-                let o2 = c2.origin;
-                let o3 = c3.origin;
-                let dx = (o2.x() - o3.x()).value_in(meter).abs(); // strip: scalar tolerance compare
-                let dy = (o2.y() - o3.y()).value_in(meter).abs(); // strip: scalar tolerance compare
-                let dz = (o2.z() - o3.z()).value_in(meter).abs(); // strip: scalar tolerance compare
-                assert!(dx < 1e-12, "[{i},{j},0] x-origin mismatch: {dx}");
-                assert!(dy < 1e-12, "[{i},{j},0] y-origin mismatch: {dy}");
-                assert!(dz < 1e-12, "[{i},{j},0] z-origin mismatch: {dz}");
-                let sz2 = c2.size;
-                let sz3 = c3.size;
-                let sdx = (sz2.x() - sz3.x()).value_in(meter).abs(); // strip: scalar tolerance compare
-                let sdy = (sz2.y() - sz3.y()).value_in(meter).abs(); // strip: scalar tolerance compare
-                let sdz = (sz2.z() - sz3.z()).value_in(meter).abs(); // strip: scalar tolerance compare
-                assert!(sdx < 1e-12, "[{i},{j},0] x-size mismatch: {sdx}");
-                assert!(sdy < 1e-12, "[{i},{j},0] y-size mismatch: {sdy}");
-                assert!(sdz < 1e-12, "[{i},{j},0] z-size mismatch: {sdz}");
-            }
-        }
-        // Also confirm the type is unused here (silence unused import)
-        let _ = FaceBc::Adiabatic;
     }
 
     #[test]
