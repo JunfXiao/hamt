@@ -157,6 +157,13 @@ pub(crate) fn build_fixture_manager(n_div: usize) -> HamtManager {
 /// Build a tiny 3-D `(n_div_x, ny, nz)` test manager — same single material and
 /// curves as [`build_fixture_manager`], constructed via `HamtManager::new_3d`.
 ///
+/// `y_extent` and `z_extent` set the physical size of the grid in the y and z
+/// directions respectively. `col_y = y_extent / ny`, `col_z = z_extent / nz`.
+/// Use `1.0 * meter` for each to reproduce the previous default. Shrinking
+/// these extents makes the off-axis cells smaller relative to the x-cells,
+/// increasing the y/z conductance and creating strong 3-D coupling — needed for
+/// the z-sweep gate test that proves the sweep is load-bearing.
+///
 /// `y_faces_active = true` flips the y-min/y-max faces from the default
 /// Adiabatic to Active on ALL three surfaces, enabling inter-row (y-axis)
 /// conduction. `z_faces_active = true` passes `[FaceBc::Active; 2]` as `z_faces`
@@ -165,6 +172,8 @@ pub(crate) fn build_fixture_manager_3d(
     n_div_x: usize,
     ny: usize,
     nz: usize,
+    y_extent: crate::uom::dimensions::Length<f64>,
+    z_extent: crate::uom::dimensions::Length<f64>,
     y_faces_active: bool,
     z_faces_active: bool,
 ) -> HamtManager {
@@ -276,9 +285,9 @@ pub(crate) fn build_fixture_manager_3d(
         "FixtureSurface3D".to_string(),
         1.0 * square_meter,
         ny,
-        1.0 * meter,
+        y_extent,
         nz,
-        1.0 * meter,
+        z_extent,
         z_faces,
     )
     .expect("HamtManager::new_3d");

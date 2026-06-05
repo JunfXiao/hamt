@@ -785,8 +785,15 @@ mod tests {
         let n_div_x = 4usize;
         let ny = 1usize;
         let nz = 6usize;
-        let mut base =
-            crate::solver::test_fixtures::build_fixture_manager_3d(n_div_x, ny, nz, false, true);
+        let mut base = crate::solver::test_fixtures::build_fixture_manager_3d(
+            n_div_x,
+            ny,
+            nz,
+            1.0 * crate::uom::units::meter,
+            1.0 * crate::uom::units::meter,
+            false,
+            true,
+        );
 
         let dim = base.surface_curr.cells.raw_dim();
         eprintln!(
@@ -892,5 +899,154 @@ mod tests {
             "ADI iteration count pathologically high vs direct: ratio {ratio:.2} > 1.75 \
              (ADI={iters_adi}, DIRECT={iters_dir})"
         );
+    }
+
+    /// Z-SWEEP LOAD-BEARING STABILITY GATE (Phase 2b Task 3).
+    ///
+    /// Proves the z-sweep is load-bearing under strongly z-coupled conditions.
+    ///
+    /// Configuration:
+    /// * `ny=1, nz=6` — z-dominated grid; y-coupling absent so only z matters.
+    /// * `z_cell = 0.001 m` (2.5× smaller than x-cell 0.0025 m → z-conductance
+    ///   2.5× larger). Strong z-coupling relative to x.
+    /// * **Anderson OFF** (`anderson_enabled = false`): Anderson would mask the
+    ///   z-lag by converging it in a few AA steps regardless of whether the z-sweep
+    ///   runs. With raw Picard exposed, the per-sweep update must carry the z-coupling
+    ///   explicitly via the z-sweep, else each outer iteration barely progresses the
+    ///   z-lagged residual.
+    /// * `max_iter = 1000` (tight budget): WITH z-sweep ADI converges ≈ 750 iters
+    ///   (within budget); WITHOUT z-sweep ADI needs ≈ 1400 iters (exceeds budget →
+    ///   test RED). DIRECT runs with `max_iter_dir = 2000` separately to get the
+    ///   correctness oracle when it converges.
+    ///
+    /// PRIMARY DISCRIMINATOR: `conv_adi` — WITH z-sweep it passes; removing the
+    /// guard (`if false && self.cells.raw_dim()[2] > 1 {`) makes it fail.
+    ///
+    /// SECONDARY: when DIRECT also converges, assert agreement < 1e-7 and record
+    /// the ADI/DIRECT iteration ratio (informational; DIRECT is slower due to
+    /// single-solve-per-outer vs ADI's 3 sweeps, so ratio < 1 expected here).
+    #[test]
+    fn adi_matches_direct_on_thermal_bridge_3d() {
+        use crate::cell::CellType;
+        use crate::uom::units::{dimensionless, kelvin, meter};
+
+        // z-dominated 3-D grid: ny=1 (no y-coupling), nz=6, stronger z-conductance.
+        // x-cell ≈ 0.01/4 = 0.0025 m; z-cell = 0.001 m (2.5× smaller → z-conductance
+        // ≈ 2.5× x-conductance). Nmat = 4*1*6 = 24 → dense 48×48 for DirectStep.
+        let n_div_x = 4usize;
+        let ny = 1usize;
+        let nz = 6usize;
+        let x_cell_size = 0.0025_f64; // m — matches material_thickness / n_div_x
+        let z_cell_size = 0.001_f64;  // m — 2.5× smaller than x → z-conductance 2.5×
+        let y_extent = 1.0 * meter;
+        let z_extent = (nz as f64) * z_cell_size * meter;
+
+        let mut base = crate::solver::test_fixtures::build_fixture_manager_3d(
+            n_div_x,
+            ny,
+            nz,
+            y_extent,
+            z_extent,
+            false, // y_faces_active=false: ny=1, y is trivial
+            true,  // z_faces_active: genuine cross-z material coupling
+        );
+
+        let dim = base.surface_curr.cells.raw_dim();
+        eprintln!(
+            "3-D bridge grid: ({}, {}, {}), cells={}, x_cell={:.4}m, z_cell={:.4}m",
+            dim[0], dim[1], dim[2], base.surface_curr.cells.len(), x_cell_size, z_cell_size
+        );
+
+        // Strong z-gradient; mild x-tilt so the system is genuinely 2-D in (x,z).
+        let nx = dim[0];
+        let bc = base.boundary_condition.clone();
+        let settings = base.settings.clone();
+        for surf in [
+            &mut base.surface_prev,
+            &mut base.surface_curr,
+            &mut base.surface_next,
+        ] {
+            for k in 0..nz {
+                let fz = k as f64 / (nz as f64 - 1.0);
+                for i in 0..nx {
+                    if !matches!(surf.cells[[i, 0, k]].cell_type, CellType::Material(_)) {
+                        continue;
+                    }
+                    let fx = i as f64 / (nx as f64 - 1.0);
+                    let t_c = 35.0 - 25.0 * fz + 4.0 * (fx - 0.5);
+                    let phi = (0.80 - 0.55 * fz + 0.05 * (fx - 0.5)).clamp(0.05, 0.99);
+                    let cell = &mut surf.cells[[i, 0, k]];
+                    cell.cell_temp = crate::boundary::celsius_to_kelvin(t_c);
+                    cell.cell_rh = phi * dimensionless;
+                }
+            }
+            surf.update_cell_properties(&bc, &settings).unwrap();
+        }
+
+        // dt = 300 s; Anderson OFF to expose raw Picard lag; tight tols.
+        base.settings.timestep = 300.0 * crate::uom::units::seconds;
+        base.settings.temp_convergence_tolerance = 1e-9 * kelvin;
+        base.settings.rh_convergence_tolerance = 1e-9 * dimensionless;
+        base.settings.min_relaxation_factor = 1.0;
+        base.settings.solver_method = crate::manager::SolverMethod::Adi;
+        base.settings.anderson_enabled = false; // ← KEY: expose raw Picard lag
+
+        let mut mgr_adi = base.clone();
+        let mut mgr_dir = base.clone();
+
+        // PRIMARY discriminator budget: tight enough that WITH z-sweep ADI converges
+        // but WITHOUT z-sweep it does not (~750 vs ~1400 iters empirically).
+        let max_iter_adi = 1000i32;
+        // DIRECT runs with a generous budget — it is SLOWER than ADI (single global
+        // solve per outer iter vs ADI's 3 sequential sweeps), so it needs more iters.
+        let max_iter_dir = 2000i32;
+
+        let (conv_adi, iters_adi) = mgr_adi
+            .run_outer_loop_counted(&crate::surface::AdiStep, max_iter_adi)
+            .expect("ADI outer loop");
+        let (conv_dir, iters_dir) = mgr_dir
+            .run_outer_loop_counted(&DirectStep, max_iter_dir)
+            .expect("Direct outer loop");
+
+        // Agreement (only meaningful when both converge).
+        let mut max_dt = 0.0_f64;
+        let mut max_dphi = 0.0_f64;
+        for (ca, cb) in mgr_adi
+            .surface_curr
+            .cells
+            .iter()
+            .zip(mgr_dir.surface_curr.cells.iter())
+        {
+            if !matches!(ca.cell_type, CellType::Material(_)) {
+                continue;
+            }
+            let dt = (ca.cell_temp - cb.cell_temp).value_in(kelvin).abs();
+            let dphi = (ca.cell_rh - cb.cell_rh).value().abs();
+            max_dt = max_dt.max(dt);
+            max_dphi = max_dphi.max(dphi);
+        }
+
+        let ratio = iters_adi as f64 / iters_dir.max(1) as f64;
+        eprintln!(
+            "=== ADI-vs-DIRECT 3-D thermal-bridge result (Phase 2b Task 3) ===\n\
+             grid: ({nx}, {ny}, {nz}), x_cell={x_cell_size:.4}m, z_cell={z_cell_size:.4}m, dt=300s, anderson=OFF\n\
+             ADI:    converged={conv_adi}, outer_iters={iters_adi} (budget={max_iter_adi})\n\
+             DIRECT: converged={conv_dir}, outer_iters={iters_dir} (budget={max_iter_dir})\n\
+             ADI/DIRECT iteration ratio = {ratio:.3}\n\
+             agreement: max|ΔT|={max_dt:.3e} K, max|Δφ|={max_dphi:.3e}"
+        );
+
+        // PRIMARY DISCRIMINATOR: WITH z-sweep ADI converges; without it does NOT.
+        // (Removing the z-sweep guard to `if false && ..` makes this assertion fail.)
+        assert!(conv_adi, "ADI did not converge within {max_iter_adi} outer iters — z-sweep may be missing");
+
+        // When DIRECT also converges (informational), verify agreement.
+        if conv_dir {
+            assert!(
+                max_dt < 1e-7 && max_dphi < 1e-7,
+                "ADI and DIRECT disagree: max|ΔT|={max_dt:.3e} K, max|Δφ|={max_dphi:.3e} \
+                 (gate 1e-7). ADI iters={iters_adi}, DIRECT iters={iters_dir}"
+            );
+        }
     }
 }
