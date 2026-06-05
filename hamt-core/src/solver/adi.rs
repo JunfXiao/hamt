@@ -755,4 +755,142 @@ mod tests {
              (ADI={iters_adi}, DIRECT={iters_dir}) — escalation (nested-loop / Krylov) indicated"
         );
     }
+
+    /// 3-D ADI CORRECTNESS against the dense direct oracle (Phase 2b Task 2).
+    ///
+    /// Build a small `(n_div_x=4, ny=1, nz=6)` grid with ACTIVE z-faces and a
+    /// z-gradient in T and φ, exercising the new `run_axis_sweep(2, ..)` z-sweep.
+    /// Drive `AdiStep` and the fully-coupled dense `DirectStep` each through
+    /// `run_outer_loop_counted` for one step and assert they reach the SAME fixed
+    /// point (max|ΔT|, max|Δφ| < 1e-6) — i.e. the 3-D ADI sweep machinery solves
+    /// the z-coupled system correctly.
+    ///
+    /// NOTE on scope: this is a CORRECTNESS test, not a z-sweep load-bearing guard.
+    /// The unified outer loop + Anderson converges the lagged cross-axis coupling
+    /// to the same answer whether or not the z-sweep runs (so it is not a clean
+    /// red→green for the z-sweep itself). The test that PROVES the z-sweep is
+    /// load-bearing — strong (cubic-cell) z-coupling with Anderson OFF, where
+    /// removing the z-sweep blows up the ADI/DIRECT iteration ratio — lives in the
+    /// Phase 2b Task 3 stability gate (`adi_matches_direct_on_thermal_bridge_3d`).
+    /// The `ratio ≤ 1.75` check below is only a sanity bound (ADI is not
+    /// pathologically slower than the dense solve at this weak-coupling size).
+    #[test]
+    fn adi_3d_z_sweep_converges() {
+        use crate::cell::CellType;
+        use crate::uom::units::{dimensionless, kelvin};
+
+        // ny=1 isolates the z-direction: x-sweep handles x-lines, y-sweep handles
+        // singleton ny=1 lines (no-op), z-sweep (new) handles z-lines.
+        // nz=6 makes the z-direction the convergence bottleneck when lagged.
+        let n_div_x = 4usize;
+        let ny = 1usize;
+        let nz = 6usize;
+        let mut base =
+            crate::solver::test_fixtures::build_fixture_manager_3d(n_div_x, ny, nz, false, true);
+
+        let dim = base.surface_curr.cells.raw_dim();
+        eprintln!(
+            "3-D z-sweep grid: ({}, {}, {}), cells={}",
+            dim[0],
+            dim[1],
+            dim[2],
+            base.surface_curr.cells.len()
+        );
+
+        // ── Impose a strong z-gradient: k=0 hot & wet, k=nz-1 cold & dry. ──
+        let nx = dim[0];
+        let bc = base.boundary_condition.clone();
+        let settings = base.settings.clone();
+        for surf in [
+            &mut base.surface_prev,
+            &mut base.surface_curr,
+            &mut base.surface_next,
+        ] {
+            for k in 0..nz {
+                let fz = k as f64 / (nz as f64 - 1.0);
+                for i in 0..nx {
+                    let is_mat =
+                        matches!(surf.cells[[i, 0, k]].cell_type, CellType::Material(_));
+                    if !is_mat {
+                        continue;
+                    }
+                    // Strong gradient: 35°C → 10°C in z; mild x-tilt so it's genuinely 3-D.
+                    let fx = i as f64 / (nx as f64 - 1.0);
+                    let t_c = 35.0 - 25.0 * fz + 3.0 * (fx - 0.5);
+                    let phi = (0.80 - 0.55 * fz + 0.04 * (fx - 0.5)).clamp(0.05, 0.99);
+                    let cell = &mut surf.cells[[i, 0, k]];
+                    cell.cell_temp = crate::boundary::celsius_to_kelvin(t_c);
+                    cell.cell_rh = phi * dimensionless;
+                }
+            }
+            surf.update_cell_properties(&bc, &settings).unwrap();
+        }
+
+        // Tight tolerance + no Aitken damping (min_relaxation_factor = 1.0) so
+        // the iteration count reflects only the implicit/lagged z-direction cost.
+        base.settings.timestep = 300.0 * crate::uom::units::seconds;
+        base.settings.temp_convergence_tolerance = 1e-9 * kelvin;
+        base.settings.rh_convergence_tolerance = 1e-9 * dimensionless;
+        base.settings.min_relaxation_factor = 1.0;
+        base.settings.solver_method = crate::manager::SolverMethod::Adi;
+        base.settings.anderson_enabled = true;
+
+        let mut mgr_adi = base.clone();
+        let mut mgr_dir = base.clone();
+
+        let max_iter = 500;
+        let (conv_adi, iters_adi) = mgr_adi
+            .run_outer_loop_counted(&crate::surface::AdiStep, max_iter)
+            .expect("ADI outer loop");
+        let (conv_dir, iters_dir) = mgr_dir
+            .run_outer_loop_counted(&DirectStep, max_iter)
+            .expect("Direct outer loop");
+
+        // ── Agreement: compare final material T and φ. ──
+        let mut max_dt = 0.0_f64;
+        let mut max_dphi = 0.0_f64;
+        for (ca, cb) in mgr_adi
+            .surface_curr
+            .cells
+            .iter()
+            .zip(mgr_dir.surface_curr.cells.iter())
+        {
+            if !matches!(ca.cell_type, CellType::Material(_)) {
+                continue;
+            }
+            let dt = (ca.cell_temp - cb.cell_temp).value_in(kelvin).abs();
+            let dphi = (ca.cell_rh - cb.cell_rh).value().abs();
+            max_dt = max_dt.max(dt);
+            max_dphi = max_dphi.max(dphi);
+        }
+
+        let ratio = iters_adi as f64 / iters_dir.max(1) as f64;
+        eprintln!(
+            "=== ADI-vs-DIRECT 3-D z-sweep result (Phase 2b Task 2) ===\n\
+             ADI:    converged={conv_adi}, outer_iters={iters_adi}\n\
+             DIRECT: converged={conv_dir}, outer_iters={iters_dir}\n\
+             ADI/DIRECT ratio = {ratio:.3}\n\
+             agreement: max|ΔT|={max_dt:.3e} K, max|Δφ|={max_dphi:.3e} (gate 1e-6)"
+        );
+
+        assert!(conv_adi, "ADI did not converge within {max_iter} outer iters");
+        assert!(conv_dir, "DIRECT did not converge within {max_iter} outer iters");
+        // Both methods must converge to the same fixed point.
+        assert!(
+            max_dt < 1e-6 && max_dphi < 1e-6,
+            "AdiStep and DirectStep disagree: max|ΔT|={max_dt:.3e} K, \
+             max|Δφ|={max_dphi:.3e} (gate 1e-6). ADI iters={iters_adi}, DIRECT iters={iters_dir}"
+        );
+        // Sanity bound only (NOT a z-sweep load-bearing guard — see the doc note):
+        // at this weak-coupling grid size the outer loop + Anderson converges the
+        // lagged coupling efficiently with or without the z-sweep, so this merely
+        // confirms ADI is not pathologically slower than the fully-coupled solve.
+        // The real z-sweep discriminator (Anderson off, strong cubic-cell coupling)
+        // is the Task 3 gate adi_matches_direct_on_thermal_bridge_3d.
+        assert!(
+            ratio <= 1.75,
+            "ADI iteration count pathologically high vs direct: ratio {ratio:.2} > 1.75 \
+             (ADI={iters_adi}, DIRECT={iters_dir})"
+        );
+    }
 }
