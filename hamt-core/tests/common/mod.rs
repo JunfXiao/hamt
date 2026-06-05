@@ -365,3 +365,90 @@ pub fn init_tracing() {
             .init();
     });
 }
+
+// ---------------------------------------------------------------------------
+// Face energy/mass balance helpers (shared by adi_2d and adi_3d balance tests)
+// ---------------------------------------------------------------------------
+
+/// Compute the total stored water mass [kg] over all material cells in the surface.
+/// Works for any grid shape (1-D, 2-D, 3-D).
+pub fn total_stored_water(
+    surface: &hamt_core::surface::Surface,
+) -> hamt_core::uom::dimensions::Mass<f64> {
+    use hamt_core::cell::CellType;
+    use hamt_core::uom::units::kilograms;
+    surface
+        .cells
+        .iter()
+        .filter(|c| matches!(c.cell_type, CellType::Material(_)))
+        .map(|c| c.volumetric_water * c.volume)
+        .fold(0.0 * kilograms, |acc, x| acc + x)
+}
+
+/// Compute a heat-content proxy E = Σ (ρ·c_dry + w·c_w) · V · T  [J]
+/// over all material cells. Used only for the ENERGY balance where a few-
+/// percent tolerance is applied. Works for any grid shape.
+pub fn total_stored_energy(
+    surface: &hamt_core::surface::Surface,
+) -> hamt_core::uom::dimensions::Energy<f64> {
+    use hamt_core::cell::CellType;
+    use hamt_core::uom::units::{j_per_kg_k, joules, kg_per_m3};
+    // WATER_SPECIFIC_HEAT = 4180 J/(kg·K): use the raw constant value directly.
+    const C_WATER: f64 = 4180.0; // J/(kg·K)
+
+    surface
+        .cells
+        .iter()
+        .filter(|c| matches!(c.cell_type, CellType::Material(_)))
+        .map(|c| {
+            // strip: Diman cannot canonicalise (kg/m³·J/kg·K)·m³·K in one step;
+            // we do the scalar multiplication and tag back as Energy = joules.
+            let rho_c_dry = c.density.value_in(kg_per_m3) * c.spech.value_in(j_per_kg_k);
+            let rho_c_water = c.volumetric_water.value_in(kg_per_m3) * C_WATER;
+            let rho_c_eff = rho_c_dry + rho_c_water; // J/(m³·K)
+            let e_scalar =
+                rho_c_eff * c.volume.value_unchecked() * c.cell_temp.value_unchecked(); // J
+            e_scalar * joules
+        })
+        .fold(0.0 * joules, |acc, x| acc + x)
+}
+
+/// Build a minimal single-layer construction for balance tests.
+///
+/// Uses the DIN EN 15026 material curves but with non-const surface VTCs so
+/// that the BC values are not overridden. `init_rh` sets the initial
+/// equilibrium moisture content.
+pub fn build_balance_construction(
+    init_rh: f64,
+) -> std::sync::Arc<hamt_core::material::Construction> {
+    use hamt_core::material::{MaterialLibrary, SurfaceVaporCoef};
+    const BALANCE_MAT_NAME: &str = "BalanceMat";
+    const BALANCE_CONST_NAME: &str = "BalanceConst";
+
+    // Build a base library to access the EN 15026 material curves, then
+    // re-wrap them in a construction with NON-CONST surface VTCs so the BC
+    // vapor_transport_coeff values are not overridden at manager construction.
+    let base_lib = create_library(20.0, init_rh, vec![0.1], vec![Some(6)]);
+    let base_const = base_lib.get_construction(CONSTRUCTION_NAME).unwrap();
+
+    let mat = base_const.layers[0].as_ref().clone();
+    let mut new_mat = mat.clone();
+    new_mat.name = BALANCE_MAT_NAME.to_string();
+
+    let lib = MaterialLibrary::new();
+    lib.add_material(new_mat).expect("add material");
+    // NON-CONST surface VTCs: BC values flow through unchanged.
+    let sv = SurfaceVaporCoef {
+        is_external_const: false,
+        external_value: 0.0,
+        is_internal_const: false,
+        internal_value: 0.0,
+    };
+    lib.create_construction(
+        BALANCE_CONST_NAME.to_string(),
+        vec![BALANCE_MAT_NAME.to_string()],
+        sv,
+    )
+    .expect("create balance construction");
+    lib.get_construction(BALANCE_CONST_NAME).unwrap()
+}

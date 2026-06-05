@@ -638,3 +638,273 @@ fn adi_3d_nynz1_routes_to_1d() -> Result<()> {
     println!("ny=nz=1 new_3d routes to 1-D correctly: PASS");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// §6.4 — 3-D closed-box face energy/mass balance test (Task 5).
+// ---------------------------------------------------------------------------
+
+/// Test: Face energy & mass balance on a 3-D ADI grid (closed box, adiabatic on
+/// all side/z-faces).
+///
+/// ## Setup
+/// Small 3-D manager (`ny=3, nz=3`, 6 x-cells per column) with `SolverMethod::Adi`.
+/// Both z-faces and y-faces are `Adiabatic` — only the two x-faces carry flux.
+/// This exercises `Size3D::area_along(2)` for z-face volumes and the per-(y,z)
+/// cell volumes in the 3-D grid.
+///
+/// ## Approach
+/// ISOTHERMAL: both x-faces at 20 °C. One-sided moisture step (ext RH 0.5 → 0.7,
+/// int RH = 0.5). Short 30-s macro-step so the PI controller uses very short
+/// substeps and the flux-accumulator endpoint approximation is accurate.
+///
+/// ## Balance assertion
+/// `Σ(face fluxes · area · dt)  ≈  Δ(stored_water)` within 15 % (the same
+/// tolerance as the 2-D balance test, which carries a known ~10 % systematic
+/// offset from the virtual-cell flux query). The 15 % bound catches gross errors
+/// (wrong sign, wrong face area, broken FV assembly) while accepting the offset.
+///
+/// ## Dimension assert
+/// `dim == [nx, 3, 3]` — confirms the 3-D grid was built correctly.
+///
+/// ## Shared helpers
+/// `total_stored_water`, `total_stored_energy`, and `build_balance_construction`
+/// are promoted to `tests/common/mod.rs` and used here via `common::`.
+#[test]
+fn adi_3d_face_energy_mass_balance() -> Result<()> {
+    init_tracing();
+
+    let time_step: Time<f64> = 30.0 * seconds; // 30 s — very short for accurate endpoint flux
+    let ny = 3usize;
+    let nz = 3usize;
+    let y_extent = 1.0 * meter;
+    let z_extent = 1.0 * meter;
+    let surface_area = 1.0 * square_meter;
+
+    // Non-const VTCs: BC values flow through unchanged (no construction override).
+    let construction = common::build_balance_construction(0.5);
+
+    let settings = HamtSettings {
+        timestep: time_step,
+        max_iterations: 3000,
+        temp_convergence_tolerance: 1e-6 * kelvin,
+        rh_convergence_tolerance: 1e-5 * dimensionless,
+        min_relaxation_factor: 1.0,
+        anderson_enabled: false, // consistent with 2-D balance test
+        solver_method: SolverMethod::Adi,
+        ..HamtSettings::default()
+    };
+
+    // ISOTHERMAL: both x-faces at 20 °C to avoid thermal-VP coupling.
+    // VTC = 3e-9 kg/(m²·s·Pa) gives measurable flux in 30 s.
+    let vtc = 3.0e-9 * kg_per_m2_s_pa;
+    let t_20 = celsius_to_kelvin(20.0);
+    let rh_init = 0.5 * dimensionless;
+
+    let bc_init = BoundaryCondition {
+        temp_outside_air: t_20,
+        temp_inside_air: t_20,
+        temp_outside_air_moisture: t_20,
+        temp_inside_air_moisture: t_20,
+        rh_outside_air: rh_init,
+        rh_inside_air: rh_init,
+        heat_transfer_coeff_ext: 25.0 * w_per_m2_k,
+        heat_transfer_coeff_int: 25.0 * w_per_m2_k,
+        mass_convection_coeff_ext: 0.0 * m_per_s,
+        mass_convection_coeff_int: 0.0 * m_per_s,
+        vapor_transport_coeff_ext: vtc,
+        vapor_transport_coeff_int: vtc,
+        ..Default::default()
+    };
+
+    // Step change: exterior RH 0.5 → 0.7 (isothermal one-sided drive).
+    let bc_step = BoundaryCondition {
+        rh_outside_air: 0.7 * dimensionless,
+        ..bc_init
+    };
+
+    // 3-D closed box: adiabatic on y-faces (default) AND z-faces.
+    let mut mgr = HamtManager::new_3d(
+        Some(settings),
+        Some(bc_init),
+        construction,
+        "Balance3DSurface".to_string(),
+        surface_area,
+        ny,
+        y_extent,
+        nz,
+        z_extent,
+        [FaceBc::Adiabatic; 2], // z-faces adiabatic
+    )?;
+
+    // Confirm the grid is a genuine 3-D grid of the right shape.
+    let dim = mgr.surface_curr.cells.raw_dim();
+    let nx_cells = dim[0];
+    println!(
+        "3-D closed-box balance: grid shape=({}, {}, {}), cells={}",
+        nx_cells, dim[1], dim[2], mgr.surface_curr.cells.len()
+    );
+    assert_eq!(dim[1], ny, "expected ny={} columns in y-direction", ny);
+    assert_eq!(dim[2], nz, "expected nz={} layers in z-direction", nz);
+
+    // Preheat to uniform isothermal equilibrium (RH=0.5, T=20°C).
+    {
+        let mut adap: AdaptiveState<()> = AdaptiveState::default();
+        let allowed_err: Dimensionless<f64> = 1e-5 * dimensionless;
+        let mut stable_count = 0usize;
+        println!("Preheating (3-D balance test, isothermal) ...");
+        for _ in 0..200 {
+            mgr.solve_timestep_adaptive(&mut adap, None)?;
+            mgr.tick_timestep()?;
+            let mats = || {
+                mgr.surface_prev
+                    .cells
+                    .iter()
+                    .filter(|c| matches!(c.cell_type, CellType::Material(_)))
+            };
+            let d_rh = mats()
+                .map(|c| c.cell_rh)
+                .fold(0.0 * dimensionless, |acc: Dimensionless<f64>, x| acc.max(x))
+                - mats()
+                    .map(|c| c.cell_rh)
+                    .fold(1.0 * dimensionless, |acc: Dimensionless<f64>, x| acc.min(x));
+            let d_t = mats()
+                .map(|c| c.cell_temp)
+                .fold(0.0 * kelvin, |acc: Temperature<f64>, x| acc.max(x))
+                - mats()
+                    .map(|c| c.cell_temp)
+                    .fold(1000.0 * kelvin, |acc: Temperature<f64>, x| acc.min(x));
+            if d_rh.value() <= allowed_err.value() && d_t.value_in(kelvin) <= allowed_err.value() {
+                stable_count += 1;
+                if stable_count >= 5 {
+                    break;
+                }
+            } else {
+                stable_count = 0;
+            }
+        }
+        println!("Preheat done (stable_count={stable_count}).");
+    }
+
+    // Capture BEFORE state (preheat-converged surface).
+    let water_before = common::total_stored_water(&mgr.surface_prev);
+    let energy_before = common::total_stored_energy(&mgr.surface_prev);
+    println!(
+        "BEFORE: water={:.6e} kg  energy_proxy={:.4e} J",
+        water_before.value_unchecked(),
+        energy_before.value_unchecked(),
+    );
+
+    // Apply BC step-change and solve ONE 30-s macro-step.
+    mgr.boundary_condition = bc_step.clone();
+    let mut adap: AdaptiveState<()> = AdaptiveState::default();
+    mgr.solve_timestep_adaptive(&mut adap, None)?;
+    mgr.tick_timestep()?;
+
+    let water_after = common::total_stored_water(&mgr.surface_prev);
+    let energy_after = common::total_stored_energy(&mgr.surface_prev);
+    println!(
+        "AFTER:  water={:.6e} kg  energy_proxy={:.4e} J",
+        water_after.value_unchecked(),
+        energy_after.value_unchecked(),
+    );
+
+    // Flux accumulator: ∫ flux dt over the macro-step [kg/m²].
+    // Positive = flux FROM boundary INTO wall.
+    let acc = &adap.flux_accumulator;
+    let area_scalar = surface_area.value_in(square_meter);
+
+    // strip: areal flux [kg/m²] × area [m²] → total mass [kg]
+    let mass_in_from_ext = acc.m_ext_dt.value_unchecked() * area_scalar;
+    let mass_in_from_int = acc.m_int_dt.value_unchecked() * area_scalar;
+    let total_mass_in = mass_in_from_ext + mass_in_from_int;
+
+    let energy_in_from_ext = acc.q_ext_dt.value_unchecked() * area_scalar;
+    let energy_in_from_int = acc.q_int_dt.value_unchecked() * area_scalar;
+    let total_energy_in = energy_in_from_ext + energy_in_from_int;
+
+    let delta_water = water_after.value_unchecked() - water_before.value_unchecked();
+    let delta_energy = energy_after.value_unchecked() - energy_before.value_unchecked();
+
+    println!(
+        "Moisture flux  EXT={:.4e} kg  INT={:.4e} kg  net_in={:.4e} kg",
+        mass_in_from_ext, mass_in_from_int, total_mass_in
+    );
+    println!(
+        "Heat flux      EXT={:.4e} J   INT={:.4e} J   net_in={:.4e} J",
+        energy_in_from_ext, energy_in_from_int, total_energy_in
+    );
+    println!(
+        "Δ(stored_water)  = {:.6e} kg  (moisture_flux×dt×area = {:.6e} kg)",
+        delta_water, total_mass_in
+    );
+    println!(
+        "Δ(energy_proxy)  = {:.4e} J   (heat_flux×dt×area     = {:.4e} J)  [info only]",
+        delta_energy, total_energy_in
+    );
+    println!(
+        "Flux accumulator total_time = {:.1} s (expected {:.1} s)",
+        adap.flux_accumulator.total_time.value_unchecked(),
+        time_step.value_unchecked(),
+    );
+
+    // ── Assertion 1: Sign convention ────────────────────────────────────────
+    // Exterior RH rose 0.5 → 0.7 at constant T: exterior VP > wall VP.
+    //   moisture_flux(Exterior) > 0  ≡  flux INTO wall
+    //   Δ(stored_water) > 0          ≡  wall absorbed moisture
+    assert!(
+        delta_water > 0.0,
+        "stored water must increase when exterior RH rises (isothermal): Δw={:.4e} kg",
+        delta_water
+    );
+    assert!(
+        mass_in_from_ext > 0.0,
+        "moisture_flux(Exterior) must be positive (exterior VP > wall VP): {:.4e} kg",
+        mass_in_from_ext
+    );
+    println!("Sign convention OK: m_ext>0 (into wall), Δwater>0");
+
+    // ── Assertion 2: MASS balance within 15 % ───────────────────────────────
+    // Mirrors the 2-D balance test: the same ~10 % systematic virtual-cell
+    // offset applies; the 15 % tolerance comfortably accepts it while catching
+    // gross errors (wrong sign, wrong area, broken FV assembly).
+    let mass_residual = if total_mass_in.abs() > 1e-15 {
+        (delta_water - total_mass_in).abs() / total_mass_in.abs()
+    } else {
+        0.0
+    };
+    println!(
+        "MASS balance residual: {:.4e}  (tolerance ≤ 15 %; known systematic offset ≈ 10 %)",
+        mass_residual
+    );
+    assert!(
+        mass_residual <= 0.15,
+        "MASS balance residual {:.4e} exceeds 15 %: Δw={:.6e} kg vs flux_in={:.6e} kg",
+        mass_residual,
+        delta_water,
+        total_mass_in
+    );
+
+    // ── Assertion 3: Grid dimension ─────────────────────────────────────────
+    // Confirms the 3-D grid was built with the expected ny and nz (already
+    // asserted above; print here for clarity in the test output).
+    println!(
+        "Grid dim OK: [{}, {}, {}]  (ny={}, nz={})",
+        nx_cells, dim[1], dim[2], ny, nz
+    );
+
+    // ── ENERGY balance — informational only ─────────────────────────────────
+    // Isothermal: both faces at the same temperature; net heat flux ≈ 0.
+    // No hard assertion (endpoint-flux approximation is less accurate for heat
+    // than for moisture at these short timescales).
+    println!(
+        "ENERGY balance (informational): ΔE={:.4e} J, heat_flux×dt×area={:.4e} J",
+        delta_energy, total_energy_in
+    );
+
+    println!(
+        "ADI 3-D closed-box face energy/mass balance PASS  (mass residual={:.4e})",
+        mass_residual
+    );
+
+    Ok(())
+}
