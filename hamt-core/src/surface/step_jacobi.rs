@@ -215,7 +215,14 @@ impl Surface {
                 "Cell {} has very low dwd_phi, using fallback moisture capacity to prevent instability",
                 i
             );
-            1.0e-10 * kilograms
+            // Volume-weighted floor: clamp the INTENSIVE storage capacity dwd_phi at
+            // 1e-10 kg/m³, then multiply by the cell volume. The previous code used a
+            // fixed ABSOLUTE 1e-10 kg per cell, which does not scale with volume — so a
+            // refined mesh injected ~N·1e-10 kg of spurious moisture inertia (a
+            // non-convergent, cell-count-dependent capacity). Weighting by volume makes
+            // the floor a consistent intensive quantity: the total floored capacity over
+            // a layer is volume-conserved (≈ 1e-10 kg/m³ · layer_volume) regardless of N.
+            1.0e-10 * kg_per_m3 * cell_curr.volume
         };
 
         CellInertia { tcap, wcap }
@@ -587,6 +594,68 @@ mod relax_write_cell_tests {
         assert!(
             (t_nan_fallback - 290.0).abs() < 1e-9,
             "expected fallback to 290 K, got {t_nan_fallback}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod cell_inertia_floor_tests {
+    use super::*;
+    use crate::uom::units::{cubic_meter, kg_per_m3, kilograms};
+
+    /// The moisture-capacity floor must be VOLUME-WEIGHTED so that the total
+    /// floored capacity over a layer is volume-conserved (intensive 1e-10 kg/m³),
+    /// not a fixed absolute per-cell mass that grows with cell count. This pins
+    /// the fix: a cell with dwd_phi below the 1e-10 kg/m³ trigger gets
+    /// wcap = 1e-10 kg/m³ · volume, and two cells whose volumes differ by 10×
+    /// get floored wcap differing by exactly 10×.
+    #[test]
+    fn wcap_floor_is_volume_weighted() {
+        // Below-threshold dwd_phi (≈ non-hygroscopic / flat-isotherm region).
+        let small = Cell {
+            dwd_phi: 0.0 * kg_per_m3,
+            volume: 1.0e-3 * cubic_meter,
+            ..Cell::default()
+        };
+        let big = Cell {
+            dwd_phi: 1.0e-12 * kg_per_m3, // still below the 1e-10 kg/m³ trigger
+            volume: 1.0e-2 * cubic_meter, // 10× the volume of `small`
+            ..Cell::default()
+        };
+
+        let wcap_small = Surface::cell_inertia(0, &small).wcap.value_in(kilograms);
+        let wcap_big = Surface::cell_inertia(1, &big).wcap.value_in(kilograms);
+
+        // Floored value = 1e-10 kg/m³ · volume.
+        assert!(
+            (wcap_small - 1.0e-10 * 1.0e-3).abs() < 1e-20,
+            "small floored wcap {wcap_small} != 1e-10 kg/m³ · 1e-3 m³"
+        );
+        assert!(
+            (wcap_big - 1.0e-10 * 1.0e-2).abs() < 1e-19,
+            "big floored wcap {wcap_big} != 1e-10 kg/m³ · 1e-2 m³"
+        );
+        // The whole point: floored capacity scales with volume (10× here), so a
+        // refined mesh does NOT inject an N-proportional spurious total capacity.
+        assert!(
+            (wcap_big / wcap_small - 10.0).abs() < 1e-9,
+            "floored wcap must scale with volume: ratio {} != 10",
+            wcap_big / wcap_small
+        );
+    }
+
+    /// Above the trigger, wcap is the normal dwd_phi·volume (unchanged behaviour).
+    #[test]
+    fn wcap_above_threshold_is_dwdphi_times_volume() {
+        let cell = Cell {
+            dwd_phi: 50.0 * kg_per_m3,
+            volume: 2.0e-3 * cubic_meter,
+            ..Cell::default()
+        };
+        let wcap = Surface::cell_inertia(0, &cell).wcap.value_in(kilograms);
+        assert!(
+            (wcap - 50.0 * 2.0e-3).abs() < 1e-12,
+            "wcap {wcap} != dwd_phi·volume (0.1 kg)"
         );
     }
 }
