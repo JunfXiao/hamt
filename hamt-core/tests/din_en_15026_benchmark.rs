@@ -56,11 +56,26 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
         // 1. Surface (0.1m): Fine grid for moisture profile
         // 2. Transition (1.0m): Intermediate grid
         // 3. Bulk (48.9m): Coarse grid for semi-infinite thermal mass
+        //
+        // The FIRST (0.1 m surface) layer is heavily subdivided (480 divisions) and,
+        // together with `div_distribution_factor = 0.9` below, clusters cells tightly
+        // at the wetted exterior face so the FIRST near-surface cell is ~22 µm. The EN
+        // 15026 wetting front is concentrated in the first ~1 mm; resolving it requires
+        // a sub-0.1 mm near-surface cell. The previously coarse mesh (60 divisions,
+        // ~228 µm first cell) only passed because a spurious surface-LIQUID flux through
+        // the air film — since removed by the EnergyPlus-style product guard in
+        // calculate_resistance_triple (no liquid water crosses an unsaturated air film) —
+        // was MASKING the under-resolution at depth 0.01 m. With that fix the mesh must
+        // actually resolve the front. See doc/flux_offset_investigation.md.
+        //
+        // NOTE: the grid's safety clamp reduces divisions while the first cell is below
+        // `settings.adj_length`; `adj_length` is lowered to 1e-5 m below so all 480
+        // divisions survive (otherwise they collapse back to ~118 / ~100 µm).
         let library = create_library(
             20.0,
             0.5,
             vec![0.1, 0.9, 4.0, 10.0, 20.0],
-            vec![Some(60), Some(60), Some(60), Some(60), Some(60)],
+            vec![Some(480), Some(60), Some(60), Some(60), Some(60)],
         );
         let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
 
@@ -69,10 +84,15 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
         settings.max_iterations = 3000;
         settings.temp_convergence_tolerance = 1e-6 * kelvin;
         settings.rh_convergence_tolerance = 1e-4 * dimensionless;
-        settings.max_div = 50;
+        settings.max_div = 500;
         settings.min_div = 20;
         settings.div_length = 1e-5 * meter;
-        settings.adj_length = 1e-4 * meter;
+        // Cluster cells at the surface so the wetting front (first ~1 mm) is resolved.
+        settings.div_distribution_factor = 0.9;
+        // Lower the min-cell safety clamp so the requested 480 surface divisions are
+        // NOT reduced (the clamp shrinks divs while the first cell < adj_length). With
+        // factor 0.9 the first cell is ~22 µm, so adj_length must sit below that.
+        settings.adj_length = 1e-5 * meter;
         settings.min_relaxation_factor = 1.0;
         settings.solver_method = method;
 
