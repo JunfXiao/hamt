@@ -193,11 +193,15 @@ fn run_room_coupling(num_div: usize, days: f64, dt_h: f64) -> Result<RunResult> 
     settings.solver_method = SolverMethod::BlockTridiagonal;
     settings.temp_convergence_tolerance = 1e-3 * kelvin;
     settings.rh_convergence_tolerance = 1e-4 * dimensionless;
-    settings.min_div = 1; // num_div on the material wins; keep clamps wide
-    settings.max_div = 200;
-    // Cluster cells toward the surfaces (the daily moisture wave lives near the
-    // interior face), so a given cell count resolves the active skin better.
-    settings.div_distribution_factor = 0.7;
+    settings.n_div = 1; // num_div on the material wins; keep the floor low
+    // Uniform grid for this cell-count CONVERGENCE sweep. The two-sided geometric
+    // distribution's end cell shrinks geometrically with N, reaching sub-micron /
+    // floating-point underflow widths at high cell counts; the resulting near-zero
+    // boundary-cell volumes make a refinement sweep ill-conditioned and non-monotone.
+    // A uniform grid refines cleanly, which is what this test needs to validate the
+    // coupling + conservation + convergence behaviour. (The EN 15026 benchmark keeps
+    // the geometric grid because it is a single fixed mesh, not a cell-count sweep.)
+    settings.div_distribution_factor = 0.0;
     settings.min_relaxation_factor = 0.5;
 
     let bc_init = BoundaryCondition {

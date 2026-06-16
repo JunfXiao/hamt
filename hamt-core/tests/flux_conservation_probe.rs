@@ -107,8 +107,7 @@ fn run_probe(
     settings.temp_convergence_tolerance = 1e-4 * kelvin;
     settings.rh_convergence_tolerance = 1e-5 * dimensionless;
     settings.max_iterations = 3000;
-    settings.min_div = 1;
-    settings.max_div = 200;
+    settings.n_div = 1;
     settings.min_relaxation_factor = min_relax;
 
     let bc_init = BoundaryCondition {

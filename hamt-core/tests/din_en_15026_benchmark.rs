@@ -89,8 +89,7 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
         settings.max_iterations = 3000;
         settings.temp_convergence_tolerance = 1e-6 * kelvin;
         settings.rh_convergence_tolerance = 1e-4 * dimensionless;
-        settings.max_div = 500;
-        settings.min_div = 20;
+        settings.n_div = 20;
         settings.div_length = 1e-5 * meter;
         // Two-sided geometric clustering so the wetting front (first ~1 mm) is
         // resolved at the exterior face (and the layer interface) with few cells.
@@ -657,8 +656,7 @@ fn run_total_release_with_timestep_and_solver(
     // splitter even with very small sub-dt.
     settings.temp_convergence_tolerance = 1e-3 * kelvin;
     settings.rh_convergence_tolerance = 1e-4 * dimensionless;
-    settings.min_div = 15;
-    settings.max_div = 30;
+    settings.n_div = 15;
     settings.min_relaxation_factor = 0.5;
     settings.solver_method = method;
 
@@ -861,7 +859,7 @@ fn run_cell_count_probe(num_div: usize) -> Result<ProbeResult> {
 
     // Single thin layer so the drying transient lives within the 24 h window.
     // num_divs = Some(N) pins the material-cell count to exactly N regardless of
-    // div_length / min_div / max_div (see grid.rs::build_x_column: num_div takes
+    // div_length / n_div (see grid.rs::build_x_column: num_div takes
     // precedence over the div_length-derived guess).
     let library = create_library(20.0, 0.5, vec![0.02], vec![Some(num_div)]);
     let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
@@ -871,9 +869,8 @@ fn run_cell_count_probe(num_div: usize) -> Result<ProbeResult> {
     settings.max_iterations = 1500;
     settings.temp_convergence_tolerance = 1e-3 * kelvin;
     settings.rh_convergence_tolerance = 1e-4 * dimensionless;
-    // num_div on the material wins; keep min/max wide so they never clamp it.
-    settings.min_div = 1;
-    settings.max_div = 200;
+    // num_div on the material wins; keep the floor low so it never raises it.
+    settings.n_div = 1;
     settings.min_relaxation_factor = 0.5;
     settings.solver_method = SolverMethod::BlockTridiagonal;
 

@@ -136,9 +136,7 @@ pub(super) fn build_x_column(
 
         // 1. Number of divisions for this layer
         let divs = mat_arc.num_div.unwrap_or(
-            ((mat_thickness_m / div_len_m).value().ceil() as i32)
-                .max(settings.min_div)
-                .min(settings.max_div) as usize,
+            ((mat_thickness_m / div_len_m).value().ceil() as i32).max(settings.n_div) as usize,
         );
 
         // The position of the i-th boundary (0..=divs) within this layer is given

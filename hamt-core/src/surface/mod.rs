@@ -462,8 +462,7 @@ mod tests {
 
         let settings = {
             let mut s = crate::config::HamtSettings::default();
-            s.min_div = n_div as i32;
-            s.max_div = n_div as i32;
+            s.n_div = n_div as i32;
             s
         };
         let bc = BoundaryCondition::default();

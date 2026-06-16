@@ -128,7 +128,7 @@ impl TrnSysType {
                 }
                 .into());
             }
-            settings.min_div = n_div_value;
+            settings.n_div = n_div_value;
         }
 
         // Optional param 10: inner solver selector. 0 = BlockJacobi, 1 = BlockTridiagonal.
