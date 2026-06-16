@@ -4,7 +4,7 @@ use crate::{
         Quantity,
         constants::{WATER_LATENT_HEAT, WATER_SPECIFIC_HEAT},
         dimensions::{
-            HeatCapacity, Mass, MassFlux, MassFluxPerTemperature, Power, SpecificEnergy,
+            Density, HeatCapacity, Mass, MassFlux, MassFluxPerTemperature, Power, SpecificEnergy,
             ThermalConductance, Time, VaporConductance,
         },
         units::{
@@ -203,25 +203,52 @@ impl Surface {
     }
 
     /// Cell-local inertial capacities `(tcap, wcap)` for the implicit step.
-    pub(crate) fn cell_inertia(i: usize, cell_curr: &Cell) -> CellInertia {
+    ///
+    /// `wcap` uses a **secant** moisture capacity rather than the endpoint
+    /// **tangent** `dwd_phi`. The implicit-Euler moisture balance represents the
+    /// storage rate as `wcap·(φ_{n+1}−φ_n)/dt`; with the tangent `dwd_phi·V` the
+    /// stored increment only approximates the true water-content change
+    /// `V·(w(φ_{n+1})−w(φ_n))`, with a gap ∝ isotherm curvature × Δφ that is
+    /// non-negligible for the steep EN-15026 isotherm under a large per-step Δφ.
+    /// The secant slope `ξ = (w_curr − w_prev)/(φ_curr − φ_prev)` makes the
+    /// storage TERM equal the true increment `V·Δw` at convergence
+    /// (φ_{n+1} → φ_curr), so the discrete capacity is consistent with the
+    /// sorption isotherm.
+    ///
+    /// NOTE: this fixes the storage term only. A separate ~20–40 % offset between
+    /// the *reported surface vapour flux* and the wall's stored-water change
+    /// remains (see `tests/room_air_coupling.rs`); it grows with N and correlates
+    /// with the latent-heat thermal swing, so it lives in the T↔φ (vp_sat(T))
+    /// coupling, NOT in this capacity term — the secant alone does not close it.
+    ///
+    /// When Δφ is too small to form a stable secant (first iterate, near steady
+    /// state) it falls back to the tangent `dwd_phi`. Both share the same
+    /// volume-weighted floor (`1e-10 kg/m³ · volume`) so a refined mesh never
+    /// injects a non-convergent absolute capacity.
+    pub(crate) fn cell_inertia(i: usize, cell_curr: &Cell, cell_prev: &Cell) -> CellInertia {
         let tcap = (cell_curr.density * cell_curr.spech
             + cell_curr.volumetric_water * WATER_SPECIFIC_HEAT)
             * cell_curr.volume;
 
-        let wcap = if cell_curr.dwd_phi > 1e-10 * kg_per_m3 {
-            cell_curr.dwd_phi * cell_curr.volume
+        // Secant moisture-storage slope ξ [kg/m³ per unit RH] = Δw/Δφ over this
+        // step, falling back to the tangent dwd_phi when Δφ is negligible.
+        let dphi = cell_curr.cell_rh - cell_prev.cell_rh;
+        let xi: Density<f64> = if dphi.value().abs() > 1e-7 {
+            (cell_curr.volumetric_water - cell_prev.volumetric_water) / dphi
+        } else {
+            cell_curr.dwd_phi
+        };
+
+        let wcap = if xi > 1e-10 * kg_per_m3 {
+            xi * cell_curr.volume
         } else {
             debug!(
-                "Cell {} has very low dwd_phi, using fallback moisture capacity to prevent instability",
+                "Cell {} has very low moisture capacity (secant ξ ≈ 0), using volume-weighted fallback to prevent instability",
                 i
             );
-            // Volume-weighted floor: clamp the INTENSIVE storage capacity dwd_phi at
-            // 1e-10 kg/m³, then multiply by the cell volume. The previous code used a
-            // fixed ABSOLUTE 1e-10 kg per cell, which does not scale with volume — so a
-            // refined mesh injected ~N·1e-10 kg of spurious moisture inertia (a
-            // non-convergent, cell-count-dependent capacity). Weighting by volume makes
-            // the floor a consistent intensive quantity: the total floored capacity over
-            // a layer is volume-conserved (≈ 1e-10 kg/m³ · layer_volume) regardless of N.
+            // Volume-weighted floor (intensive 1e-10 kg/m³ × volume) so the total
+            // floored capacity over a layer is volume-conserved regardless of N
+            // — not a fixed absolute per-cell mass.
             1.0e-10 * kg_per_m3 * cell_curr.volume
         };
 
@@ -338,7 +365,7 @@ impl Surface {
                     // heat sources are extracted into testable helpers. The sums read
                     // lagged neighbour state from `surface_curr` (block-Jacobi sweep).
                     let sums = surface_curr.accumulate_neighbor_sums([i, 0, 0], surface_curr, bc);
-                    let inertia = Self::cell_inertia(i, cell_curr);
+                    let inertia = Self::cell_inertia(i, cell_curr, cell_prev);
                     let sources = surface_curr.cell_sources([i, 0, 0], surface_curr, bc);
 
                     let t_curr = cell_curr.cell_temp;
@@ -599,19 +626,18 @@ mod relax_write_cell_tests {
 }
 
 #[cfg(test)]
-mod cell_inertia_floor_tests {
+mod cell_inertia_capacity_tests {
     use super::*;
-    use crate::uom::units::{cubic_meter, kg_per_m3, kilograms};
+    use crate::uom::units::{cubic_meter, dimensionless, kg_per_m3, kilograms};
 
-    /// The moisture-capacity floor must be VOLUME-WEIGHTED so that the total
-    /// floored capacity over a layer is volume-conserved (intensive 1e-10 kg/m³),
-    /// not a fixed absolute per-cell mass that grows with cell count. This pins
-    /// the fix: a cell with dwd_phi below the 1e-10 kg/m³ trigger gets
-    /// wcap = 1e-10 kg/m³ · volume, and two cells whose volumes differ by 10×
-    /// get floored wcap differing by exactly 10×.
+    /// With a negligible per-step RH change the secant is undefined, so wcap
+    /// falls back to the TANGENT dwd_phi — and the floor must be VOLUME-WEIGHTED
+    /// (intensive 1e-10 kg/m³ × volume), not a fixed absolute per-cell mass.
+    /// Otherwise a refined mesh injects an N-proportional spurious capacity. Two
+    /// cells whose volumes differ 10× must get floored wcap differing exactly 10×.
     #[test]
     fn wcap_floor_is_volume_weighted() {
-        // Below-threshold dwd_phi (≈ non-hygroscopic / flat-isotherm region).
+        let prev = Cell::default(); // cell_rh = 0 == curr's default → Δφ = 0 → tangent path
         let small = Cell {
             dwd_phi: 0.0 * kg_per_m3,
             volume: 1.0e-3 * cubic_meter,
@@ -623,10 +649,9 @@ mod cell_inertia_floor_tests {
             ..Cell::default()
         };
 
-        let wcap_small = Surface::cell_inertia(0, &small).wcap.value_in(kilograms);
-        let wcap_big = Surface::cell_inertia(1, &big).wcap.value_in(kilograms);
+        let wcap_small = Surface::cell_inertia(0, &small, &prev).wcap.value_in(kilograms);
+        let wcap_big = Surface::cell_inertia(1, &big, &prev).wcap.value_in(kilograms);
 
-        // Floored value = 1e-10 kg/m³ · volume.
         assert!(
             (wcap_small - 1.0e-10 * 1.0e-3).abs() < 1e-20,
             "small floored wcap {wcap_small} != 1e-10 kg/m³ · 1e-3 m³"
@@ -635,8 +660,6 @@ mod cell_inertia_floor_tests {
             (wcap_big - 1.0e-10 * 1.0e-2).abs() < 1e-19,
             "big floored wcap {wcap_big} != 1e-10 kg/m³ · 1e-2 m³"
         );
-        // The whole point: floored capacity scales with volume (10× here), so a
-        // refined mesh does NOT inject an N-proportional spurious total capacity.
         assert!(
             (wcap_big / wcap_small - 10.0).abs() < 1e-9,
             "floored wcap must scale with volume: ratio {} != 10",
@@ -644,18 +667,51 @@ mod cell_inertia_floor_tests {
         );
     }
 
-    /// Above the trigger, wcap is the normal dwd_phi·volume (unchanged behaviour).
+    /// With Δφ ≈ 0 (static state) and a real capacity, wcap is the tangent
+    /// dwd_phi·volume (the secant degenerates and is bypassed).
     #[test]
-    fn wcap_above_threshold_is_dwdphi_times_volume() {
+    fn wcap_tangent_when_phi_static() {
+        let prev = Cell::default();
         let cell = Cell {
             dwd_phi: 50.0 * kg_per_m3,
             volume: 2.0e-3 * cubic_meter,
             ..Cell::default()
         };
-        let wcap = Surface::cell_inertia(0, &cell).wcap.value_in(kilograms);
+        let wcap = Surface::cell_inertia(0, &cell, &prev).wcap.value_in(kilograms);
         assert!(
             (wcap - 50.0 * 2.0e-3).abs() < 1e-12,
-            "wcap {wcap} != dwd_phi·volume (0.1 kg)"
+            "wcap {wcap} != tangent dwd_phi·volume (0.1 kg)"
+        );
+    }
+
+    /// When φ changes over the step, wcap uses the SECANT slope Δw/Δφ
+    /// (mass-conservative), NOT the endpoint tangent dwd_phi. This is the fix
+    /// that makes the discrete moisture balance conserve the true water-content
+    /// change on a curved isotherm and removes the flux-vs-stored-water offset.
+    #[test]
+    fn wcap_uses_secant_when_phi_changes() {
+        let prev = Cell {
+            cell_rh: 0.40 * dimensionless,
+            volumetric_water: 40.0 * kg_per_m3,
+            ..Cell::default()
+        };
+        let curr = Cell {
+            cell_rh: 0.60 * dimensionless,
+            volumetric_water: 70.0 * kg_per_m3,
+            dwd_phi: 200.0 * kg_per_m3, // tangent — deliberately != secant
+            volume: 2.0e-3 * cubic_meter,
+            ..Cell::default()
+        };
+        // Secant ξ = (70 − 40)/(0.60 − 0.40) = 150 kg/m³ ⇒ wcap = ξ·V = 0.30 kg.
+        let wcap = Surface::cell_inertia(0, &curr, &prev).wcap.value_in(kilograms);
+        assert!(
+            (wcap - 150.0 * 2.0e-3).abs() < 1e-9,
+            "wcap {wcap} should use the secant (0.30 kg), got otherwise"
+        );
+        // And it must NOT be the tangent value 200·V = 0.40 kg.
+        assert!(
+            (wcap - 200.0 * 2.0e-3).abs() > 1e-3,
+            "wcap must use the secant, not the tangent dwd_phi"
         );
     }
 }
