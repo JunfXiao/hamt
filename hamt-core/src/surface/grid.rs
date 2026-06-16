@@ -8,15 +8,62 @@ use crate::{
     physics::geometry::{Pt3D, Size3D},
 };
 
-/// Upper bound on the adjacent-cell growth ratio `r` used by
+/// Hard ceiling on the per-`factor` growth-ratio cap `r_max(factor)` used by
 /// [`geometric_norm_pos`]. The two-sided geometric grading grows each cell by a
-/// factor `r` relative to its inward neighbour; capping `r` keeps the size jump
-/// between adjacent cells modest (a finite-volume accuracy concern — large size
-/// ratios degrade the second-order spatial truncation). 1.5 (a 50 % max growth
-/// per cell) resolves the EN 15026 wetting front with far fewer cells than the
-/// old sine blend while keeping adjacent ratios bounded; values in [1.3, 1.6]
-/// behave similarly.
+/// factor `r` relative to its inward neighbour. `r` is no longer a fixed
+/// function of `factor`; it is SOLVED so the first cell hits a target size (see
+/// [`geometric_norm_pos`]), then CAPPED at the legacy fixed-ratio formula
+/// `r_max(factor) = 1 + factor·(MAX - 1)`. This constant is the `factor = 1`
+/// end of that cap. Capping `r` keeps the size jump between adjacent cells
+/// modest (a finite-volume accuracy concern — large size ratios degrade the
+/// second-order spatial truncation). 1.5 (a 50 % max growth per cell) resolves
+/// the EN 15026 wetting front while keeping adjacent ratios bounded; values in
+/// [1.3, 1.6] behave similarly. Because the cap equals the legacy ratio, the
+/// solved-ratio grid is a strict refinement of the legacy grid: identical
+/// wherever the solve saturates at `r_max(factor)` (low/moderate n, where the
+/// legacy grid did not underflow), and only finer below the cap at high n
+/// (where the legacy fixed-ratio grid underflowed exponentially).
 const GRID_GROWTH_RATIO_MAX: f64 = 1.5;
+
+/// Most-aggressive target for the FIRST (end) cell, expressed as a fraction of
+/// the uniform cell width `1/n`. `factor = 0` maps to fraction `1.0` (uniform);
+/// `factor -> 1` maps to this floor (tightest near-surface/interface
+/// clustering). The first cell is then `frac/n` of the layer thickness, so it
+/// shrinks LINEARLY in `1/n` as the cell count grows — there is no exponential
+/// end-cell underflow.
+///
+/// Calibration: reproduces the EN 15026 benchmark's existing first-cell size at
+/// `n = 60`, `factor = 0.7`. The old fixed-ratio grid had total
+/// `Σ = 46440 ⇒ frac = 60/46440 ≈ 1.29e-3`; matching that means
+/// `FLOOR^0.7 ≈ 1.29e-3 ⇒ FLOOR ≈ 7.5e-5`.
+const FIRST_CELL_FRACTION_FLOOR: f64 = 7.5e-5;
+
+/// `Σ_{j=0}^{n-1} r^min(j, n-1-j)` — the unnormalized total layer length for a
+/// two-sided symmetric geometric grading with adjacent-cell ratio `r`.
+fn geometric_total(n: usize, r: f64) -> f64 {
+    (0..n).map(|j| r.powi(j.min(n - 1 - j) as i32)).sum()
+}
+
+/// Largest `r` in `(1, r_max]` with
+/// `geometric_total(n, r) ~= target_total` (the total is monotone increasing in
+/// `r`). If even `r = r_max` can't reach `target_total` (too few cells to cluster
+/// that hard), return `r_max` (clustering is accuracy-capped — correct, benign).
+fn solve_growth_ratio(n: usize, target_total: f64, r_max: f64) -> f64 {
+    let hi = r_max;
+    if geometric_total(n, hi) <= target_total {
+        return hi;
+    }
+    let (mut lo, mut hi) = (1.0_f64, r_max);
+    for _ in 0..100 {
+        let mid = 0.5 * (lo + hi);
+        if geometric_total(n, mid) < target_total {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    hi
+}
 
 /// Normalized boundary position `p(i)` in `[0,1]` for `i` in `0..=n`, two-sided
 /// symmetric geometric clustering.
@@ -24,8 +71,21 @@ const GRID_GROWTH_RATIO_MAX: f64 = 1.5;
 /// `factor` in `[0,1]`: `0` = uniform; `->1` = stronger clustering at BOTH ends.
 /// Because `build_x_column` applies this per material layer, clustering at both
 /// ends of every layer fines the exterior/interior wall surfaces AND every
-/// internal layer interface. Cells grow geometrically from each end toward the
-/// middle by an adjacent-cell ratio `r`, bounded by [`GRID_GROWTH_RATIO_MAX`].
+/// internal layer interface.
+///
+/// Parameterization (target-fraction -> solved-ratio): rather than fixing the
+/// adjacent-cell growth ratio `r` from `factor` directly, we TARGET a first-cell
+/// SIZE as a fraction of the uniform cell `1/n` — `factor = 0` -> fraction `1.0`
+/// (uniform), `factor -> 1` -> [`FIRST_CELL_FRACTION_FLOOR`] — and then SOLVE for
+/// the geometric ratio `r` that yields it. The solved `r` is CAPPED at the
+/// legacy fixed-ratio formula `r_max(factor) = 1 + factor·([`GRID_GROWTH_RATIO_MAX`] - 1)`,
+/// which makes this scheme a strict refinement of the legacy grid: identical
+/// wherever the solve saturates at `r_max(factor)` (the legacy ratio — low/moderate
+/// `n`, where the legacy grid did not underflow), and only finer below the cap at
+/// high `n`. The first cell is therefore `frac/n` of the layer, which shrinks
+/// LINEARLY in `1/n` as the cell count grows: NO exponential end-cell underflow
+/// (the old fixed-`r` scheme made the end cell `~1/r^(n/2)`, underflowing to
+/// sub-nanometre at high `n`). The solved `r -> 1` as `n` grows.
 ///
 /// Properties: `p(0)=0`, `p(n)=1`, strictly increasing, and symmetric
 /// (`p(i) = 1 - p(n-i)`). `O(n)` per call — the grid is built once with small
@@ -44,15 +104,19 @@ fn geometric_norm_pos(i: usize, n: usize, factor: f64) -> f64 {
         return i as f64 / n as f64; // uniform
     }
 
-    // Adjacent-cell growth ratio, bounded for accuracy.
-    let r = 1.0 + factor.clamp(0.0, 1.0) * (GRID_GROWTH_RATIO_MAX - 1.0);
+    // Target first-cell fraction of the uniform cell (1/n): factor 0 -> 1.0
+    // (uniform), factor -> 1 -> FIRST_CELL_FRACTION_FLOOR. Solve for the growth
+    // ratio that yields it, so the first cell is `frac/n` (linear in 1/n — no
+    // exponential underflow as n grows).
+    let frac = FIRST_CELL_FRACTION_FLOOR.powf(factor.clamp(0.0, 1.0));
+    let target_total = n as f64 / frac; // first cell (normalized) = 1/target_total = frac/n
+    // Cap the solved ratio at the old fixed-ratio formula r_max(factor), so this grid equals the legacy grid wherever the legacy grid did not underflow (low/moderate n); it only refines below the cap at high n (where the legacy grid underflowed exponentially).
+    let r_max = 1.0 + factor.clamp(0.0, 1.0) * (GRID_GROWTH_RATIO_MAX - 1.0);
+    let r = solve_growth_ratio(n, target_total, r_max);
 
     // Relative size of cell j (j in 0..n): smallest at the two ends (j=0 and
     // j=n-1), largest in the middle — symmetric about the layer centre.
-    let size = |j: usize| -> f64 {
-        let dist_from_end = j.min(n - 1 - j) as i32;
-        r.powi(dist_from_end)
-    };
+    let size = |j: usize| -> f64 { r.powi(j.min(n - 1 - j) as i32) };
 
     let total: f64 = (0..n).map(size).sum();
     let partial: f64 = (0..i).map(size).sum();
@@ -138,6 +202,24 @@ pub(super) fn build_x_column(
         let divs = mat_arc.num_div.unwrap_or(
             ((mat_thickness_m / div_len_m).value().ceil() as i32).max(settings.n_div) as usize,
         );
+
+        // Diagnostic: derived first-cell size and solved growth ratio for this
+        // layer (target-fraction -> solved-ratio parameterization).
+        if dist_factor > 1e-6 && divs > 1 {
+            let frac = FIRST_CELL_FRACTION_FLOOR.powf(dist_factor.clamp(0.0, 1.0));
+            let r_max = 1.0 + dist_factor.clamp(0.0, 1.0) * (GRID_GROWTH_RATIO_MAX - 1.0);
+            let r = solve_growth_ratio(divs, divs as f64 / frac, r_max);
+            let first_cell_m = (mat_thickness_m * geometric_norm_pos(1, divs, dist_factor))
+                .value_in(meter); // strip: tracing log field
+            tracing::debug!(
+                material = %mat_arc.name,
+                divs,
+                factor = dist_factor,
+                solved_ratio = r,
+                first_cell_m,
+                "geometric grid layer"
+            );
+        }
 
         // The position of the i-th boundary (0..=divs) within this layer is given
         // by `geometric_norm_pos` (two-sided symmetric geometric clustering),
@@ -464,6 +546,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The first (end) cell must shrink ~LINEARLY in `1/n`, not exponentially:
+    /// the target-fraction -> solved-ratio parameterization makes the normalized
+    /// first cell `fc(n) = frac/n` with `frac` independent of `n` (in the
+    /// uncapped regime). The OLD fixed-ratio grid made `fc(n) ~ 1/r^(n/2)`, which
+    /// underflowed to ~1e-30 by n=480.
+    #[test]
+    fn geometric_norm_pos_no_exponential_underflow() {
+        let factor = 0.7;
+        let fc = |n: usize| geometric_norm_pos(1, n, factor); // normalized first-cell width
+
+        let ns = [60usize, 120, 240, 480];
+        let fcs: Vec<f64> = ns.iter().map(|&n| fc(n)).collect();
+        let prods: Vec<f64> = ns.iter().zip(&fcs).map(|(&n, &f)| n as f64 * f).collect();
+
+        // (a) n*fc(n) ~ constant (= frac): each of n=120,240,480 within 5% of n=60.
+        let ref_prod = prods[0];
+        for (k, &p) in prods.iter().enumerate().skip(1) {
+            let rel = (p - ref_prod).abs() / ref_prod;
+            assert!(
+                rel < 0.05,
+                "n*fc not constant: n={}, n*fc={p} vs ref(n=60)={ref_prod} (rel {rel})",
+                ns[k]
+            );
+        }
+
+        // (b) fc(480) must NOT underflow (old fixed-ratio grid would give ~1e-30).
+        assert!(
+            fcs[3] > 1e-7,
+            "fc(480)={} underflowed (expected linear ~frac/480)",
+            fcs[3]
+        );
+
+        // (c) FLOOR calibration reproduces the EN-15026 benchmark operating point:
+        //     fc(60) ~ old 2.15µm-equivalent normalized first cell (2.15e-5) within ~15%.
+        let expected_fc60 = 2.15e-5;
+        let rel60 = (fcs[0] - expected_fc60).abs() / expected_fc60;
+        assert!(
+            rel60 < 0.15,
+            "fc(60)={} not within 15% of calibration target {expected_fc60} (rel {rel60})",
+            fcs[0]
+        );
     }
 
     /// MULTI-LAYER INTERFACE refinement: build a 2-layer construction and assert

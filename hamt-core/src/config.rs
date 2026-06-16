@@ -126,15 +126,10 @@ pub struct HamtSettings {
     /// minimum number of divisions per material layer (a floor on the
     /// div_length-derived count; per-material `num_div` overrides it entirely)
     pub n_div: i32,
-    /// Cell division distribution factor, in `[0, 1]`.
-    ///
-    /// Controls a two-sided symmetric GEOMETRIC clustering of cells within each
-    /// material layer (see `surface::grid::geometric_norm_pos`). `0.0` =
-    /// uniform (linear) spacing; increasing toward `1.0` clusters cells more
-    /// tightly at BOTH ends of every layer, so the exterior/interior wall
-    /// surfaces and every internal layer interface get fine cells while the
-    /// layer interior stays coarse. The adjacent-cell growth ratio is bounded by
-    /// `GRID_GROWTH_RATIO_MAX` for accuracy.
+    /// Clustering aggressiveness in [0,1]: 0 = uniform; ->1 = finer
+    /// near-surface/interface cells (internally converted to a target first-cell
+    /// size and a solved geometric growth ratio bounded by the FV accuracy cap).
+    /// The cell COUNT is set separately (num_div / n_div / div_length).
     pub div_distribution_factor: f64,
     /// user defined depth [m]
     pub user_defined_depth: Option<Length<f64>>,
