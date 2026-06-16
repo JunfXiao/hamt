@@ -336,8 +336,11 @@ impl HamtManager {
 
     /// ACCEPT: commit the substep. Refreshes the per-cell extrapolation rates from
     /// the accepted state, advances `substep_time` / `current_time`, accumulates the
-    /// time-weighted boundary fluxes into the `SubstepFluxAccumulator`, and rotates
-    /// the accepted state into `surface_prev`.
+    /// boundary fluxes into the `SubstepFluxAccumulator` by a composite trapezoidal
+    /// rule in time (end-point / right-Riemann for the FIRST accepted substep — whose
+    /// macro-start left endpoint is the unreliable pre-BC-change left-limit — and
+    /// trapezoidal for substeps 2..N, whose start is the previous substep's exact
+    /// converged end), and rotates the accepted state into `surface_prev`.
     fn advance_accepted_substep<T>(
         &mut self,
         adaptive_state: &mut AdaptiveState<T>,
@@ -359,21 +362,45 @@ impl HamtManager {
         adaptive_state.substep_time += dt_step;
         adaptive_state.current_time += dt_step;
 
-        // Accumulate fluxes.
         {
-            let q_int = self.surface_curr.heat_flux(BoundaryLocation::Interior)?;
-            let q_ext = self.surface_curr.heat_flux(BoundaryLocation::Exterior)?;
-            let m_int = self
+            // Boundary fluxes at the END of this substep (surface_curr, just converged).
+            let q_int_end = self.surface_curr.heat_flux(BoundaryLocation::Interior)?;
+            let q_ext_end = self.surface_curr.heat_flux(BoundaryLocation::Exterior)?;
+            let m_int_end = self
                 .surface_curr
                 .moisture_flux(BoundaryLocation::Interior, &self.boundary_condition)?;
-            let m_ext = self
+            let m_ext_end = self
                 .surface_curr
                 .moisture_flux(BoundaryLocation::Exterior, &self.boundary_condition)?;
 
-            adaptive_state.flux_accumulator.q_int_dt += q_int * dt_step;
-            adaptive_state.flux_accumulator.q_ext_dt += q_ext * dt_step;
-            adaptive_state.flux_accumulator.m_int_dt += m_int * dt_step;
-            adaptive_state.flux_accumulator.m_ext_dt += m_ext * dt_step;
+            // Composite trapezoidal in time. For substeps 2..N within a macro-step the BC
+            // is constant, so surface_prev (this substep's start = the previous substep's
+            // converged end) gives the exact left endpoint and we average start & end. For
+            // the FIRST accepted substep, surface_prev still carries the PREVIOUS macro-
+            // step's boundary state (left-limit, pre-BC-change) — not a valid left endpoint
+            // (it can be ~0 after a BC step-change from rest, which would halve a single-
+            // substep integral), so we drop it and use the end-point (right-Riemann) for
+            // that first panel. The trapezoidal average is second-order in dt; this only
+            // sharpens the *reported* boundary-flux integral — solver state is unaffected.
+            if adaptive_state.flux_accumulator.total_time <= 0.0 * seconds {
+                adaptive_state.flux_accumulator.q_int_dt += q_int_end * dt_step;
+                adaptive_state.flux_accumulator.q_ext_dt += q_ext_end * dt_step;
+                adaptive_state.flux_accumulator.m_int_dt += m_int_end * dt_step;
+                adaptive_state.flux_accumulator.m_ext_dt += m_ext_end * dt_step;
+            } else {
+                let q_int_start = self.surface_prev.heat_flux(BoundaryLocation::Interior)?;
+                let q_ext_start = self.surface_prev.heat_flux(BoundaryLocation::Exterior)?;
+                let m_int_start = self
+                    .surface_prev
+                    .moisture_flux(BoundaryLocation::Interior, &self.boundary_condition)?;
+                let m_ext_start = self
+                    .surface_prev
+                    .moisture_flux(BoundaryLocation::Exterior, &self.boundary_condition)?;
+                adaptive_state.flux_accumulator.q_int_dt += (q_int_start + q_int_end) * dt_step * 0.5;
+                adaptive_state.flux_accumulator.q_ext_dt += (q_ext_start + q_ext_end) * dt_step * 0.5;
+                adaptive_state.flux_accumulator.m_int_dt += (m_int_start + m_int_end) * dt_step * 0.5;
+                adaptive_state.flux_accumulator.m_ext_dt += (m_ext_start + m_ext_end) * dt_step * 0.5;
+            }
             adaptive_state.flux_accumulator.total_time += dt_step;
         }
 
