@@ -460,19 +460,14 @@ fn test_room_air_coupling_converges_and_conserves() -> Result<()> {
 
     // ── AUDIT: diagnostic flux-query vs true stored-water offset ─────────────
     // At peak uptake, the cumulative interior surface-flux integral
-    // (`moisture_flux`, the value reported to TRNSYS) is compared to the wall's
-    // true stored-water excursion (`water_total`). They differ because the
-    // implicit-Euler moisture balance — and the flux query consistent with it —
-    // conserve the LINEARISED capacity dwd_phi·V·Δφ (endpoint tangent of the
-    // isotherm), whereas water_total tracks the true secant V·Δw. For the SHARP
-    // EN-15026 isotherm with a large diurnal Δφ this gap is sizeable and GROWS
-    // with N (finer meshes resolve a larger near-surface Δφ → more curvature),
-    // i.e. it is NOT a fixed ~10% constant — it scales with isotherm curvature ×
-    // per-cell Δφ. Consequence for coupling: a TRNSYS zone driven by the
-    // reported flux receives less moisture than the wall actually stored, i.e.
-    // the surface flux query is not strictly mass-consistent with the wall.
-    // We document the magnitude and only guard against a gross regression.
-    println!("\n  AUDIT — diagnostic flux integral vs true stored water at peak uptake:");
+    // (`moisture_flux`, the value reported to TRNSYS) must match the wall's true
+    // stored-water excursion (`water_total`) — mass conservation, sealed exterior.
+    // Before the surface-liquid fix this offset was −22…−38 % and grew with N
+    // (the diagnostic reported only the convective vapour film term and omitted
+    // the surface liquid/capillary flux the solver also drives). `moisture_flux`
+    // now reports the TOTAL surface flux, so the coupling conserves mass.
+    // See doc/flux_offset_investigation.md.
+    println!("\n  Surface mass conservation — reported flux integral vs true stored water at peak uptake:");
     for r in &results {
         let offset = (r.cum_flux_at_peak_kg - r.wall_water_peak_kg) / r.wall_water_peak_kg;
         println!(
@@ -483,10 +478,10 @@ fn test_room_air_coupling_converges_and_conserves() -> Result<()> {
             offset * 100.0
         );
         assert!(
-            offset.abs() < 0.6,
-            "N={}: diagnostic surface-flux integral deviates {:.1}% from the wall's true stored-water \
-             change — far beyond the known implicit-Euler linearisation offset; likely a flux-query \
-             regression, not just the sharp-isotherm amplification.",
+            offset.abs() < 0.03,
+            "N={}: reported surface-flux integral deviates {:.2}% from the wall's true stored-water \
+             change — surface mass-conservation regression (the reported flux must include the \
+             surface liquid term; see doc/flux_offset_investigation.md).",
             r.n_material,
             offset * 100.0
         );

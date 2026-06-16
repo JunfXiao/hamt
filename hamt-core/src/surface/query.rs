@@ -463,13 +463,43 @@ impl Surface {
                 .get(*idx)
                 .with_context(|| format!("Failed to get virtual cell {:?}", idx))?;
 
-            let delta_vp: Pressure<f64> = boundary_conv_cell.cell_vp - surf.cell_vp;
             let cell_area: Area<f64> = surf.size.area_along(0);
-
-            if vtc > ECLIPSE * kg_per_m2_s_pa {
-                accum_flux += vtc * delta_vp * cell_area;
-                total_area += cell_area;
+            if vtc <= ECLIPSE * kg_per_m2_s_pa {
+                continue; // sealed face: no convective moisture exchange
             }
+
+            // (a) Convective VAPOUR flux through the air film: vtc·(vp_air − vp_surf).
+            let delta_vp: Pressure<f64> = boundary_conv_cell.cell_vp - surf.cell_vp;
+            let mut face_flux: MassFlux<f64> = vtc * delta_vp * cell_area;
+
+            // (b) LIQUID (capillary) flux carried from the surface node into the first
+            //     material cell, (φ_surf − φ_material)/R_liquid. The solver transports
+            //     this as part of the wall's surface moisture uptake (at high RH it can
+            //     DOMINATE — it is the main moisture-entry mechanism in the EN 15026
+            //     benchmark), but the vapour film term above misses it entirely. Include
+            //     it so the REPORTED surface flux equals the TOTAL moisture crossing the
+            //     surface = the wall's stored-water change; omitting it makes the wall
+            //     absorb more than it reports, which broke mass balance in the
+            //     room/TRNSYS coupling by ~13–40 % (growing with cell count).
+            //     See doc/flux_offset_investigation.md.
+            if let Some(midx) = self.neighbor_toward_center(*idx, &location) {
+                if let Some(material) = self.cells.get(midx) {
+                    if matches!(material.cell_type, CellType::Material(_)) {
+                        let r = Surface::calculate_resistance_triple(
+                            material,
+                            surf,
+                            bc.pressure_air,
+                            0,
+                        );
+                        if r.liquid > 1e-13 * s_per_kg {
+                            face_flux += (surf.cell_rh - material.cell_rh) / r.liquid;
+                        }
+                    }
+                }
+            }
+
+            accum_flux += face_flux;
+            total_area += cell_area;
         }
 
         Ok(if total_area > 0.0 * square_meter {
