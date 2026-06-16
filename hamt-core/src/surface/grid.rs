@@ -38,6 +38,19 @@ const GRID_GROWTH_RATIO_MAX: f64 = 1.5;
 /// `FLOOR^0.7 ≈ 1.29e-3 ⇒ FLOOR ≈ 7.5e-5`.
 const FIRST_CELL_FRACTION_FLOOR: f64 = 7.5e-5;
 
+/// Freeze guard — hard ceiling on cell divisions per material layer. The fully
+/// implicit solver is unconditionally stable, so this is a COMPUTE/MEMORY ceiling
+/// (annual TRNSYS cost scales with total cell count × substeps × outer iterations),
+/// NOT an accuracy clamp: exceeding it is a hard, explicit error — never a silent
+/// reduction of the requested resolution (unlike the removed adj_length/max_div).
+const MAX_DIVS_PER_LAYER: usize = 500;
+/// Soft threshold: a large-but-runnable per-layer division count is warned (not rejected).
+const WARN_DIVS_PER_LAYER: usize = 250;
+/// Freeze guard — hard ceiling on the total material divisions in one x-column.
+const MAX_CELLS_TOTAL: usize = 2500;
+/// Soft threshold: a large-but-runnable total is warned (not rejected).
+const WARN_CELLS_TOTAL: usize = 1250;
+
 /// `Σ_{j=0}^{n-1} r^min(j, n-1-j)` — the unnormalized total layer length for a
 /// two-sided symmetric geometric grading with adjacent-cell ratio `r`.
 fn geometric_total(n: usize, r: f64) -> f64 {
@@ -194,6 +207,7 @@ pub(super) fn build_x_column(
         .into());
     }
 
+    let mut total_divs: usize = 0;
     for mat_arc in construction.layers.iter() {
         let mat_thickness_m = mat_arc.thickness;
         let div_len_m = settings.div_length;
@@ -202,6 +216,39 @@ pub(super) fn build_x_column(
         let divs = mat_arc.num_div.unwrap_or(
             ((mat_thickness_m / div_len_m).value().ceil() as i32).max(settings.n_div) as usize,
         );
+
+        // --- Freeze guard (compute/memory ceiling, NOT an accuracy clamp) ---
+        if divs > MAX_DIVS_PER_LAYER {
+            return Err(crate::error::Error::InvalidInput(
+                format!("cell divisions for layer '{}'", mat_arc.name),
+                divs.to_string(),
+                crate::error::InvalidInputReason::Other(format!(
+                    "exceeds the per-layer ceiling of {MAX_DIVS_PER_LAYER} cells (freeze guard); \
+                     reduce n_div / num_div or increase div_length"
+                )),
+            )
+            .into());
+        }
+        if divs > WARN_DIVS_PER_LAYER {
+            tracing::warn!(
+                material = %mat_arc.name,
+                divs,
+                ceiling = MAX_DIVS_PER_LAYER,
+                "large per-layer cell count — TRNSYS runs will be slow; consider reducing n_div / num_div"
+            );
+        }
+        total_divs += divs;
+        if total_divs > MAX_CELLS_TOTAL {
+            return Err(crate::error::Error::InvalidInput(
+                "total material cell divisions per column".to_string(),
+                total_divs.to_string(),
+                crate::error::InvalidInputReason::Other(format!(
+                    "exceeds the total ceiling of {MAX_CELLS_TOTAL} cells (freeze guard); \
+                     reduce n_div / num_div or increase div_length"
+                )),
+            )
+            .into());
+        }
 
         // Diagnostic: derived first-cell size and solved growth ratio for this
         // layer (target-fraction -> solved-ratio parameterization).
@@ -254,6 +301,14 @@ pub(super) fn build_x_column(
             // Update base pointer for the NEXT cell
             base_pt.0 += length;
         }
+    }
+
+    if total_divs > WARN_CELLS_TOTAL {
+        tracing::warn!(
+            total_divs,
+            ceiling = MAX_CELLS_TOTAL,
+            "large total cell count per column — TRNSYS runs will be slow; consider reducing n_div / num_div"
+        );
     }
 
     // --- Interior Virtual Surface Cell ---
@@ -686,5 +741,85 @@ mod tests {
             mat_sizes[17] < mid_b,
             "interior surface cell not finer than layer-B middle"
         );
+    }
+
+    // ---- Freeze-guard tests (compute/memory ceiling, NOT accuracy clamp) ----
+
+    /// Build an `n_layers`-layer construction; every layer is a clone of the test
+    /// material with `num_div = Some(divs_per_layer)`. No solve — grid only.
+    fn build_construction_with_divs(
+        n_layers: usize,
+        divs_per_layer: usize,
+    ) -> Arc<Construction> {
+        let base = build_test_construction();
+        let mat0 = base.layers[0].as_ref().clone();
+
+        let lib = MaterialLibrary::new();
+        let mut layer_names = Vec::with_capacity(n_layers);
+        for i in 0..n_layers {
+            let mut mat = mat0.clone();
+            mat.name = format!("FreezeLayer{i}");
+            mat.thickness = 0.1 * meter;
+            mat.num_div = Some(divs_per_layer);
+            layer_names.push(mat.name.clone());
+            lib.add_material(mat).expect("add layer material");
+        }
+        let surface_coeff = SurfaceVaporCoef {
+            is_external_const: false,
+            external_value: 1e-12,
+            is_internal_const: false,
+            internal_value: 1e-8,
+        };
+        lib.create_construction("FreezeConstruction".to_string(), layer_names, surface_coeff)
+            .expect("create construction");
+        lib.get_construction("FreezeConstruction").unwrap()
+    }
+
+    fn build_freeze_surface(construction: Arc<Construction>) -> Result<Surface> {
+        let settings = HamtSettings::default();
+        let bc = BoundaryCondition::default();
+        Surface::from_construction(
+            &settings,
+            construction,
+            "FreezeSurface".to_string(),
+            1.0 * square_meter,
+            &bc,
+        )
+    }
+
+    /// A single layer just over the per-layer ceiling is rejected; exactly at the
+    /// ceiling is accepted.
+    #[test]
+    fn freeze_guard_rejects_oversized_layer() {
+        // 501 > 500 -> hard error.
+        let over = build_construction_with_divs(1, MAX_DIVS_PER_LAYER + 1);
+        let err = build_freeze_surface(over).expect_err("oversized layer must error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("freeze guard") && msg.contains("per-layer ceiling"),
+            "error should name the freeze guard / per-layer ceiling, got: {msg}"
+        );
+
+        // Exactly 500 -> ok (single layer, total = 500 <= 2500).
+        let at = build_construction_with_divs(1, MAX_DIVS_PER_LAYER);
+        build_freeze_surface(at).expect("layer count exactly at ceiling must build");
+    }
+
+    /// Per-layer counts each within the per-layer ceiling, but their sum exceeds
+    /// the total ceiling -> hard error naming the total ceiling.
+    /// 6 layers × 500 = 3000 > 2500 (each layer 500 <= 500).
+    #[test]
+    fn freeze_guard_rejects_oversized_total() {
+        let over = build_construction_with_divs(6, MAX_DIVS_PER_LAYER);
+        let err = build_freeze_surface(over).expect_err("oversized total must error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("freeze guard") && msg.contains("total ceiling"),
+            "error should name the freeze guard / total ceiling, got: {msg}"
+        );
+
+        // A total exactly at the ceiling (5 layers × 500 = 2500) is accepted.
+        let at = build_construction_with_divs(5, MAX_DIVS_PER_LAYER);
+        build_freeze_surface(at).expect("total exactly at ceiling must build");
     }
 }
