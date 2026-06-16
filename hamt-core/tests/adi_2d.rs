@@ -24,7 +24,8 @@ use common::{
     create_library, init_tracing,
 };
 use hamt_core::material::MaterialLibrary;
-use hamt_core::uom::dimensions::{Dimensionless, Temperature, Time};
+use hamt_core::physics::geometry::Pt3D;
+use hamt_core::uom::dimensions::{Dimensionless, Length, Temperature, Time};
 use hamt_core::uom::units::{
     days, dimensionless, hours, kelvin, kg_per_m2_s_pa, m_per_s, meter, seconds, square_meter,
     w_per_m2_k,
@@ -49,9 +50,16 @@ const CROSS_ROW_TOL_W: f64 = 1e-6; // kg/m3
 // 2-D comparison helpers.
 // ---------------------------------------------------------------------------
 
-/// Read a material-cell quantity along y-row `j` at the depth nearest `depth_m`.
-/// Returns (value, [i,j,0]). Mirrors `find_cell_idx_at_depth` but constrained to
-/// a single y-row so we can prove uniformity per row.
+/// Read a material-cell quantity along y-row `j` at `depth_m`, **x-interpolated**
+/// to match the 1-D EN-15026 benchmark (`compare_results`), which samples via
+/// `Surface::interpolate_at_depth` (linear interpolation between bracketing
+/// cells). Returns (value, [i,j,0]) where the index is the nearest material cell
+/// on the row (diagnostic only). On the geometric grid (clustered at faces,
+/// coarse interior) nearest-cell would read a quantization-offset value at
+/// interior/near-front depths; interpolation removes that offset so a y-uniform
+/// 2-D wall reproduces the 1-D reference exactly. The target pins y to this
+/// row's y-origin, so the y-bracket lands on the row (ty=0) and only x is
+/// interpolated — keeping the per-row / cross-row uniformity semantics intact.
 fn cell_value_at_depth_row<F, const D: Dimension>(
     surface: &hamt_core::surface::Surface,
     depth_m: f64,
@@ -63,24 +71,33 @@ where
 {
     let dims = surface.cells.raw_dim();
     let nx = dims[0];
-    let target = depth_m * meter;
-    let mut best: Option<([usize; 3], f64, f64)> = None; // (idx, dist, value)
+    let target_x = depth_m * meter;
+    // This row's y-coordinate: read from any material cell on the row, plus the
+    // nearest-cell index (diagnostic) for the returned tuple.
+    let mut row_y: Option<Length<f64>> = None;
+    let mut nearest: Option<([usize; 3], f64)> = None; // (idx, dist)
     for i in 0..nx {
         let cell = &surface.cells[[i, j, 0]];
         if !matches!(cell.cell_type, CellType::Material(_)) {
             continue;
         }
-        // strip: scalar nearest-cell distance compare in metres
-        let dist = (cell.origin.x().value_in(meter) - target.value_in(meter)).abs();
-        let take = match best {
-            Some((_, best_dist, _)) => dist < best_dist,
+        if row_y.is_none() {
+            row_y = Some(cell.origin.y());
+        }
+        // strip: scalar nearest-cell distance compare in metres (diagnostic idx)
+        let dist = (cell.origin.x().value_in(meter) - target_x.value_in(meter)).abs();
+        let take = match nearest {
+            Some((_, best_dist)) => dist < best_dist,
             None => true,
         };
         if take {
-            best = Some(([i, j, 0], dist, f(cell).value_unchecked()));
+            nearest = Some(([i, j, 0], dist));
         }
     }
-    let (idx, _, value) = best.expect("no material cell on row");
+    let row_y = row_y.expect("no material cell on row");
+    let (idx, _) = nearest.expect("no material cell on row");
+    let target = Pt3D::new(target_x, row_y, 0.0 * meter);
+    let value = surface.interpolate_at_point(&target, &f).value_unchecked();
     (value, idx)
 }
 
@@ -224,6 +241,8 @@ fn adi_2d_uniform_reduces_to_1d() -> Result<()> {
     settings.rh_convergence_tolerance = 1e-4 * dimensionless;
     settings.n_div = 20;
     settings.div_length = 1e-5 * meter;
+    // Match the 1-D benchmark's near-surface clustering (geometric, factor 0.7) so the wetting front is resolved to the EN-15026 reference.
+    settings.div_distribution_factor = 0.7;
     settings.min_relaxation_factor = 1.0;
     settings.solver_method = SolverMethod::Adi;
 
