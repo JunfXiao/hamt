@@ -73,9 +73,9 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
         // calculate_resistance_triple — was MASKING the under-resolution at depth 0.01 m.
         // See doc/flux_offset_investigation.md.
         //
-        // NOTE: the grid's safety clamp reduces divisions while the first cell is below
-        // `settings.adj_length`. Geometric grading gives a very small first cell, so
-        // `adj_length` is lowered to 1e-7 m below to keep all 60 first-layer divisions.
+        // NOTE: the solver is fully implicit (backward-Euler / block-Thomas), hence
+        // unconditionally stable, so there is no min-cell constraint. All 60 requested
+        // first-layer divisions are honoured regardless of how small the first cell is.
         let library = create_library(
             20.0,
             0.5,
@@ -95,10 +95,6 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
         // Two-sided geometric clustering so the wetting front (first ~1 mm) is
         // resolved at the exterior face (and the layer interface) with few cells.
         settings.div_distribution_factor = 0.7;
-        // Lower the min-cell safety clamp so the requested 60 first-layer divisions
-        // are NOT reduced (the clamp shrinks divs while the first cell < adj_length).
-        // With factor 0.7 the first cell is ~2.2 µm, so adj_length must sit below that.
-        settings.adj_length = 1e-7 * meter;
         settings.min_relaxation_factor = 1.0;
         settings.solver_method = method;
 

@@ -225,7 +225,6 @@ fn adi_2d_uniform_reduces_to_1d() -> Result<()> {
     settings.max_div = 50;
     settings.min_div = 20;
     settings.div_length = 1e-5 * meter;
-    settings.adj_length = 1e-4 * meter;
     settings.min_relaxation_factor = 1.0;
     settings.solver_method = SolverMethod::Adi;
 

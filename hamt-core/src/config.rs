@@ -127,8 +127,6 @@ pub struct HamtSettings {
     pub min_div: i32,
     /// Maximum cell amount for a material after division
     pub max_div: i32,
-    /// Allowed length for adjacent check [m]
-    pub adj_length: Length<f64>,
     /// Cell division distribution factor, in `[0, 1]`.
     ///
     /// Controls a two-sided symmetric GEOMETRIC clustering of cells within each
@@ -194,7 +192,6 @@ impl Default for HamtSettings {
             div_length: 0.05 * units::meter,
             min_div: 3,
             max_div: 20,
-            adj_length: 0.00005 * units::meter,
             div_distribution_factor: 0.5,
             user_defined_depth: None,
             min_relaxation_factor: 0.1,

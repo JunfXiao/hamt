@@ -134,8 +134,8 @@ pub(super) fn build_x_column(
         let mat_thickness_m = mat_arc.thickness;
         let div_len_m = settings.div_length;
 
-        // 1. Initial guess for divisions
-        let mut divs = mat_arc.num_div.unwrap_or(
+        // 1. Number of divisions for this layer
+        let divs = mat_arc.num_div.unwrap_or(
             ((mat_thickness_m / div_len_m).value().ceil() as i32)
                 .max(settings.min_div)
                 .min(settings.max_div) as usize,
@@ -143,23 +143,13 @@ pub(super) fn build_x_column(
 
         // The position of the i-th boundary (0..=divs) within this layer is given
         // by `geometric_norm_pos` (two-sided symmetric geometric clustering),
-        // proportional to layer thickness (range 0.0 to 1.0).
+        // proportional to layer thickness (range 0.0 to 1.0). The solver is fully
+        // implicit (backward-Euler / block-Thomas / ADI) and therefore
+        // unconditionally stable, so there is no minimum-cell-size constraint:
+        // every requested division is honoured regardless of how small the
+        // resulting first cell is.
 
-        // 2. Safety Check: Ensure the smallest cell is not too small.
-        // Geometric grading produces its smallest cell at the boundary (i=1).
-        while divs > 1 {
-            // Calculate the normalized length of the first cell (the smallest).
-            let norm_len_first = geometric_norm_pos(1, divs, dist_factor)
-                - geometric_norm_pos(0, divs, dist_factor);
-            let test_len = mat_thickness_m * norm_len_first;
-
-            if test_len > settings.adj_length {
-                break;
-            }
-            divs -= 1;
-        }
-
-        // 3. Generate Cells
+        // 2. Generate Cells
         let mut prev_pos_m = 0.0 * meter; // Start at 0 relative to material layer
 
         for did in 1..=divs {
@@ -520,7 +510,6 @@ mod tests {
 
         let mut settings = HamtSettings::default();
         settings.div_distribution_factor = 0.9;
-        settings.adj_length = 1e-6 * meter; // keep all requested divisions
         let bc = BoundaryCondition::default();
 
         let surface = Surface::from_construction(
