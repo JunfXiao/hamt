@@ -57,25 +57,30 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
         // 2. Transition (1.0m): Intermediate grid
         // 3. Bulk (48.9m): Coarse grid for semi-infinite thermal mass
         //
-        // The FIRST (0.1 m surface) layer is heavily subdivided (480 divisions) and,
-        // together with `div_distribution_factor = 0.9` below, clusters cells tightly
-        // at the wetted exterior face so the FIRST near-surface cell is ~22 µm. The EN
-        // 15026 wetting front is concentrated in the first ~1 mm; resolving it requires
-        // a sub-0.1 mm near-surface cell. The previously coarse mesh (60 divisions,
-        // ~228 µm first cell) only passed because a spurious surface-LIQUID flux through
-        // the air film — since removed by the EnergyPlus-style product guard in
-        // calculate_resistance_triple (no liquid water crosses an unsaturated air film) —
-        // was MASKING the under-resolution at depth 0.01 m. With that fix the mesh must
-        // actually resolve the front. See doc/flux_offset_investigation.md.
+        // The FIRST (0.1 m surface) layer carries the EN 15026 wetting front, which
+        // is concentrated in the first ~1 mm. The two-sided symmetric GEOMETRIC cell
+        // distribution (see surface::grid::geometric_norm_pos) clusters cells at BOTH
+        // ends of the layer, so the wetted exterior face AND the layer-1/layer-2
+        // interface get fine cells while the layer interior stays coarse. This is
+        // ~10x more cell-efficient than the old sine blend: the previous mesh needed
+        // 480 surface divisions (factor 0.9, ~22 µm first cell) to resolve the front;
+        // the geometric grading resolves it with just 60 divisions (factor 0.7,
+        // ~2.2 µm first cell, 25 cells inside the first 0.01 m). The other four layers
+        // (deep thermal mass) stay at 60 uniform-ish divisions.
+        //
+        // The previously coarse mesh only passed because a spurious surface-LIQUID flux
+        // through the air film — since removed by the EnergyPlus-style product guard in
+        // calculate_resistance_triple — was MASKING the under-resolution at depth 0.01 m.
+        // See doc/flux_offset_investigation.md.
         //
         // NOTE: the grid's safety clamp reduces divisions while the first cell is below
-        // `settings.adj_length`; `adj_length` is lowered to 1e-5 m below so all 480
-        // divisions survive (otherwise they collapse back to ~118 / ~100 µm).
+        // `settings.adj_length`. Geometric grading gives a very small first cell, so
+        // `adj_length` is lowered to 1e-7 m below to keep all 60 first-layer divisions.
         let library = create_library(
             20.0,
             0.5,
             vec![0.1, 0.9, 4.0, 10.0, 20.0],
-            vec![Some(480), Some(60), Some(60), Some(60), Some(60)],
+            vec![Some(60), Some(60), Some(60), Some(60), Some(60)],
         );
         let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
 
@@ -87,12 +92,13 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
         settings.max_div = 500;
         settings.min_div = 20;
         settings.div_length = 1e-5 * meter;
-        // Cluster cells at the surface so the wetting front (first ~1 mm) is resolved.
-        settings.div_distribution_factor = 0.9;
-        // Lower the min-cell safety clamp so the requested 480 surface divisions are
-        // NOT reduced (the clamp shrinks divs while the first cell < adj_length). With
-        // factor 0.9 the first cell is ~22 µm, so adj_length must sit below that.
-        settings.adj_length = 1e-5 * meter;
+        // Two-sided geometric clustering so the wetting front (first ~1 mm) is
+        // resolved at the exterior face (and the layer interface) with few cells.
+        settings.div_distribution_factor = 0.7;
+        // Lower the min-cell safety clamp so the requested 60 first-layer divisions
+        // are NOT reduced (the clamp shrinks divs while the first cell < adj_length).
+        // With factor 0.7 the first cell is ~2.2 µm, so adj_length must sit below that.
+        settings.adj_length = 1e-7 * meter;
         settings.min_relaxation_factor = 1.0;
         settings.solver_method = method;
 

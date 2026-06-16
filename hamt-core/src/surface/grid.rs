@@ -8,6 +8,57 @@ use crate::{
     physics::geometry::{Pt3D, Size3D},
 };
 
+/// Upper bound on the adjacent-cell growth ratio `r` used by
+/// [`geometric_norm_pos`]. The two-sided geometric grading grows each cell by a
+/// factor `r` relative to its inward neighbour; capping `r` keeps the size jump
+/// between adjacent cells modest (a finite-volume accuracy concern — large size
+/// ratios degrade the second-order spatial truncation). 1.5 (a 50 % max growth
+/// per cell) resolves the EN 15026 wetting front with far fewer cells than the
+/// old sine blend while keeping adjacent ratios bounded; values in [1.3, 1.6]
+/// behave similarly.
+const GRID_GROWTH_RATIO_MAX: f64 = 1.5;
+
+/// Normalized boundary position `p(i)` in `[0,1]` for `i` in `0..=n`, two-sided
+/// symmetric geometric clustering.
+///
+/// `factor` in `[0,1]`: `0` = uniform; `->1` = stronger clustering at BOTH ends.
+/// Because `build_x_column` applies this per material layer, clustering at both
+/// ends of every layer fines the exterior/interior wall surfaces AND every
+/// internal layer interface. Cells grow geometrically from each end toward the
+/// middle by an adjacent-cell ratio `r`, bounded by [`GRID_GROWTH_RATIO_MAX`].
+///
+/// Properties: `p(0)=0`, `p(n)=1`, strictly increasing, and symmetric
+/// (`p(i) = 1 - p(n-i)`). `O(n)` per call — the grid is built once with small
+/// `n`, so this is not a hot path.
+fn geometric_norm_pos(i: usize, n: usize, factor: f64) -> f64 {
+    if n == 0 {
+        return 0.0;
+    }
+    if i == 0 {
+        return 0.0;
+    }
+    if i >= n {
+        return 1.0;
+    }
+    if factor <= 1e-6 {
+        return i as f64 / n as f64; // uniform
+    }
+
+    // Adjacent-cell growth ratio, bounded for accuracy.
+    let r = 1.0 + factor.clamp(0.0, 1.0) * (GRID_GROWTH_RATIO_MAX - 1.0);
+
+    // Relative size of cell j (j in 0..n): smallest at the two ends (j=0 and
+    // j=n-1), largest in the middle — symmetric about the layer centre.
+    let size = |j: usize| -> f64 {
+        let dist_from_end = j.min(n - 1 - j) as i32;
+        r.powi(dist_from_end)
+    };
+
+    let total: f64 = (0..n).map(size).sum();
+    let partial: f64 = (0..i).map(size).sum();
+    partial / total
+}
+
 /// Build ONE x-column of cells (exterior boundary stack -> material layers ->
 /// interior boundary stack), advancing `base_pt.x` as it goes. `col_y`/`col_z`
 /// are the cross-section extents (y,z) used for EVERY cell in this column
@@ -90,32 +141,16 @@ pub(super) fn build_x_column(
                 .min(settings.max_div) as usize,
         );
 
-        // Helper closure to calculate the position of the i-th boundary (0..=divs)
-        // proportional to thickness (range 0.0 to 1.0)
-        let get_norm_pos = |i: usize, n: usize, factor: f64| -> f64 {
-            let frac = i as f64 / n as f64;
-            if factor <= 1e-6 {
-                return frac; // Pure Uniform
-            }
+        // The position of the i-th boundary (0..=divs) within this layer is given
+        // by `geometric_norm_pos` (two-sided symmetric geometric clustering),
+        // proportional to layer thickness (range 0.0 to 1.0).
 
-            // Sine distribution formula (clusters points at 0.0 and 1.0)
-            // Range of inside term: -pi/2 to -3pi/2
-            // sin map: -1.0 to 1.0
-            // result map: 0.0 to 1.0
-            let sin_pos = ((std::f64::consts::PI * (-frac) - std::f64::consts::PI / 2.0).sin()
-                / 2.0)
-                - (-1.0 / 2.0); // sin(-pi/2) is -1
-
-            // Linear interpolation between Uniform and Sine
-            frac * (1.0 - factor) + sin_pos * factor
-        };
-
-        // 2. Safety Check: Ensure the smallest cell is not too small
-        // The smallest cell in Sine distribution is at the boundary (i=1)
+        // 2. Safety Check: Ensure the smallest cell is not too small.
+        // Geometric grading produces its smallest cell at the boundary (i=1).
         while divs > 1 {
-            // Calculate the normalized length of the first cell (usually the smallest)
-            let norm_len_first =
-                get_norm_pos(1, divs, dist_factor) - get_norm_pos(0, divs, dist_factor);
+            // Calculate the normalized length of the first cell (the smallest).
+            let norm_len_first = geometric_norm_pos(1, divs, dist_factor)
+                - geometric_norm_pos(0, divs, dist_factor);
             let test_len = mat_thickness_m * norm_len_first;
 
             if test_len > settings.adj_length {
@@ -129,7 +164,7 @@ pub(super) fn build_x_column(
 
         for did in 1..=divs {
             // Calculate current boundary position
-            let norm_pos = get_norm_pos(did, divs, dist_factor);
+            let norm_pos = geometric_norm_pos(did, divs, dist_factor);
             let curr_pos_m = mat_thickness_m * norm_pos;
 
             // Length is difference between current boundary and previous boundary
@@ -358,5 +393,186 @@ mod tests {
 
         // Side (y-min) face stays Adiabatic.
         assert_eq!(surface.face_bcs[FACE_Y_MIN], FaceBc::Adiabatic);
+    }
+
+    // ---- geometric_norm_pos distribution tests ----
+
+    #[test]
+    fn geometric_norm_pos_endpoints() {
+        for &n in &[1usize, 2, 3, 5, 8, 60, 480] {
+            for &f in &[0.0, 0.3, 0.5, 0.7, 0.9, 1.0] {
+                assert_eq!(geometric_norm_pos(0, n, f), 0.0, "p(0) for n={n}, f={f}");
+                assert_eq!(geometric_norm_pos(n, n, f), 1.0, "p(n) for n={n}, f={f}");
+                // Out-of-range i clamps to 1.0.
+                assert_eq!(geometric_norm_pos(n + 1, n, f), 1.0);
+            }
+        }
+        // Degenerate n == 0.
+        assert_eq!(geometric_norm_pos(0, 0, 0.5), 0.0);
+    }
+
+    #[test]
+    fn geometric_norm_pos_monotonic_increasing() {
+        for &n in &[2usize, 3, 5, 8, 17, 60] {
+            for &f in &[0.0, 0.4, 0.7, 0.9, 1.0] {
+                let mut prev = geometric_norm_pos(0, n, f);
+                for i in 1..=n {
+                    let cur = geometric_norm_pos(i, n, f);
+                    assert!(
+                        cur > prev,
+                        "not strictly increasing at i={i}, n={n}, f={f}: {prev} -> {cur}"
+                    );
+                    prev = cur;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn geometric_norm_pos_factor_zero_is_uniform() {
+        for &n in &[1usize, 2, 5, 13, 60] {
+            for i in 0..=n {
+                let expected = i as f64 / n as f64;
+                assert!(
+                    (geometric_norm_pos(i, n, 0.0) - expected).abs() < 1e-15,
+                    "factor=0 not uniform at i={i}, n={n}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn geometric_norm_pos_symmetric() {
+        for &n in &[2usize, 3, 5, 8, 17, 60] {
+            for &f in &[0.0, 0.3, 0.5, 0.7, 0.9, 1.0] {
+                for i in 0..=n {
+                    let p = geometric_norm_pos(i, n, f);
+                    let mirror = 1.0 - geometric_norm_pos(n - i, n, f);
+                    assert!(
+                        (p - mirror).abs() < 1e-12,
+                        "not symmetric at i={i}, n={n}, f={f}: {p} vs {mirror}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn geometric_norm_pos_clusters_at_ends() {
+        for &n in &[5usize, 8, 17, 60, 120] {
+            for &f in &[0.3, 0.5, 0.7, 0.9, 1.0] {
+                let first = geometric_norm_pos(1, n, f) - geometric_norm_pos(0, n, f);
+                // Middle cell: pick the cell straddling the layer centre.
+                let mid = n / 2;
+                let middle = geometric_norm_pos(mid + 1, n, f) - geometric_norm_pos(mid, n, f);
+                let uniform = 1.0 / n as f64;
+                assert!(
+                    first < middle,
+                    "first cell not finer than middle at n={n}, f={f}: {first} vs {middle}"
+                );
+                assert!(
+                    first < uniform,
+                    "first cell not finer than uniform at n={n}, f={f}: {first} vs {uniform}"
+                );
+            }
+        }
+    }
+
+    /// MULTI-LAYER INTERFACE refinement: build a 2-layer construction and assert
+    /// that material cells adjacent to the internal layer interface (and to the
+    /// outer surfaces) are finer in x than the cells in the middle of a layer.
+    #[test]
+    fn geometric_two_layer_interface_refinement() {
+        use crate::material::{MaterialLibrary, SurfaceVaporCoef};
+
+        // Reuse the single-layer test material twice to form a 2-layer stack.
+        // `build_test_construction` registers "GridTestMat" in its own library;
+        // build a fresh library here with two copies so we control divisions.
+        let base = build_test_construction();
+        let mat0 = base.layers[0].as_ref().clone();
+        let mut mat_a = mat0.clone();
+        mat_a.name = "LayerA".to_string();
+        mat_a.thickness = 0.1 * meter;
+        mat_a.num_div = Some(9);
+        mat_a.div_distribution_factor = 0.9;
+        let mut mat_b = mat0;
+        mat_b.name = "LayerB".to_string();
+        mat_b.thickness = 0.1 * meter;
+        mat_b.num_div = Some(9);
+        mat_b.div_distribution_factor = 0.9;
+
+        let lib = MaterialLibrary::new();
+        lib.add_material(mat_a).expect("add LayerA");
+        lib.add_material(mat_b).expect("add LayerB");
+        let surface_coeff = SurfaceVaporCoef {
+            is_external_const: false,
+            external_value: 1e-12,
+            is_internal_const: false,
+            internal_value: 1e-8,
+        };
+        lib.create_construction(
+            "TwoLayer".to_string(),
+            vec!["LayerA".to_string(), "LayerB".to_string()],
+            surface_coeff,
+        )
+        .expect("create two-layer construction");
+        let construction = lib.get_construction("TwoLayer").unwrap();
+
+        let mut settings = HamtSettings::default();
+        settings.div_distribution_factor = 0.9;
+        settings.adj_length = 1e-6 * meter; // keep all requested divisions
+        let bc = BoundaryCondition::default();
+
+        let surface = Surface::from_construction(
+            &settings,
+            construction,
+            "TwoLayerSurface".to_string(),
+            1.0 * square_meter,
+            &bc,
+        )
+        .expect("build surface");
+
+        // Collect the x-sizes of material cells in order (1-D: ny=nz=1).
+        let mat_sizes: Vec<f64> = surface
+            .cells
+            .iter()
+            .filter(|c| matches!(c.cell_type, CellType::Material(_)))
+            .map(|c| c.size.x().value_in(meter)) // strip: scalar comparison
+            .collect();
+
+        assert_eq!(mat_sizes.len(), 18, "expected 9 + 9 material cells");
+
+        // Layer A spans indices 0..9, Layer B spans 9..18 (each 9 cells).
+        // With two-sided clustering, the smallest cells are at the four faces:
+        //   - exterior surface (cell 0),
+        //   - interface, layer-A side (cell 8, last of A),
+        //   - interface, layer-B side (cell 9, first of B),
+        //   - interior surface (cell 17).
+        // The largest cells are in the middle of each layer (cell 4 and cell 13).
+        let mid_a = mat_sizes[4];
+        let mid_b = mat_sizes[13];
+
+        // Cells adjacent to the internal interface (A side = idx 8, B side = idx 9).
+        assert!(
+            mat_sizes[8] < mid_a,
+            "interface (A-side) cell {} not finer than layer-A middle {}",
+            mat_sizes[8],
+            mid_a
+        );
+        assert!(
+            mat_sizes[9] < mid_b,
+            "interface (B-side) cell {} not finer than layer-B middle {}",
+            mat_sizes[9],
+            mid_b
+        );
+        // Outer surface cells are also fine.
+        assert!(
+            mat_sizes[0] < mid_a,
+            "exterior surface cell not finer than layer-A middle"
+        );
+        assert!(
+            mat_sizes[17] < mid_b,
+            "interior surface cell not finer than layer-B middle"
+        );
     }
 }

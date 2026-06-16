@@ -129,10 +129,15 @@ pub struct HamtSettings {
     pub max_div: i32,
     /// Allowed length for adjacent check [m]
     pub adj_length: Length<f64>,
-    /// Cell division distribution factor.
+    /// Cell division distribution factor, in `[0, 1]`.
     ///
-    /// When set to 1.0, the cells are divided by sine distribution.
-    /// When set to 0.0, the cells are divided by linear distribution.
+    /// Controls a two-sided symmetric GEOMETRIC clustering of cells within each
+    /// material layer (see `surface::grid::geometric_norm_pos`). `0.0` =
+    /// uniform (linear) spacing; increasing toward `1.0` clusters cells more
+    /// tightly at BOTH ends of every layer, so the exterior/interior wall
+    /// surfaces and every internal layer interface get fine cells while the
+    /// layer interior stays coarse. The adjacent-cell growth ratio is bounded by
+    /// `GRID_GROWTH_RATIO_MAX` for accuracy.
     pub div_distribution_factor: f64,
     /// user defined depth [m]
     pub user_defined_depth: Option<Length<f64>>,
