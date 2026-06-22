@@ -14,6 +14,24 @@ use hamt_core::uom::units::{
 use std::iter;
 use std::path::Path;
 use tracing::{debug, info, warn};
+use winapi_util::sysinfo;
+
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[inline(always)]
+fn log_module_loaded() {
+    let pc_name: String = Option::flatten(
+        sysinfo::get_computer_name(sysinfo::ComputerNameKind::DnsHostname)
+            .ok()
+            .map(|s| s.into_string().ok()),
+    )
+    .unwrap_or_else(|| "unknown".to_string())
+    .to_lowercase();
+
+    info!("HAMT Calculation module loaded on '{pc_name}'. Version: {VERSION}, Created by: Junfeng Xiao <junfeng.xiao@tum.de>");
+    
+}
 
 pub(crate) struct TrnSysType {}
 
@@ -25,6 +43,7 @@ impl TrnSysType {
 
     /// Very first call of the simulation: declare I/O sizes and iteration mode.
     pub fn first_call_of_simulation(&self, state: &mut TrnSysState) -> Result<()> {
+        log_module_loaded();
         if state.num_inputs >= 11 && state.num_inputs <= 14 {
             // valid
         } else {

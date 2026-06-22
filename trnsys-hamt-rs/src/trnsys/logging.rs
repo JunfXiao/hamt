@@ -25,7 +25,7 @@ use tracing_subscriber::{
 const TRNSYS_LOG_LEVEL: Level = Level::DEBUG;
 /// The threshold level for trnsys logging.
 #[cfg(not(debug_assertions))]
-const TRNSYS_LOG_LEVEL: Level = Level::WARN;
+const TRNSYS_LOG_LEVEL: Level = Level::INFO;
 
 /// Custom function to handle trnsys logging.
 ///
