@@ -16,7 +16,6 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 use winapi_util::sysinfo;
 
-
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[inline(always)]
@@ -29,8 +28,10 @@ fn log_module_loaded() {
     .unwrap_or_else(|| "unknown".to_string())
     .to_lowercase();
 
-    info!("HAMT Calculation module loaded on '{pc_name}'. Version: {VERSION}, Created by: Junfeng Xiao <junfeng.xiao@tum.de>");
-    
+    info!(
+        "HAMT Calculation module loaded on '{pc_name}'. Version: {VERSION}, Created by: Junfeng Xiao <junfeng.xiao@tum.de>"
+    );
+
 }
 
 pub(crate) struct TrnSysType {}

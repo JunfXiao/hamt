@@ -38,3 +38,6 @@ winapi-util = "0.1.11"
 [build-dependencies]
 toml = "0.8"
 winres = "0.1"
+
+[features]
+default = []
