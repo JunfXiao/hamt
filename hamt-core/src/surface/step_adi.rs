@@ -188,13 +188,12 @@ impl Surface {
                 axis,
                 &line,
             );
-            let sol = crate::solver::block_tridiag::solve(
-                &sys.lower,
-                &sys.diag,
-                &sys.upper,
-                &sys.rhs,
-            )
-            .map_err(|e| anyhow::anyhow!("ADI axis-{axis} sweep solve failed: {:?}", e))?;
+            let sol =
+                crate::solver::block_tridiag::solve(&sys.lower, &sys.diag, &sys.upper, &sys.rhs)
+                    .map_err(|e| {
+                        anyhow::Error::from(e)
+                            .context(format!("ADI axis-{axis} sweep solve failed"))
+                    })?;
 
             for (row, &idx) in sys.material_indices.iter().enumerate() {
                 let (t_new_k, phi_new_raw) = sol[row];

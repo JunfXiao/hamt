@@ -23,22 +23,31 @@
 //!
 //! On any singular `D'_i` the solver returns `Err(SolverError::Singular { row })`.
 //! The caller (`surface::step_tridiag::BlockTridiagStep`) propagates this as a
-//! step error, which `run_outer_loop` surfaces to the adaptive PI substepper
-//! (`solve_timestep_adaptive`). The substepper then shrinks `dt` and retries
-//! the macro-step from the last accepted state. No per-cell decoupled fallback
-//! is performed inside this module.
+//! typed `anyhow::Error` (preserving the `SolverError` variant for downcasting),
+//! which `run_outer_loop` catches and converts into a non-convergence signal.
+//! The adaptive PI substepper (`solve_timestep_adaptive`) then shrinks `dt` and
+//! retries the macro-step from the last accepted state. No per-cell decoupled
+//! fallback is performed inside this module.
 
 use super::block_2x2::Block2x2;
 
-#[derive(Debug, Clone, PartialEq)]
+/// Errors from the block-Thomas solve. Deliberately `thiserror`-derived so
+/// that `Singular` can be recovered via `err.downcast_ref::<SolverError>()`
+/// after an `anyhow::Error` round-trip — `run_outer_loop` uses this to route
+/// singularities into the adaptive substepper's shrink-dt-and-retry path
+/// instead of aborting the whole simulation.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SolverError {
     /// At least one diagonal block became singular during elimination.
     /// Includes the `i` of the failing block to aid diagnostics.
+    #[error("singular diagonal block at row {row} during block-Thomas elimination")]
     Singular { row: usize },
     /// `lower.len()`, `upper.len()` must equal `diag.len()`. Mismatched
     /// sizes from a buggy assembler.
+    #[error("block-tridiag length mismatch: lower/upper/rhs must match diag length")]
     LengthMismatch,
     /// Empty system.
+    #[error("block-tridiag system is empty")]
     Empty,
 }
 

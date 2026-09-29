@@ -66,7 +66,11 @@ impl Surface {
             &system.upper,
             &system.rhs,
         )
-        .map_err(|e| anyhow::anyhow!("block-tridiag solve failed: {:?}", e))?;
+        // Propagate as a typed `SolverError` (not a stringified anyhow) so
+        // `run_outer_loop` can downcast to `SolverError::Singular` and route
+        // it into the adaptive substepper's shrink-dt-retry path. `.context()`
+        // adds the call-site label without breaking the downcast chain.
+        .map_err(|e| anyhow::Error::from(e).context("block-tridiag solve failed"))?;
 
         // Scatter solution back, applying per-cell α relaxation
         // (consistent with the BlockJacobi write-back behaviour).
