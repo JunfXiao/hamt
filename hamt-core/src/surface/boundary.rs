@@ -57,7 +57,28 @@ impl Surface {
         for ((_, _, _), cell) in self.cells.indexed_iter_mut() {
             if cell.is_boundary() {
                 if cell.is_exterior() {
-                    cell.htc = bc.heat_transfer_coeff_ext;
+                    // Exterior (side 2): exactly ONE film, and it is CONVECTIVE ONLY.
+                    // The deck's side-2 coefficient (`hconv2`, Type 395 input 5; e.g.
+                    // 64 kJ/(h·m²·K) ≈ 17.8 W/(m²·K)) is a convective coefficient: the
+                    // side-2 longwave / solar exchange (sky, ground, absorbed radiation)
+                    // already enters through the deck's `qWG2` (input 7 →
+                    // `bc.additional_energy_ext`, deposited in the exterior surface
+                    // material cell by `cell_sources`). h_ext, T_out and β therefore live
+                    // on the exterior Convection cell ONLY. The Radiation / Sky / Ground
+                    // cells are inert placeholders (htc = vtc = 0, valid T / RH), kept so
+                    // the cell layout and the `Type395_*.out` column indices do not change
+                    // — the same way the interior Radiation cell is inert in legacy decks.
+                    // They used to carry the same h_ext and T_out, i.e. four films in
+                    // parallel (4·h_ext applied, while `heat_flux(Exterior)` reported one).
+                    let is_convection = matches!(
+                        cell.cell_type,
+                        CellType::Boundary(crate::cell::Boundary::Convection, _)
+                    );
+                    cell.htc = if is_convection {
+                        bc.heat_transfer_coeff_ext
+                    } else {
+                        HeatTransferCoeff::<f64>::zero()
+                    };
                     cell.cell_temp = bc.temp_outside_air;
                     cell.cell_rh = bc.rh_outside_air;
                     // Use the dedicated moisture temperature (actual outside air T) for VP_bc,
@@ -65,10 +86,7 @@ impl Surface {
                     // is set to the star-node temperature for the heat convection path.
                     let psat = physics::psy_psat_fn_temp(bc.temp_outside_air_moisture);
                     let rh = cell.cell_rh;
-                    let vtc = if matches!(
-                        cell.cell_type,
-                        CellType::Boundary(crate::cell::Boundary::Convection, _)
-                    ) {
+                    let vtc = if is_convection {
                         if bc.vapor_transport_coeff_ext > VaporTransportCoeff::<f64>::zero() {
                             bc.vapor_transport_coeff_ext
                         } else {
