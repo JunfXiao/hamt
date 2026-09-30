@@ -17,7 +17,7 @@ use crate::{
 use super::*;
 
 use anyhow::Result;
-use tracing::debug;
+use tracing::{debug, trace};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -242,7 +242,7 @@ impl Surface {
         let wcap = if xi > 1e-10 * kg_per_m3 {
             xi * cell_curr.volume
         } else {
-            debug!(
+            trace!(
                 "Cell {} has very low moisture capacity (secant ξ ≈ 0), using volume-weighted fallback to prevent instability",
                 i
             );
