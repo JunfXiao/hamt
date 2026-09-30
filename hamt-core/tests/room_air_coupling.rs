@@ -298,6 +298,12 @@ fn run_room_coupling(num_div: usize, days: f64, dt_h: f64) -> Result<RunResult> 
         total_generated_kg += s_moist * dt_s;
 
         // 4. advance the room with the conserved step-average fluxes.
+        //    `q_int_avg` is the TOTAL interior film heat flux (convective + longwave film; see
+        //    `Surface::heat_flux`). Here the wall exchanges heat with this ONE lumped node only:
+        //    T_MR is pushed equal to the air temperature and the BC is a legacy single-film one
+        //    (`has_separate_radiant_int = false`, the longwave film is inert), so everything the
+        //    films deliver belongs to the air node. A multi-node zone whose radiant exchange goes
+        //    to a different node must take `Surface::heat_flux_convective` for its air balance.
         room.step(q_int_avg, m_int_avg, AREA_M2, s_heat, s_moist, dt_s);
 
         // Conservation: track the instant of peak wall water uptake.

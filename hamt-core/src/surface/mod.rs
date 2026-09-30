@@ -35,6 +35,8 @@ pub use step_tridiag::BlockTridiagStep;
 pub type InterpolationWeights = [([usize; 3], f64); 8];
 
 /// Snapshot of on-demand surface reporting values.
+///
+/// Fluxes are area-averaged over the face, environment → surface positive.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SurfaceReport {
     pub temp_surf_out: Temperature<f64>,
@@ -44,11 +46,44 @@ pub struct SurfaceReport {
     pub temp_surf_user_def: Temperature<f64>,
     pub rh_surf_user_def: Dimensionless<f64>,
     pub water_surf_user_def: Density<f64>,
+    /// Exterior sensible film heat flux [W/m²] (the single convective film; Type 395 output 9
+    /// is this × area, time-averaged). See [`Surface::heat_flux`].
     pub q_surf_ext: EnergyFluxDensity<f64>,
+    /// TOTAL interior sensible film heat flux [W/m²]: convective film to the air + longwave
+    /// film to TMR (Type 395 output 8 is this × area, time-averaged). The interior gain
+    /// `qWG1` is not a film flux: heat entering the wall from side 1 is this plus `qWG1`.
+    /// See [`Surface::heat_flux`] / [`Surface::heat_flux_films`].
     pub q_surf_int: EnergyFluxDensity<f64>,
     pub m_surf_ext: MassFluxDensity<f64>,
     pub m_surf_int: MassFluxDensity<f64>,
     pub water_total: Mass<f64>,
+}
+
+/// Area-averaged SENSIBLE heat flux through the surface films of one face (environment →
+/// surface positive) [W/m²], split by film type. See [`Surface::heat_flux_films`].
+///
+/// The films are the boundary cells hanging on the face's massless surface (Virtual) node.
+/// The solver applies all of them in parallel (`solver::adi::eliminate_surface_node`), so
+/// [`FilmHeatFlux::total`] is exactly the heat the face delivers to the surface node and —
+/// the node having no storage — the conduction into the first material cell.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FilmHeatFlux {
+    /// `Convection` film (surface ↔ air): `h_c·(T_air − T_surf)`. Interior: HCONVI to TAIR in a
+    /// 14-input deck, the combined `hconv1` to TSTAR in a legacy 12-input deck; exterior:
+    /// `hconv2` to TB2 (the only exterior film).
+    pub convective: EnergyFluxDensity<f64>,
+    /// Longwave film(s) (`Radiation` / `Sky` / `Ground` cells): `h_rad·(T_rad − T_surf)`.
+    /// Interior: `h_rad = 4·σ·ε·T_m³` to TMR in a 14-input deck, exactly zero in a legacy deck
+    /// (inert cell, `has_separate_radiant_int = false`); exterior: exactly zero (inert
+    /// placeholders — side-2 longwave/solar exchange enters through `qWG2`).
+    pub radiative: EnergyFluxDensity<f64>,
+}
+
+impl FilmHeatFlux {
+    /// `convective + radiative`: the total film heat flux of the face.
+    pub fn total(&self) -> EnergyFluxDensity<f64> {
+        self.convective + self.radiative
+    }
 }
 
 /// Holds geometry, cells, and utilities for a single surface.

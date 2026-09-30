@@ -9,7 +9,7 @@ use hamt_core::hamt_manager::{HamtManager, HamtSettings, SolverMethod};
 use hamt_core::io::load_hamt_by_path;
 use hamt_core::uom::units::{
     hours, kg_per_hr, kg_per_m2_s_pa, kg_per_m3, kj_per_hr, meter, pascals, seconds, square_meter,
-    w_per_m2_k,
+    w_per_m2_k, watts,
 };
 use std::iter;
 use std::path::Path;
@@ -371,21 +371,29 @@ impl TrnSysType {
         Ok(())
     }
 
-    /// Report simulation data.
+    /// Report simulation data: the 11 Type 395 outputs, in order (TRNSYS numbers them 1..=11).
     ///
-    /// Values:
-    /// T_in
-    /// - T_out
-    /// - RH_in
-    /// - RH_out
-    /// - T_userdef
-    /// - RH_userdef
-    /// - MassFlux_userdef
-    /// - HeatFlux_in
-    /// - HeatFlux_out
-    /// - MassFlux_in
-    /// - MassFlux_out
-
+    /// 1. T_in           interior surface (Virtual node) temperature, TSI395 [°C]
+    /// 2. T_out          exterior surface temperature [°C]
+    /// 3. RH_in          interior surface relative humidity [-]
+    /// 4. RH_out         exterior surface relative humidity [-]
+    /// 5. T_userdef      [°C]
+    /// 6. RH_userdef     [-]
+    /// 7. Water_userdef  water content at the user-defined depth [kg/m³]
+    /// 8. HeatFlux_in    TOTAL interior film heat flux [kJ/h, whole surface = W/m² · area],
+    ///                   environment → surface positive: the convective film to the air
+    ///                   (HCONVI, TAIR) PLUS the longwave film to TMR (h_rad) in a 14-input deck,
+    ///                   the single combined film in a legacy 12-input deck. Time-averaged over
+    ///                   the macro step. `qWG1` (input index 6) is NOT part of it: the heat entering
+    ///                   the wall from side 1 is `HeatFlux_in + qWG1`.
+    /// 9. HeatFlux_out   exterior film heat flux (the single convective film), same units and
+    ///                   sign; `qWG2` (input index 7) is not part of it.
+    /// 10. Water_in      interior moisture flux [kg/h]
+    /// 11. Water_out     exterior moisture flux [kg/h]
+    ///
+    /// Heat fluxes are `Surface::heat_flux` (accumulated by the adaptive substepper; the
+    /// end-point `SurfaceReport::q_surf_*` before the first solve). Outputs 8 / 9 are
+    /// report-only: nothing in the solver reads them back.
     pub fn update_output(&self, state: &mut TrnSysState, write_file: bool) -> Result<()> {
         let report_row = if let Some(manager) = &mut state.hamt_manager {
             // Map outputs
@@ -647,21 +655,18 @@ impl TrnSysType {
                 let t_virt = virt.map_or(f64::NAN, |c| kelvin_to_celsius(c.cell_temp));
                 let t_smat = surf_mat.map_or(f64::NAN, |c| kelvin_to_celsius(c.cell_temp));
 
-                // Q_conv = h_conv * (T_convBC - T_virtual) * area [W]
-                let q_conv = if let (Some(cb), Some(v)) = (conv_bc, virt) {
-                    let dt = (cb.cell_temp - v.cell_temp).value_in(diman::si::units::kelvin);
-                    cb.htc.value_in(w_per_m2_k) * dt * area
-                } else {
-                    0.0
-                };
-
-                // Q_rad = h_rad * (T_radBC - T_virtual) * area [W]
-                let q_rad = if let (Some(rb), Some(v)) = (rad_bc, virt) {
-                    let dt = (rb.cell_temp - v.cell_temp).value_in(diman::si::units::kelvin);
-                    rb.htc.value_in(w_per_m2_k) * dt * area
-                } else {
-                    0.0
-                };
+                // Film heat flows [W], environment -> surface, from the SAME query that feeds
+                // Type 395 outputs 8 / 9 (`Surface::heat_flux`): Q_conv = h_conv·(T_convBC −
+                // T_virtual)·area, Q_rad = h_rad·(T_radBC − T_virtual)·area, and Q_conv+rad is
+                // the total interior film flux that `HeatFlux_in` reports (instantaneous at the
+                // end of the macro step here, time-averaged over it in `HeatFlux_in`).
+                let films = manager
+                    .surface_curr
+                    .heat_flux_films(hamt_core::cell::BoundaryLocation::Interior)?;
+                let surface_area = manager.surface_curr.area;
+                let q_conv = (films.convective * surface_area).value_in(watts);
+                let q_rad = (films.radiative * surface_area).value_in(watts);
+                let q_total = (films.total() * surface_area).value_in(watts);
 
                 // VP diagnostics
                 let vp_conv = conv_bc.map_or(0.0, |c| c.cell_vp.value_in(pascals));
@@ -692,7 +697,7 @@ impl TrnSysType {
                     t_smat,
                     q_conv,
                     q_rad,
-                    q_conv + q_rad,
+                    q_total,
                     vp_conv,
                     vp_virt,
                     mf,
@@ -861,3 +866,6 @@ impl TrnSysType {
         self.update_output(state, false)
     }
 }
+
+#[cfg(test)]
+mod tests;

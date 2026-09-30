@@ -4,12 +4,12 @@ use crate::{
     uom::{
         Dimension, Quantity,
         dimensions::{
-            Density, HeatTransferCoeff, MassFlux, MassResistance, Pressure, ThermalConductivity,
-            ThermalResistance, VaporResistance,
+            Density, HeatTransferCoeff, MassFlux, MassResistance, Power, Pressure,
+            ThermalConductivity, ThermalResistance, VaporResistance,
         },
         units::{
             dimensionless, k_per_w, kg_per_hr, kg_per_m2_s_pa, kg_per_m3, m2_per_s, meter,
-            pa_s_per_kg, s_per_kg, square_meter, w_per_m2_k,
+            pa_s_per_kg, s_per_kg, square_meter, w_per_m2_k, watts,
         },
     },
 };
@@ -362,53 +362,106 @@ impl Surface {
         }
     }
 
-    /// Calculates the heat flux across the surface boundary (environment -> surface).
+    /// Calculates the TOTAL sensible heat flux through the surface films of one face
+    /// (environment -> surface), area-averaged.
+    ///
+    /// This is the sum of ALL films the solver applies to the face's massless surface node:
+    /// the convective film and, where active, the longwave film. Interior, 14-input deck:
+    /// `h_c·(T_air − T_s) + h_rad·(T_MR − T_s)`; interior, legacy 12-input deck, and
+    /// exterior: exactly one active film (the others are inert placeholders), i.e. the value
+    /// is bit-identical to that single film. The node stores nothing, so the total equals the
+    /// conduction into the adjacent material cell.
+    ///
+    /// It is what Type 395 output 8 (`HeatFlux_in`, interior) and output 9 (`HeatFlux_out`,
+    /// exterior) report. The surface gains `qWG1` / `qWG2` (deposited in the surface material
+    /// cell) are NOT film fluxes and are not included — the heat entering the wall from a side
+    /// is this flux plus that side's gain — and neither is the latent heat carried by the vapour
+    /// flux through the film ([`Surface::moisture_flux`]).
+    ///
+    /// [`Surface::heat_flux_films`] gives the convective / longwave split and
+    /// [`Surface::heat_flux_convective`] the film to the air alone (an air-node balance needs
+    /// that one, not this).
     ///
     /// ## Input
     /// - `location`: boundary location (exterior or interior).
     ///
     /// ## Output
-    /// - `avg_flux`: average heat flux across the surface boundary [W/m²].
+    /// - `avg_flux`: average total film heat flux across the surface boundary [W/m²].
     pub fn heat_flux(&self, location: BoundaryLocation) -> Result<EnergyFluxDensity<f64>> {
-        let mut total_flux = Quantity(0.0);
-        let mut total_area = Quantity(0.0);
+        Ok(self.heat_flux_films(location)?.total())
+    }
 
-        let boundary_convection_idx =
-            self.cells_idx_map
-                .iter()
-                .find_map(|(ctype, idxs)| match ctype {
-                    CellType::Boundary(Boundary::Convection, loc) if *loc == location => {
-                        idxs.first().copied()
-                    }
-                    _ => None,
-                });
+    /// The CONVECTIVE film alone (surface ↔ air, environment -> surface) [W/m²].
+    ///
+    /// For an air-node energy balance in a zone model whose radiative exchange goes to another
+    /// node (the radiant star node / the other surfaces): only this part belongs to the air.
+    /// Type 395 outputs 8 / 9 are NOT this — they are [`Surface::heat_flux`], the total.
+    pub fn heat_flux_convective(
+        &self,
+        location: BoundaryLocation,
+    ) -> Result<EnergyFluxDensity<f64>> {
+        Ok(self.heat_flux_films(location)?.convective)
+    }
 
-        let boundary_cell = boundary_convection_idx
-            .and_then(|idx| self.cells.get(idx))
-            .context("No boundary convection cell found for surface heat flux")?;
+    /// Area-averaged heat flux through the films of one face, split into the convective and the
+    /// longwave film (environment -> surface) [W/m²]. See [`FilmHeatFlux`].
+    ///
+    /// For every Virtual (surface) cell of `location` the boundary cells connected to it along x
+    /// are walked — exactly the neighbours `solver::adi::eliminate_surface_node` applies to the
+    /// node, per column — and each ACTIVE film (`htc > ECLIPSE`) contributes
+    /// `h·(T_env − T_surf)·A`: `Boundary::Convection` to `convective`, `Radiation` / `Sky` /
+    /// `Ground` to `radiative`. Inactive cells (exterior Radiation / Sky / Ground placeholders,
+    /// the interior Radiation cell of a legacy deck) contribute exactly nothing.
+    pub fn heat_flux_films(&self, location: BoundaryLocation) -> Result<FilmHeatFlux> {
+        let mut convective: Power<f64> = 0.0 * watts;
+        let mut radiative: Power<f64> = 0.0 * watts;
+        let mut total_area: Area<f64> = 0.0 * square_meter;
 
         for idx in self.virtual_cells(location.clone()) {
             let surf = self
                 .cells
                 .get(*idx)
                 .with_context(|| format!("Failed to get virtual cell {:?}", idx))?;
-            let delta_t = boundary_cell.cell_temp - surf.cell_temp;
-            let htc = boundary_cell.htc;
             let cell_area = surf.size.area_along(0);
-            if htc > ECLIPSE * w_per_m2_k {
-                total_flux += htc * delta_t * cell_area;
+            let mut has_active_film = false;
+
+            for film_idx in self.axis_neighbors(*idx, 0) {
+                let film = self
+                    .cells
+                    .get(film_idx)
+                    .with_context(|| format!("Failed to get boundary cell {:?}", film_idx))?;
+                // Material neighbours are conduction, not films.
+                let CellType::Boundary(kind, _) = &film.cell_type else {
+                    continue;
+                };
+                if film.htc <= ECLIPSE * w_per_m2_k {
+                    continue;
+                }
+                let delta_t = film.cell_temp - surf.cell_temp;
+                let flux = film.htc * delta_t * cell_area;
+                match kind {
+                    Boundary::Convection => convective += flux,
+                    Boundary::Radiation | Boundary::Sky | Boundary::Ground => radiative += flux,
+                    Boundary::Virtual => continue,
+                }
+                has_active_film = true;
+            }
+            if has_active_film {
                 total_area += cell_area;
             }
         }
 
         Ok(if total_area > ECLIPSE * square_meter {
-            total_flux / total_area
+            FilmHeatFlux {
+                convective: convective / total_area,
+                radiative: radiative / total_area,
+            }
         } else {
             debug!(
-                "Total area for heat flux for {} calculation is too small: {:?}. Returning zero flux.",
+                "Total area of the active films for heat flux for {} calculation is too small: {:?}. Returning zero flux.",
                 location, total_area
             );
-            Quantity(0.0)
+            FilmHeatFlux::default()
         })
     }
 
@@ -772,5 +825,234 @@ mod resistance_triple_tests {
             0.0,
             "liquid must be exactly 0 when both cells have dw=0"
         );
+    }
+}
+
+#[cfg(test)]
+mod heat_flux_films_tests {
+    //! `heat_flux_films` / `heat_flux` / `heat_flux_convective`: nothing is solved, the queries
+    //! only read cell state, so the surface nodes are pinned to known temperatures and the
+    //! boundary cells are filled by `apply_boundary_coefficients` from a Type 395 input vector.
+    //! The end-to-end (steady-state U, accumulator, output 8) checks are in
+    //! `tests/interior_film.rs`.
+    use super::*;
+    use crate::boundary::{BoundaryCondition, celsius_to_kelvin};
+    use crate::manager::HamtManager;
+    use crate::solver::test_fixtures::{build_fixture_manager, build_fixture_manager_2d};
+    use crate::uom::units::w_per_m2;
+
+    /// HCONVI / combined film [W/(m²·K)].
+    const H_CONV: f64 = 8.65;
+
+    /// 14-input deck: exterior 0 °C with 10 W/(m²·K); interior TAIR 22 °C with
+    /// `h_conv_w` as HCONVI and TMR 17 °C (TSTAR = 25 °C is not used by the films).
+    fn inputs_14(h_conv_w: f64) -> [f64; 14] {
+        #[rustfmt::skip]
+        let inputs = [
+            25.0, 0.0, 50.0, 50.0, 30.0, 36.0, 0.0, 0.0, 1e-8, 1e-12, 0.0,
+            22.0,           // 11 TAIR
+            h_conv_w * 3.6, // 12 HCONVI [kJ/(h m2 K)]
+            17.0,           // 13 TMR
+        ];
+        inputs
+    }
+
+    /// Legacy 12-input deck: ONE combined interior film (`h_w`) to TSTAR = 22 °C.
+    fn inputs_12(h_w: f64) -> [f64; 12] {
+        #[rustfmt::skip]
+        let inputs = [22.0, 0.0, 50.0, 50.0, h_w * 3.6, 36.0, 0.0, 0.0, 1e-8, 1e-12, 0.0, 22.0];
+        inputs
+    }
+
+    /// Push `bc` onto the boundary cells and pin the interior surface node of column `j` to
+    /// `t_si_c[j]` and every exterior surface node to `t_so_c`.
+    fn prepare(mgr: &mut HamtManager, bc: BoundaryCondition, t_si_c: &[f64], t_so_c: f64) {
+        mgr.boundary_condition = bc;
+        mgr.surface_curr
+            .apply_boundary_coefficients(&mgr.boundary_condition, &mgr.settings)
+            .unwrap();
+        for ((_, j, _), cell) in mgr.surface_curr.cells.indexed_iter_mut() {
+            match &cell.cell_type {
+                CellType::Virtual(BoundaryLocation::Interior) => {
+                    cell.cell_temp = celsius_to_kelvin(t_si_c[j]);
+                }
+                CellType::Virtual(BoundaryLocation::Exterior) => {
+                    cell.cell_temp = celsius_to_kelvin(t_so_c);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A flux as a bare number [W/m²], for comparison against bare-number expectations.
+    fn wm2(q: EnergyFluxDensity<f64>) -> f64 {
+        q.value_in(w_per_m2) // strip: test-side scalar
+    }
+
+    fn films(mgr: &HamtManager, loc: BoundaryLocation) -> FilmHeatFlux {
+        mgr.surface_curr.heat_flux_films(loc).unwrap()
+    }
+
+    fn total(mgr: &HamtManager, loc: BoundaryLocation) -> EnergyFluxDensity<f64> {
+        mgr.surface_curr.heat_flux(loc).unwrap()
+    }
+
+    fn convective(mgr: &HamtManager, loc: BoundaryLocation) -> EnergyFluxDensity<f64> {
+        mgr.surface_curr.heat_flux_convective(loc).unwrap()
+    }
+
+    /// htc [W/(m²·K)] of the first boundary cell of this kind / location.
+    fn film_htc(mgr: &HamtManager, kind: Boundary, loc: BoundaryLocation) -> f64 {
+        mgr.surface_curr
+            .cells
+            .iter()
+            .find(|c| matches!(&c.cell_type, CellType::Boundary(b, l) if *b == kind && *l == loc))
+            .map(|c| c.htc.value_in(w_per_m2_k)) // strip: test-side scalar
+            .expect("boundary cell")
+    }
+
+    /// The pre-change query, `htc·ΔT·A / A` of the Convection cell only (1-D, single column):
+    /// the reference every ONE-film face must still reproduce bit for bit.
+    fn convective_only_reference(mgr: &HamtManager, loc: BoundaryLocation) -> f64 {
+        let cells = &mgr.surface_curr.cells;
+        let conv = cells
+            .iter()
+            .find(|c| matches!(&c.cell_type, CellType::Boundary(Boundary::Convection, l) if *l == loc))
+            .expect("Convection cell");
+        let node = cells
+            .iter()
+            .find(|c| matches!(&c.cell_type, CellType::Virtual(l) if *l == loc))
+            .expect("Virtual cell");
+        let area = node.size.area_along(0);
+        wm2((conv.htc * (conv.cell_temp - node.cell_temp) * area) / area)
+    }
+
+    fn rel(a: f64, b: f64) -> f64 {
+        (a - b).abs() / b.abs()
+    }
+
+    /// Interior of a 14-input deck: two active films, each against its OWN environment
+    /// temperature (TAIR for the convective one, TMR for the longwave one).
+    #[test]
+    fn interior_14_input_splits_into_convective_and_longwave_film() {
+        let mut mgr = build_fixture_manager(6);
+        let bc = BoundaryCondition::from_trnsys_inputs(&inputs_14(H_CONV));
+        prepare(&mut mgr, bc, &[12.0], 5.0);
+        let h_rad = film_htc(&mgr, Boundary::Radiation, BoundaryLocation::Interior);
+        assert!(
+            (4.0..6.0).contains(&h_rad),
+            "h_rad = 4σεT_m³ at ≈ 18.5 °C is ≈ 5.06 W/(m²·K), got {h_rad}"
+        );
+
+        let f = films(&mgr, BoundaryLocation::Interior);
+        let (conv, rad) = (wm2(f.convective), wm2(f.radiative));
+        assert!(
+            rel(conv, H_CONV * (22.0 - 12.0)) < 1e-12,
+            "convective film {conv}"
+        );
+        assert!(
+            rel(rad, h_rad * (17.0 - 12.0)) < 1e-12,
+            "longwave film {rad}"
+        );
+        assert_eq!(wm2(f.total()), conv + rad);
+
+        // `heat_flux` is the total, `heat_flux_convective` the film to the air alone.
+        let total = total(&mgr, BoundaryLocation::Interior);
+        let conv_only = convective(&mgr, BoundaryLocation::Interior);
+        assert_eq!(total, f.total());
+        assert_eq!(conv_only, f.convective);
+        assert!(wm2(total) > wm2(conv_only));
+
+        // report() states the total (what Type 395 output 8 is built from).
+        let rep = mgr.surface_curr.report(&mgr.boundary_condition).unwrap();
+        assert_eq!(rep.q_surf_int, total);
+    }
+
+    /// One-film faces reproduce the pre-change value BIT FOR BIT: legacy interior (inert
+    /// Radiation cell) and the exterior of every deck (inert Radiation / Sky / Ground cells).
+    #[test]
+    fn one_film_faces_reproduce_the_convective_only_value_exactly() {
+        // Legacy 12-input deck, interior and exterior.
+        let mut mgr = build_fixture_manager(6);
+        let bc = BoundaryCondition::from_trnsys_inputs(&inputs_12(H_CONV));
+        prepare(&mut mgr, bc, &[12.0], 5.0);
+        for loc in [BoundaryLocation::Interior, BoundaryLocation::Exterior] {
+            let f = films(&mgr, loc.clone());
+            let reference = convective_only_reference(&mgr, loc.clone());
+            assert_ne!(reference, 0.0, "{loc}: the set-up must drive a flux");
+            assert_eq!(wm2(f.radiative), 0.0, "{loc}: no longwave film");
+            assert_eq!(wm2(f.convective), reference, "{loc} convective");
+            assert_eq!(
+                wm2(total(&mgr, loc.clone())),
+                reference,
+                "{loc} total (legacy deck)"
+            );
+        }
+
+        // 14-input deck: the exterior is still ONE film; the interior convective film alone
+        // is still the old number (only the total grew by the longwave film).
+        let mut mgr = build_fixture_manager(6);
+        let bc = BoundaryCondition::from_trnsys_inputs(&inputs_14(H_CONV));
+        prepare(&mut mgr, bc, &[12.0], 5.0);
+        let ext = films(&mgr, BoundaryLocation::Exterior);
+        let ext_ref = convective_only_reference(&mgr, BoundaryLocation::Exterior);
+        assert_ne!(ext_ref, 0.0);
+        assert_eq!(
+            wm2(ext.radiative),
+            0.0,
+            "exterior: Radiation/Sky/Ground inert"
+        );
+        assert_eq!(wm2(ext.total()), ext_ref, "exterior total");
+        assert_eq!(
+            wm2(convective(&mgr, BoundaryLocation::Interior)),
+            convective_only_reference(&mgr, BoundaryLocation::Interior),
+            "interior convective film alone"
+        );
+    }
+
+    /// Several columns: every column's node is paired with its own films and the result is the
+    /// area-weighted average. Equal columns at 10 / 12 / 14 °C average to the 12 °C flux.
+    #[test]
+    fn multi_column_face_is_the_area_average_of_per_column_films() {
+        let mut mgr = build_fixture_manager_2d(6, 3, false);
+        let bc = BoundaryCondition::from_trnsys_inputs(&inputs_14(H_CONV));
+        prepare(&mut mgr, bc, &[10.0, 12.0, 14.0], 5.0);
+        let h_rad = film_htc(&mgr, Boundary::Radiation, BoundaryLocation::Interior);
+        let f = films(&mgr, BoundaryLocation::Interior);
+        assert!(
+            rel(wm2(f.convective), H_CONV * (22.0 - 12.0)) < 1e-10,
+            "convective {:?}",
+            f.convective
+        );
+        assert!(
+            rel(wm2(f.radiative), h_rad * (17.0 - 12.0)) < 1e-10,
+            "longwave {:?}",
+            f.radiative
+        );
+    }
+
+    /// A face whose only active film is the longwave one is still reported (the convective-only
+    /// query used to return 0 here), and a face with NO active film reports zero.
+    #[test]
+    fn longwave_only_and_film_free_faces() {
+        // HCONVI = 0: the Convection cell is inert, the Radiation cell (14-input deck) is not.
+        let mut mgr = build_fixture_manager(6);
+        let bc = BoundaryCondition::from_trnsys_inputs(&inputs_14(0.0));
+        prepare(&mut mgr, bc, &[12.0], 5.0);
+        let h_rad = film_htc(&mgr, Boundary::Radiation, BoundaryLocation::Interior);
+        let f = films(&mgr, BoundaryLocation::Interior);
+        assert_eq!(wm2(f.convective), 0.0);
+        assert!(rel(wm2(f.radiative), h_rad * (17.0 - 12.0)) < 1e-12);
+        assert_eq!(f.total(), f.radiative);
+
+        // Legacy deck with hconv1 = 0: no active interior film at all.
+        let mut mgr = build_fixture_manager(6);
+        let bc = BoundaryCondition::from_trnsys_inputs(&inputs_12(0.0));
+        prepare(&mut mgr, bc, &[12.0], 5.0);
+        assert_eq!(
+            films(&mgr, BoundaryLocation::Interior),
+            FilmHeatFlux::default()
+        );
+        assert_eq!(wm2(total(&mgr, BoundaryLocation::Interior)), 0.0);
     }
 }

@@ -95,18 +95,18 @@ The interface is identical to the legacy Fortran `Type395_mh.f90`.
 10. Inside mass transfer coefficient (kg/m²·s)
 11. Specific heat gain at user-defined node (kJ/hr)
 
-**Outputs (11 total):**
-1.  Exterior surface temperature (°C)
-2.  Interior surface temperature (°C)
-3.  Exterior surface relative humidity (%)
-4.  Interior surface relative humidity (%)
+**Outputs (11 total)** — as implemented in `src/trnsys_type.rs::update_output` (the authoritative table with the notes is in the repository's `CLAUDE.md`, "Type 395 Interface"):
+1.  Interior surface temperature (°C)
+2.  Exterior surface temperature (°C)
+3.  Interior surface relative humidity (-, 0…1)
+4.  Exterior surface relative humidity (-, 0…1)
 5.  Temperature at user-defined depth (°C)
-6.  Relative humidity at user-defined depth (%)
+6.  Relative humidity at user-defined depth (-, 0…1)
 7.  Water content at user-defined depth (kg/m³)
-8.  Exterior surface specific heat flux (kJ/hr·m²)
-9.  Interior surface specific heat flux (kJ/hr·m²)
-10. Exterior surface moisture flux (kg/h)
-11. Interior surface moisture flux (kg/h)
+8.  Interior surface heat flux (kJ/h, whole surface): the TOTAL film flux, convective film to the air **plus** longwave film to the mean radiant temperature (14-input decks; the single combined film in legacy decks), environment → surface positive. The interior surface gain `qWG1` is not part of it: heat entering the wall from side 1 = output 8 + `qWG1`.
+9.  Exterior surface heat flux (kJ/h, whole surface): the single convective exterior film, same sign; `qWG2` is not part of it.
+10. Interior surface moisture flux (kg/h)
+11. Exterior surface moisture flux (kg/h)
 
 ---
 
