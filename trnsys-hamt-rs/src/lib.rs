@@ -23,7 +23,7 @@ static TRNSYS_STATE_DICT: LazyLock<RwLock<HashMap<i32, Arc<RwLock<TrnSysState>>>
 
 static TRNSYS_TYPE_INSTANCE: LazyLock<Arc<TrnSysType>> = LazyLock::new(|| {
     // initialize the logging only once
-    init_tracing(None);
+    init_tracing();
     Arc::new(TrnSysType::new())
 });
 
