@@ -63,10 +63,14 @@ impl Surface {
         self.prepare_iteration_prologue(settings, bc, surface_curr)?;
 
         // ── ADI sweeps ──
-        // x-sweep: solve each x-line implicitly; y-neighbours lagged into RHS.
+        // x-sweep: solve each x-line implicitly; y/z-neighbours lagged into RHS.
         self.run_axis_sweep(0, settings, bc, surface_prev, surface_curr)?;
         // y-sweep: reads the x-updated `self` for cross-axis lag.
         self.run_axis_sweep(1, settings, bc, surface_prev, surface_curr)?;
+        // z-sweep: only on genuine 3-D grids (nz > 1); reads x/y-updated `self`.
+        if self.cells.raw_dim()[2] > 1 {
+            self.run_axis_sweep(2, settings, bc, surface_prev, surface_curr)?;
+        }
 
         Ok(())
     }

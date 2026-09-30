@@ -1,5 +1,6 @@
 
 use super::*;
+use crate::config::{FACE_Z_MAX, FACE_Z_MIN, FaceBc};
 use crate::uom::dimensions::Length;
 use crate::uom::{self};
 use crate::{
@@ -67,12 +68,57 @@ impl Surface {
         )
     }
 
+    /// Build a 3-D `(nx, ny, nz)` surface: `ny * nz` x-columns keyed by `(j, k)`,
+    /// each with cross-section `(y_extent/ny, z_extent/nz)`. Side faces y-min/y-max
+    /// stay `FaceBc::Adiabatic`; z-faces are set from the `z_faces` argument.
+    ///
+    /// `from_construction_2d` is the `nz = 1` delegate of this routine.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_construction_3d(
+        settings: &HamtSettings,
+        construction: Arc<Construction>,
+        surface_name: String,
+        surface_area: Area<f64>,
+        ny: usize,
+        y_extent: Length<f64>,
+        nz: usize,
+        z_extent: Length<f64>,
+        z_faces: [FaceBc; 2],
+        init_bc: &BoundaryCondition,
+    ) -> Result<Surface> {
+        let cells_3d = crate::surface::grid::build_grid_3d(
+            settings,
+            &construction,
+            surface_area,
+            ny,
+            y_extent,
+            nz,
+            z_extent,
+            init_bc,
+        )?;
+
+        let total_thickness: Length<f64> = construction.layers.iter().map(|l| l.thickness).sum();
+        let dimension = Pt3D(total_thickness, y_extent, z_extent);
+
+        let mut surface = Surface::new(
+            surface_name,
+            dimension,
+            construction.name.clone(),
+            cells_3d,
+            settings,
+        );
+        surface.face_bcs[FACE_Z_MIN] = z_faces[0];
+        surface.face_bcs[FACE_Z_MAX] = z_faces[1];
+        Ok(surface)
+    }
+
     /// Build a 2-D `(nx, ny, 1)` surface: `ny` x-columns stacked along y, each
     /// with a `y_extent/ny`-tall cross-section. The interior/exterior boundary
     /// sheets are per-column (one Conv/Rad/Sky/Ground/Virtual stack per y-row);
     /// there is no single global Virtual cell. Side faces (y-min/y-max) and the
     /// z-faces stay `FaceBc::Adiabatic` (the `Surface::new` default).
     ///
+    /// This is the `nz = 1` delegate of [`Surface::from_construction_3d`].
     /// `from_construction` is the `ny = 1` case of this routine.
     pub fn from_construction_2d(
         settings: &HamtSettings,
@@ -83,28 +129,20 @@ impl Surface {
         y_extent: Length<f64>,
         init_bc: &BoundaryCondition,
     ) -> Result<Surface> {
-        let cells_3d = crate::surface::grid::build_grid_2d(
+        // Reproduce the existing col_z = sqrt(area) convention exactly.
+        let z_extent = surface_area.sqrt();
+        Self::from_construction_3d(
             settings,
-            &construction,
+            construction,
+            surface_name,
             surface_area,
             ny,
             y_extent,
+            1,
+            z_extent,
+            [FaceBc::Adiabatic; 2],
             init_bc,
-        )?;
-
-        // Surface bounding box: x = total construction thickness; y = y_extent;
-        // z = sqrt(area) (the out-of-plane extent used by every column).
-        let col_z = surface_area.sqrt();
-        let total_thickness: Length<f64> = construction.layers.iter().map(|l| l.thickness).sum();
-        let dimension = Pt3D(total_thickness, y_extent, col_z);
-
-        Ok(Surface::new(
-            surface_name,
-            dimension,
-            construction.name.clone(),
-            cells_3d,
-            settings,
-        ))
+        )
     }
 
     fn init_cells_idx_map(&mut self) {

@@ -23,7 +23,6 @@ use common::{
     CONSTRUCTION_NAME, PERCENTAGE_RANGE_RH, PERCENTAGE_RANGE_T, REF_TEMPERATURE, REF_WATER_CONTENT,
     create_library, init_tracing,
 };
-use hamt_core::material::MaterialLibrary;
 use hamt_core::physics::geometry::Pt3D;
 use hamt_core::uom::dimensions::{Dimensionless, Length, Temperature, Time};
 use hamt_core::uom::units::{
@@ -387,78 +386,9 @@ fn adi_2d_uniform_reduces_to_1d() -> Result<()> {
 // Task 11 — Face energy & mass balance on a 2-D ADI grid.
 // ---------------------------------------------------------------------------
 
-/// Compute the total stored water mass [kg] over all material cells in the surface.
-fn total_stored_water(surface: &hamt_core::surface::Surface) -> hamt_core::uom::dimensions::Mass<f64> {
-    use hamt_core::uom::units::kilograms;
-    surface
-        .cells
-        .iter()
-        .filter(|c| matches!(c.cell_type, CellType::Material(_)))
-        .map(|c| c.volumetric_water * c.volume)
-        .fold(0.0 * kilograms, |acc, x| acc + x)
-}
-
-/// Compute a heat-content proxy E = Σ (ρ·c_dry + w·c_w) · V · T  [J]
-/// over all material cells. Used only for the ENERGY balance, where a few-
-/// percent tolerance is applied; the MASS balance carries the load-bearing
-/// assertion.
-fn total_stored_energy(surface: &hamt_core::surface::Surface) -> hamt_core::uom::dimensions::Energy<f64> {
-    use hamt_core::uom::units::{joules, kg_per_m3, j_per_kg_k};
-    // WATER_SPECIFIC_HEAT = 4180 J/(kg·K): use the raw constant value directly.
-    const C_WATER: f64 = 4180.0; // J/(kg·K)
-
-    surface
-        .cells
-        .iter()
-        .filter(|c| matches!(c.cell_type, CellType::Material(_)))
-        .map(|c| {
-            // strip: Diman cannot canonicalise (kg/m³·J/kg·K)·m³·K in one step;
-            // we do the scalar multiplication and tag back as Energy = joules.
-            let rho_c_dry = c.density.value_in(kg_per_m3) * c.spech.value_in(j_per_kg_k);
-            let rho_c_water = c.volumetric_water.value_in(kg_per_m3) * C_WATER;
-            let rho_c_eff = rho_c_dry + rho_c_water; // J/(m³·K)
-            let e_scalar = rho_c_eff * c.volume.value_unchecked() * c.cell_temp.value_unchecked(); // J
-            e_scalar * joules
-        })
-        .fold(0.0 * joules, |acc, x| acc + x)
-}
-
-/// Build a minimal construction for the balance test.
-///
-/// Uses the DIN EN 15026 material curves but with non-const surface VTCs so
-/// that the BC values are not overridden.  `init_rh` sets the initial
-/// equilibrium moisture content.
-fn build_balance_construction(init_rh: f64) -> std::sync::Arc<hamt_core::material::Construction> {
-    use hamt_core::material::SurfaceVaporCoef;
-    const BALANCE_MAT_NAME: &str = "BalanceMat";
-    const BALANCE_CONST_NAME: &str = "BalanceConst";
-
-    // Build a base library to access the EN 15026 material curves, then
-    // re-wrap them in a construction with NON-CONST surface VTCs so the BC
-    // vapor_transport_coeff values are not overridden at manager construction.
-    let base_lib = create_library(20.0, init_rh, vec![0.1], vec![Some(6)]);
-    let base_const = base_lib.get_construction(CONSTRUCTION_NAME).unwrap();
-
-    let mat = base_const.layers[0].as_ref().clone();
-    let mut new_mat = mat.clone();
-    new_mat.name = BALANCE_MAT_NAME.to_string();
-
-    let lib = MaterialLibrary::new();
-    lib.add_material(new_mat).expect("add material");
-    // NON-CONST surface VTCs: BC values flow through unchanged.
-    let sv = SurfaceVaporCoef {
-        is_external_const: false,
-        external_value: 0.0,
-        is_internal_const: false,
-        internal_value: 0.0,
-    };
-    lib.create_construction(
-        BALANCE_CONST_NAME.to_string(),
-        vec![BALANCE_MAT_NAME.to_string()],
-        sv,
-    ).expect("create balance construction");
-    lib.get_construction(BALANCE_CONST_NAME).unwrap()
-}
+// `total_stored_water`, `total_stored_energy`, and `build_balance_construction`
+// have been promoted to `tests/common/mod.rs` so they can be shared with
+// the 3-D balance test in `adi_3d.rs`. Use them via the `common::` prefix.
 
 /// Test: Face energy & mass balance on a 2-D ADI grid.
 ///
@@ -510,7 +440,7 @@ fn adi_2d_energy_mass_balance() -> Result<()> {
     let surface_area = 1.0 * square_meter;
 
     // Non-const VTCs: BC values flow through unchanged (no construction override).
-    let construction = build_balance_construction(0.5);
+    let construction = common::build_balance_construction(0.5);
 
     let settings = HamtSettings {
         timestep: time_step,
@@ -601,8 +531,8 @@ fn adi_2d_energy_mass_balance() -> Result<()> {
     }
 
     // Capture BEFORE state (preheat-converged surface).
-    let water_before = total_stored_water(&mgr.surface_prev);
-    let energy_before = total_stored_energy(&mgr.surface_prev);
+    let water_before = common::total_stored_water(&mgr.surface_prev);
+    let energy_before = common::total_stored_energy(&mgr.surface_prev);
     println!(
         "BEFORE: water={:.6e} kg  energy_proxy={:.4e} J",
         water_before.value_unchecked(),
@@ -615,8 +545,8 @@ fn adi_2d_energy_mass_balance() -> Result<()> {
     mgr.solve_timestep_adaptive(&mut adap, None)?;
     mgr.tick_timestep()?;
 
-    let water_after = total_stored_water(&mgr.surface_prev);
-    let energy_after = total_stored_energy(&mgr.surface_prev);
+    let water_after = common::total_stored_water(&mgr.surface_prev);
+    let energy_after = common::total_stored_energy(&mgr.surface_prev);
     println!(
         "AFTER:  water={:.6e} kg  energy_proxy={:.4e} J",
         water_after.value_unchecked(),
