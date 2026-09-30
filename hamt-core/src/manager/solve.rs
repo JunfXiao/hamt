@@ -7,7 +7,7 @@ use crate::surface::Surface;
 use crate::uom;
 use crate::uom::constants::VAPOR_GAS_CONSTANT;
 use crate::uom::units::{hours, kelvin, m_per_s};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::mem;
 use tracing::debug;
 use tracing::warn;
@@ -193,13 +193,36 @@ impl HamtManager {
             // 1. surface_prev (physical time t-1) supplies the inertial term (tcap/dt).
             // 2. surface_curr (iteration step k) supplies the nonlinear coefficients / Jacobian.
             // 3. results are written to surface_next (iteration step k+1).
-            step.step(
+            // A singular diagonal block during elimination is NOT fatal: it
+            // means the current `dt` is too aggressive for the linearisation
+            // to retain diagonal dominance. Shrink-and-retry is owned by the
+            // adaptive substepper (`solve_timestep_adaptive`), so we surface
+            // this as "did not converge" (Ok(false)) instead of aborting.
+            // The typed `SolverError` survives the anyhow round-trip via
+            // `downcast_ref` because `step_tridiag` / `step_adi` propagate it
+            // with `anyhow::Error::from(e).context(...)` rather than
+            // stringifying with `anyhow!(format!(...))`.
+            let step_result: Result<()> = step.step(
                 &mut self.surface_next,
                 &self.settings,
                 &self.boundary_condition,
                 &self.surface_prev,
                 &self.surface_curr,
-            )?;
+            );
+            if let Err(err) = step_result {
+                if let Some(crate::solver::block_tridiag::SolverError::Singular { row }) =
+                    err.downcast_ref::<crate::solver::block_tridiag::SolverError>()
+                {
+                    tracing::warn!(
+                        row = *row,
+                        dt_hours = self.settings.timestep.value_in(hours),
+                        outer_iter = iter,
+                        "block-tridiag singular: signalling non-convergence so the adaptive substepper can shrink dt and retry"
+                    );
+                    return Ok(false);
+                }
+                return Err(err).context("step failed");
+            }
 
             stats = convergence_stats(&self.surface_next, &self.surface_curr, &self.settings);
 
@@ -646,5 +669,148 @@ impl HamtManager {
                 stall_patience: Some(50),
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod singular_retry_tests {
+    //! Regression test for the production crash
+    //! `block-tridiag solve failed: Singular { row: 35 }` at time step 2.
+    //!
+    //! Root cause: `solve_timestep_adaptive` used `?` on the inner
+    //! `solve_timestep`, so a `SolverError::Singular` from the block-Thomas
+    //! kernel propagated as a fatal error instead of being treated as a
+    //! "shrink dt and retry" signal. The fix routes `Singular` through
+    //! `run_outer_loop` → `Ok(false)` (non-convergence), which the adaptive
+    //! substepper handles by quartering `dt` and retrying.
+
+    use super::*;
+    use crate::solver::block_tridiag::SolverError;
+    use crate::surface::IterativeStep;
+    use std::cell::Cell as StdCell;
+
+    /// Stub step that returns `SolverError::Singular` a configurable number
+    /// of times before succeeding. Succeeding means "leave next untouched
+    /// (converged state == curr state)".
+    struct SingularThenOk {
+        remaining_singular: StdCell<usize>,
+    }
+
+    impl IterativeStep for SingularThenOk {
+        fn step(
+            &self,
+            _next: &mut Surface,
+            _settings: &crate::config::HamtSettings,
+            _bc: &crate::boundary::BoundaryCondition,
+            _surface_prev: &Surface,
+            _surface_curr: &Surface,
+        ) -> anyhow::Result<()> {
+            let rem = self.remaining_singular.get();
+            if rem > 0 {
+                self.remaining_singular.set(rem - 1);
+                // Propagate the typed SolverError the same way the real
+                // BlockTridiagStep does: `anyhow::Error::from(e).context(...)`.
+                // The `.context()` wrapper must NOT break downcasting.
+                return Err(anyhow::Error::from(SolverError::Singular { row: 35 })
+                    .context("block-tridiag solve failed"));
+            }
+            // Success: leave next untouched; run_outer_loop will see
+            // zero delta and report convergence.
+            Ok(())
+        }
+    }
+
+    /// A singular block-Thomas solve must NOT abort `run_outer_loop` with an
+    /// error; it must return `Ok(false)` (= "did not converge") so the
+    /// adaptive substepper can shrink `dt` and retry. This is the fix for the
+    /// production crash where `Singular { row: 35 }` at time step 2 killed
+    /// the whole TRNSYS simulation.
+    #[test]
+    fn singular_returns_non_convergence_not_fatal_error() {
+        let mut mgr = crate::solver::test_fixtures::build_fixture_manager(6);
+
+        // Stub: fail once with Singular, then succeed.
+        let step = SingularThenOk {
+            remaining_singular: StdCell::new(1),
+        };
+
+        let n_cells = mgr.surface_curr.cells.len();
+        let mut aitken = Aitken::new(n_cells);
+
+        let result = mgr
+            .run_outer_loop(
+                &step,
+                &mut aitken,
+                None,
+                ExitPolicy {
+                    max_iter: 10,
+                    min_iter_guard: None,
+                    stall_patience: None,
+                },
+            )
+            .expect("run_outer_loop must NOT propagate Singular as a fatal error");
+
+        // Must report non-convergence so the caller (adaptive substepper)
+        // shrinks dt and retries. The stub has one Singular invocation left
+        // (run_outer_loop returned early), so no success path was reached.
+        assert!(
+            !result,
+            "run_outer_loop must return Ok(false) on Singular so the adaptive substepper retries with smaller dt"
+        );
+        assert_eq!(
+            step.remaining_singular.get(),
+            0,
+            "the stub must have been stepped exactly once (the singular call)"
+        );
+    }
+
+    /// A non-Singular step error (e.g. LengthMismatch) must still propagate
+    /// as a fatal error — only Singular gets the retry treatment.
+    #[test]
+    fn non_singular_step_error_still_fatal() {
+        struct AlwaysLengthMismatch;
+        impl IterativeStep for AlwaysLengthMismatch {
+            fn step(
+                &self,
+                _next: &mut Surface,
+                _settings: &crate::config::HamtSettings,
+                _bc: &crate::boundary::BoundaryCondition,
+                _surface_prev: &Surface,
+                _surface_curr: &Surface,
+            ) -> anyhow::Result<()> {
+                Err(anyhow::Error::from(SolverError::LengthMismatch)
+                    .context("block-tridiag solve failed"))
+            }
+        }
+
+        let mut mgr = crate::solver::test_fixtures::build_fixture_manager(6);
+        let step = AlwaysLengthMismatch;
+        let n_cells = mgr.surface_curr.cells.len();
+        let mut aitken = Aitken::new(n_cells);
+
+        let result = mgr.run_outer_loop(
+            &step,
+            &mut aitken,
+            None,
+            ExitPolicy {
+                max_iter: 10,
+                min_iter_guard: None,
+                stall_patience: None,
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "non-Singular step errors must still propagate as fatal"
+        );
+        let err = result.unwrap_err();
+        // Verify downcast still finds SolverError::LengthMismatch through
+        // the context chain (proves the anyhow wrapping didn't strip type).
+        assert!(
+            err.downcast_ref::<SolverError>()
+                .map(|e| matches!(e, SolverError::LengthMismatch))
+                .unwrap_or(false),
+            "fatal error must preserve SolverError::LengthMismatch for downcast"
+        );
     }
 }
