@@ -327,6 +327,16 @@ impl HamtManager {
             if exit.min_iter_guard.is_none() && exit.stall_patience.is_none() {
                 // BlockTridiag: simple converged check.
                 if criterion_met {
+                    // The iteration prologue refreshed the Virtual (surface) cells
+                    // from the PREVIOUS iterate (plus Aitken/Anderson have moved the
+                    // material state since). Re-derive them from the final state so
+                    // the flux queries the substepper integrates (`moisture_flux`,
+                    // `heat_flux`) and `report` see a surface node that is consistent
+                    // with the material cells the implicit update produced.
+                    self.surface_curr
+                        .refresh_virtual_cells(&self.boundary_condition);
+                    self.surface_curr
+                        .update_cell_properties(&self.boundary_condition, &self.settings)?;
                     if iter > 4 {
                         debug!(
                             iter,

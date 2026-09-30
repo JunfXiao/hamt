@@ -1,0 +1,502 @@
+
+!- Created by WUFI XML Parser by Junfeng Xiao (j.xiao@tum.de)
+!- ===========  ALL MATERIALS ===========
+
+
+Material,
+  Gipskartonplatte_original_F_IBP_0.025,	!- Material Name
+  Rough,	!- Roughness
+  0.025,	!- Thickness m
+  0.2,	!- Heat Conductivity [W/mK]
+  850.0,	!- Density [kg/m³]
+  850.0,	!- Heat Capacity [J/kgK]
+  0.0,	!- Thermal Absorptance [-]
+  0.0,	!- Solar Absorptance [-]
+  0.01;	!- Visible Absorptance [-]
+
+Material,
+  PE_Folie_(sd_=_50_m)_entriegelt_0.001,	!- Material Name
+  Rough,	!- Roughness
+  0.001,	!- Thickness m
+  2.3,	!- Heat Conductivity [W/mK]
+  130.0,	!- Density [kg/m³]
+  2300.0,	!- Heat Capacity [J/kgK]
+  0.0,	!- Thermal Absorptance [-]
+  0.0,	!- Solar Absorptance [-]
+  0.01;	!- Visible Absorptance [-]
+
+Material,
+  02a_AiF_Holzfaserdaemmmatte_WF_flexibel_jr_0.06,	!- Material Name
+  Rough,	!- Roughness
+  0.06,	!- Thickness m
+  0.035,	!- Heat Conductivity [W/mK]
+  50.0,	!- Density [kg/m³]
+  1400.0,	!- Heat Capacity [J/kgK]
+  0.0,	!- Thermal Absorptance [-]
+  0.0,	!- Solar Absorptance [-]
+  0.01;	!- Visible Absorptance [-]
+
+Material,
+  03_LivingBoard_face_contiprotect_P5_(15_mm)_jr_0.015,	!- Material Name
+  Rough,	!- Roughness
+  0.015,	!- Thickness m
+  0.12,	!- Heat Conductivity [W/mK]
+  673.0,	!- Density [kg/m³]
+  1400.0,	!- Heat Capacity [J/kgK]
+  0.0,	!- Thermal Absorptance [-]
+  0.0,	!- Solar Absorptance [-]
+  0.01;	!- Visible Absorptance [-]
+
+Material,
+  04a_ISOCELL_Zellulosedaemmstoff_jr_0.24,	!- Material Name
+  Rough,	!- Roughness
+  0.24,	!- Thickness m
+  0.037,	!- Heat Conductivity [W/mK]
+  50.0,	!- Density [kg/m³]
+  2110.0,	!- Heat Capacity [J/kgK]
+  0.0,	!- Thermal Absorptance [-]
+  0.0,	!- Solar Absorptance [-]
+  0.01;	!- Visible Absorptance [-]
+
+Material,
+  05_AGEPAN_THD_jr_0.035,	!- Material Name
+  Rough,	!- Roughness
+  0.035,	!- Thickness m
+  0.047,	!- Heat Conductivity [W/mK]
+  226.0,	!- Density [kg/m³]
+  2100.0,	!- Heat Capacity [J/kgK]
+  0.0,	!- Thermal Absorptance [-]
+  0.0,	!- Solar Absorptance [-]
+  0.01;	!- Visible Absorptance [-]
+
+!- ===========  MATERIAL HAMT SETTINGS ===========
+
+MaterialProperty:HeatAndMoistureTransfer:Settings,
+  Gipskartonplatte_original_F_IBP_0.025,	!- Material Name
+  0.65,	!- Porosity [m³/m³]
+  0.004235294117647059;	!- Initial Water Content Ratio kg/kg
+MaterialProperty:HeatAndMoistureTransfer:Settings,
+  PE_Folie_(sd_=_50_m)_entriegelt_0.001,	!- Material Name
+  0.001,	!- Porosity [m³/m³]
+  0.0;	!- Initial Water Content Ratio kg/kg
+MaterialProperty:HeatAndMoistureTransfer:Settings,
+  02a_AiF_Holzfaserdaemmmatte_WF_flexibel_jr_0.06,	!- Material Name
+  0.97,	!- Porosity [m³/m³]
+  0.08;	!- Initial Water Content Ratio kg/kg
+MaterialProperty:HeatAndMoistureTransfer:Settings,
+  03_LivingBoard_face_contiprotect_P5_(15_mm)_jr_0.015,	!- Material Name
+  0.66,	!- Porosity [m³/m³]
+  0.06217853468967882;	!- Initial Water Content Ratio kg/kg
+MaterialProperty:HeatAndMoistureTransfer:Settings,
+  04a_ISOCELL_Zellulosedaemmstoff_jr_0.24,	!- Material Name
+  0.95,	!- Porosity [m³/m³]
+  0.09384615384615383;	!- Initial Water Content Ratio kg/kg
+MaterialProperty:HeatAndMoistureTransfer:Settings,
+  05_AGEPAN_THD_jr_0.035,	!- Material Name
+  0.79,	!- Porosity [m³/m³]
+  0.0845132743362832;	!- Initial Water Content Ratio kg/kg
+!- ===========  ALL MATERIAL FUNCTIONS ===========
+
+!-   ===========  Function: MaterialFunctionType.MoistureStorageFunction ===========
+MaterialProperty:HeatAndMoistureTransfer:SorptionIsotherm,
+  Gipskartonplatte_original_F_IBP_0.025,	!- Material Name
+  12,	!- Number of Suction points
+  0.0,	!- x[0]  unit:  -
+  0.0,	!- y[0]  unit: kg/m³
+  0.5,	!- x[1]  unit:  -
+  3.6,	!- y[1]  unit: kg/m³
+  0.65,	!- x[2]  unit:  -
+  5.2,	!- y[2]  unit: kg/m³
+  0.8,	!- x[3]  unit:  -
+  6.3,	!- y[3]  unit: kg/m³
+  0.9,	!- x[4]  unit:  -
+  11.0,	!- y[4]  unit: kg/m³
+  0.93,	!- x[5]  unit:  -
+  17.0,	!- y[5]  unit: kg/m³
+  0.95,	!- x[6]  unit:  -
+  19.0,	!- y[6]  unit: kg/m³
+  0.99,	!- x[7]  unit:  -
+  113.0,	!- y[7]  unit: kg/m³
+  0.995,	!- x[8]  unit:  -
+  124.0,	!- y[8]  unit: kg/m³
+  0.999,	!- x[9]  unit:  -
+  328.0,	!- y[9]  unit: kg/m³
+  0.9995,	!- x[10]  unit:  -
+  378.0,	!- y[10]  unit: kg/m³
+  1.0,	!- x[11]  unit:  -
+  400.0;	!- y[11]  unit: kg/m³
+
+MaterialProperty:HeatAndMoistureTransfer:SorptionIsotherm,
+  PE_Folie_(sd_=_50_m)_entriegelt_0.001,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit:  -
+  0.0;	!- y[0]  unit: kg/m³
+
+MaterialProperty:HeatAndMoistureTransfer:SorptionIsotherm,
+  02a_AiF_Holzfaserdaemmmatte_WF_flexibel_jr_0.06,	!- Material Name
+  12,	!- Number of Suction points
+  0.0,	!- x[0]  unit:  -
+  0.0,	!- y[0]  unit: kg/m³
+  0.5,	!- x[1]  unit:  -
+  4.0,	!- y[1]  unit: kg/m³
+  0.65,	!- x[2]  unit:  -
+  5.0,	!- y[2]  unit: kg/m³
+  0.8,	!- x[3]  unit:  -
+  9.0,	!- y[3]  unit: kg/m³
+  0.93,	!- x[4]  unit:  -
+  17.5,	!- y[4]  unit: kg/m³
+  0.97,	!- x[5]  unit:  -
+  30.0,	!- y[5]  unit: kg/m³
+  0.99,	!- x[6]  unit:  -
+  65.53,	!- y[6]  unit: kg/m³
+  0.995,	!- x[7]  unit:  -
+  98.8,	!- y[7]  unit: kg/m³
+  0.999,	!- x[8]  unit:  -
+  193.29,	!- y[8]  unit: kg/m³
+  0.9995,	!- x[9]  unit:  -
+  228.16,	!- y[9]  unit: kg/m³
+  0.9999,	!- x[10]  unit:  -
+  276.38,	!- y[10]  unit: kg/m³
+  1.0,	!- x[11]  unit:  -
+  300.0;	!- y[11]  unit: kg/m³
+
+MaterialProperty:HeatAndMoistureTransfer:SorptionIsotherm,
+  03_LivingBoard_face_contiprotect_P5_(15_mm)_jr_0.015,	!- Material Name
+  11,	!- Number of Suction points
+  0.0,	!- x[0]  unit:  -
+  0.0,	!- y[0]  unit: kg/m³
+  0.65,	!- x[1]  unit:  -
+  54.4,	!- y[1]  unit: kg/m³
+  0.8,	!- x[2]  unit:  -
+  75.9,	!- y[2]  unit: kg/m³
+  0.93,	!- x[3]  unit:  -
+  113.8,	!- y[3]  unit: kg/m³
+  0.95,	!- x[4]  unit:  -
+  141.4,	!- y[4]  unit: kg/m³
+  0.99,	!- x[5]  unit:  -
+  217.8,	!- y[5]  unit: kg/m³
+  0.995,	!- x[6]  unit:  -
+  251.4,	!- y[6]  unit: kg/m³
+  0.999,	!- x[7]  unit:  -
+  359.9,	!- y[7]  unit: kg/m³
+  0.9995,	!- x[8]  unit:  -
+  404.9,	!- y[8]  unit: kg/m³
+  0.9999,	!- x[9]  unit:  -
+  493.8,	!- y[9]  unit: kg/m³
+  1.0,	!- x[10]  unit:  -
+  633.0;	!- y[10]  unit: kg/m³
+
+MaterialProperty:HeatAndMoistureTransfer:SorptionIsotherm,
+  04a_ISOCELL_Zellulosedaemmstoff_jr_0.24,	!- Material Name
+  12,	!- Number of Suction points
+  0.0,	!- x[0]  unit:  -
+  0.0,	!- y[0]  unit: kg/m³
+  0.65,	!- x[1]  unit:  -
+  6.1,	!- y[1]  unit: kg/m³
+  0.8,	!- x[2]  unit:  -
+  7.9,	!- y[2]  unit: kg/m³
+  0.93,	!- x[3]  unit:  -
+  10.2,	!- y[3]  unit: kg/m³
+  0.95,	!- x[4]  unit:  -
+  14.7,	!- y[4]  unit: kg/m³
+  0.97,	!- x[5]  unit:  -
+  20.1,	!- y[5]  unit: kg/m³
+  0.99,	!- x[6]  unit:  -
+  30.4,	!- y[6]  unit: kg/m³
+  0.995,	!- x[7]  unit:  -
+  41.2,	!- y[7]  unit: kg/m³
+  0.999,	!- x[8]  unit:  -
+  80.7,	!- y[8]  unit: kg/m³
+  0.9995,	!- x[9]  unit:  -
+  106.0,	!- y[9]  unit: kg/m³
+  0.9999,	!- x[10]  unit:  -
+  187.0,	!- y[10]  unit: kg/m³
+  1.0,	!- x[11]  unit:  -
+  614.0;	!- y[11]  unit: kg/m³
+
+MaterialProperty:HeatAndMoistureTransfer:SorptionIsotherm,
+  05_AGEPAN_THD_jr_0.035,	!- Material Name
+  12,	!- Number of Suction points
+  0.0,	!- x[0]  unit:  -
+  0.0,	!- y[0]  unit: kg/m³
+  0.5,	!- x[1]  unit:  -
+  19.1,	!- y[1]  unit: kg/m³
+  0.65,	!- x[2]  unit:  -
+  22.0,	!- y[2]  unit: kg/m³
+  0.8,	!- x[3]  unit:  -
+  30.0,	!- y[3]  unit: kg/m³
+  0.93,	!- x[4]  unit:  -
+  39.7,	!- y[4]  unit: kg/m³
+  0.95,	!- x[5]  unit:  -
+  45.6,	!- y[5]  unit: kg/m³
+  0.99,	!- x[6]  unit:  -
+  75.6,	!- y[6]  unit: kg/m³
+  0.995,	!- x[7]  unit:  -
+  92.5,	!- y[7]  unit: kg/m³
+  0.999,	!- x[8]  unit:  -
+  141.0,	!- y[8]  unit: kg/m³
+  0.9995,	!- x[9]  unit:  -
+  166.0,	!- y[9]  unit: kg/m³
+  0.9999,	!- x[10]  unit:  -
+  227.0,	!- y[10]  unit: kg/m³
+  1.0,	!- x[11]  unit:  -
+  427.0;	!- y[11]  unit: kg/m³
+
+!-   ===========  Function: MaterialFunctionType.LiquidTransportCoefficient_Suction ===========
+MaterialProperty:HeatAndMoistureTransfer:Suction,
+  Gipskartonplatte_original_F_IBP_0.025,	!- Material Name
+  9,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.0,	!- y[0]  unit: m²/s
+  60.0,	!- x[1]  unit: kg/m³
+  3e-09,	!- y[1]  unit: m²/s
+  100.0,	!- x[2]  unit: kg/m³
+  1e-07,	!- y[2]  unit: m²/s
+  160.0,	!- x[3]  unit: kg/m³
+  1e-07,	!- y[3]  unit: m²/s
+  240.0,	!- x[4]  unit: kg/m³
+  1.2e-07,	!- y[4]  unit: m²/s
+  320.0,	!- x[5]  unit: kg/m³
+  2.2e-07,	!- y[5]  unit: m²/s
+  360.0,	!- x[6]  unit: kg/m³
+  6e-07,	!- y[6]  unit: m²/s
+  380.0,	!- x[7]  unit: kg/m³
+  9e-07,	!- y[7]  unit: m²/s
+  400.0,	!- x[8]  unit: kg/m³
+  4.5e-06;	!- y[8]  unit: m²/s
+
+MaterialProperty:HeatAndMoistureTransfer:Suction,
+  PE_Folie_(sd_=_50_m)_entriegelt_0.001,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.0;	!- y[0]  unit: m²/s
+
+MaterialProperty:HeatAndMoistureTransfer:Suction,
+  02a_AiF_Holzfaserdaemmmatte_WF_flexibel_jr_0.06,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.0;	!- y[0]  unit: m²/s
+
+MaterialProperty:HeatAndMoistureTransfer:Suction,
+  03_LivingBoard_face_contiprotect_P5_(15_mm)_jr_0.015,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.0;	!- y[0]  unit: m²/s
+
+MaterialProperty:HeatAndMoistureTransfer:Suction,
+  04a_ISOCELL_Zellulosedaemmstoff_jr_0.24,	!- Material Name
+  5,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.0,	!- y[0]  unit: m²/s
+  7.9,	!- x[1]  unit: kg/m³
+  2e-14,	!- y[1]  unit: m²/s
+  10.2,	!- x[2]  unit: kg/m³
+  1.6e-10,	!- y[2]  unit: m²/s
+  187.0,	!- x[3]  unit: kg/m³
+  5.4e-10,	!- y[3]  unit: m²/s
+  614.0,	!- x[4]  unit: kg/m³
+  4.2e-07;	!- y[4]  unit: m²/s
+
+MaterialProperty:HeatAndMoistureTransfer:Suction,
+  05_AGEPAN_THD_jr_0.035,	!- Material Name
+  3,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.0,	!- y[0]  unit: m²/s
+  30.0,	!- x[1]  unit: kg/m³
+  2e-11,	!- y[1]  unit: m²/s
+  427.0,	!- x[2]  unit: kg/m³
+  2e-11;	!- y[2]  unit: m²/s
+
+!-   ===========  Function: MaterialFunctionType.LiquidTransportCoefficient_Redistribution ===========
+MaterialProperty:HeatAndMoistureTransfer:Redistribution,
+  Gipskartonplatte_original_F_IBP_0.025,	!- Material Name
+  9,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.0,	!- y[0]  unit: m²/s
+  60.0,	!- x[1]  unit: kg/m³
+  3e-09,	!- y[1]  unit: m²/s
+  100.0,	!- x[2]  unit: kg/m³
+  8e-09,	!- y[2]  unit: m²/s
+  160.0,	!- x[3]  unit: kg/m³
+  8e-09,	!- y[3]  unit: m²/s
+  240.0,	!- x[4]  unit: kg/m³
+  1.3e-08,	!- y[4]  unit: m²/s
+  320.0,	!- x[5]  unit: kg/m³
+  1e-07,	!- y[5]  unit: m²/s
+  360.0,	!- x[6]  unit: kg/m³
+  3e-07,	!- y[6]  unit: m²/s
+  380.0,	!- x[7]  unit: kg/m³
+  7e-07,	!- y[7]  unit: m²/s
+  400.0,	!- x[8]  unit: kg/m³
+  1e-06;	!- y[8]  unit: m²/s
+
+MaterialProperty:HeatAndMoistureTransfer:Redistribution,
+  PE_Folie_(sd_=_50_m)_entriegelt_0.001,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.0;	!- y[0]  unit: m²/s
+
+MaterialProperty:HeatAndMoistureTransfer:Redistribution,
+  02a_AiF_Holzfaserdaemmmatte_WF_flexibel_jr_0.06,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.0;	!- y[0]  unit: m²/s
+
+MaterialProperty:HeatAndMoistureTransfer:Redistribution,
+  03_LivingBoard_face_contiprotect_P5_(15_mm)_jr_0.015,	!- Material Name
+  3,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.0,	!- y[0]  unit: m²/s
+  75.9,	!- x[1]  unit: kg/m³
+  1e-11,	!- y[1]  unit: m²/s
+  633.0,	!- x[2]  unit: kg/m³
+  7e-10;	!- y[2]  unit: m²/s
+
+MaterialProperty:HeatAndMoistureTransfer:Redistribution,
+  04a_ISOCELL_Zellulosedaemmstoff_jr_0.24,	!- Material Name
+  5,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.0,	!- y[0]  unit: m²/s
+  7.9,	!- x[1]  unit: kg/m³
+  2e-14,	!- y[1]  unit: m²/s
+  10.2,	!- x[2]  unit: kg/m³
+  1.6e-10,	!- y[2]  unit: m²/s
+  187.0,	!- x[3]  unit: kg/m³
+  5.4e-10,	!- y[3]  unit: m²/s
+  614.0,	!- x[4]  unit: kg/m³
+  8.6999999999e-09;	!- y[4]  unit: m²/s
+
+MaterialProperty:HeatAndMoistureTransfer:Redistribution,
+  05_AGEPAN_THD_jr_0.035,	!- Material Name
+  3,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.0,	!- y[0]  unit: m²/s
+  30.0,	!- x[1]  unit: kg/m³
+  4e-11,	!- y[1]  unit: m²/s
+  427.0,	!- x[2]  unit: kg/m³
+  6e-08;	!- y[2]  unit: m²/s
+
+!-   ===========  Function: MaterialFunctionType.ThermalConductivity_MoistureDependent ===========
+MaterialProperty:HeatAndMoistureTransfer:ThermalConductivity,
+  Gipskartonplatte_original_F_IBP_0.025,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.2;	!- y[0]  unit: W/(m K)
+
+MaterialProperty:HeatAndMoistureTransfer:ThermalConductivity,
+  PE_Folie_(sd_=_50_m)_entriegelt_0.001,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  2.3;	!- y[0]  unit: W/(m K)
+
+MaterialProperty:HeatAndMoistureTransfer:ThermalConductivity,
+  02a_AiF_Holzfaserdaemmmatte_WF_flexibel_jr_0.06,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.035;	!- y[0]  unit: W/(m K)
+
+MaterialProperty:HeatAndMoistureTransfer:ThermalConductivity,
+  03_LivingBoard_face_contiprotect_P5_(15_mm)_jr_0.015,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.12;	!- y[0]  unit: W/(m K)
+
+MaterialProperty:HeatAndMoistureTransfer:ThermalConductivity,
+  04a_ISOCELL_Zellulosedaemmstoff_jr_0.24,	!- Material Name
+  14,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.037,	!- y[0]  unit: W/(m K)
+  10.0,	!- x[1]  unit: kg/m³
+  0.037,	!- y[1]  unit: W/(m K)
+  20.0,	!- x[2]  unit: kg/m³
+  0.038,	!- y[2]  unit: W/(m K)
+  50.0,	!- x[3]  unit: kg/m³
+  0.04,	!- y[3]  unit: W/(m K)
+  100.0,	!- x[4]  unit: kg/m³
+  0.045,	!- y[4]  unit: W/(m K)
+  200.0,	!- x[5]  unit: kg/m³
+  0.065,	!- y[5]  unit: W/(m K)
+  300.0,	!- x[6]  unit: kg/m³
+  0.1,	!- y[6]  unit: W/(m K)
+  400.0,	!- x[7]  unit: kg/m³
+  0.15,	!- y[7]  unit: W/(m K)
+  500.0,	!- x[8]  unit: kg/m³
+  0.2,	!- y[8]  unit: W/(m K)
+  600.0,	!- x[9]  unit: kg/m³
+  0.27,	!- y[9]  unit: W/(m K)
+  700.0,	!- x[10]  unit: kg/m³
+  0.35,	!- y[10]  unit: W/(m K)
+  800.0,	!- x[11]  unit: kg/m³
+  0.44,	!- y[11]  unit: W/(m K)
+  900.0,	!- x[12]  unit: kg/m³
+  0.55,	!- y[12]  unit: W/(m K)
+  950.0,	!- x[13]  unit: kg/m³
+  0.6;	!- y[13]  unit: W/(m K)
+
+MaterialProperty:HeatAndMoistureTransfer:ThermalConductivity,
+  05_AGEPAN_THD_jr_0.035,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit: kg/m³
+  0.047;	!- y[0]  unit: W/(m K)
+
+!-   ===========  Function: MaterialFunctionType.VaporDiffusionResistance_MoistureDependent ===========
+MaterialProperty:HeatAndMoistureTransfer:Diffusion,
+  Gipskartonplatte_original_F_IBP_0.025,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit:  -
+  8.3;	!- y[0]  unit:  -
+
+MaterialProperty:HeatAndMoistureTransfer:Diffusion,
+  PE_Folie_(sd_=_50_m)_entriegelt_0.001,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit:  -
+  50000.0;	!- y[0]  unit:  -
+
+MaterialProperty:HeatAndMoistureTransfer:Diffusion,
+  02a_AiF_Holzfaserdaemmmatte_WF_flexibel_jr_0.06,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit:  -
+  2.0;	!- y[0]  unit:  -
+
+MaterialProperty:HeatAndMoistureTransfer:Diffusion,
+  03_LivingBoard_face_contiprotect_P5_(15_mm)_jr_0.015,	!- Material Name
+  4,	!- Number of Suction points
+  0.0,	!- x[0]  unit:  -
+  107.0,	!- y[0]  unit:  -
+  0.265,	!- x[1]  unit:  -
+  107.0,	!- y[1]  unit:  -
+  0.715,	!- x[2]  unit:  -
+  80.0,	!- y[2]  unit:  -
+  1.0,	!- x[3]  unit:  -
+  80.0;	!- y[3]  unit:  -
+
+MaterialProperty:HeatAndMoistureTransfer:Diffusion,
+  04a_ISOCELL_Zellulosedaemmstoff_jr_0.24,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit:  -
+  1.8;	!- y[0]  unit:  -
+
+MaterialProperty:HeatAndMoistureTransfer:Diffusion,
+  05_AGEPAN_THD_jr_0.035,	!- Material Name
+  1,	!- Number of Suction points
+  0.0,	!- x[0]  unit:  -
+  3.4;	!- y[0]  unit:  -
+
+!- ===========  ALL CONSTRUCTIONS ===========
+
+Construction,
+  20260113_GKP_WithFoil,	!- Name
+  6,	!- Number of Layers
+  Gipskartonplatte_original_F_IBP_0.025,	!- Layer 1
+  PE_Folie_(sd_=_50_m)_entriegelt_0.001,	!- Layer 2
+  02a_AiF_Holzfaserdaemmmatte_WF_flexibel_jr_0.06,	!- Layer 3
+  03_LivingBoard_face_contiprotect_P5_(15_mm)_jr_0.015,	!- Layer 4
+  04a_ISOCELL_Zellulosedaemmstoff_jr_0.24,	!- Layer 5
+  05_AGEPAN_THD_jr_0.035;	!- Layer 6
+
+SurfaceProperties:VaporCoefficients,
+  20260113_GKP_WithFoil,	!- Surface Name
+  No,	!- Constant External Vapor Transfer Coefficient
+  2.2e-08,	!- External Vapor Coefficient Value [kg/Pa-s-m2]
+  No,	!- Constant Internal Vapor Transfer Coefficient
+  9e-09;	!- Internal Vapor Coefficient Value [kg/Pa-s-m2]

@@ -274,11 +274,16 @@ fn flux_conservation_probe() -> Result<()> {
 
     // Regression guard: the reported moisture_flux integral must conserve mass
     // against the wall's stored-water change. Before the fix this was −13…−40 %
-    // (and grew with N); the fix (report vapour + surface liquid) brings it to ~0.
-    // 2 % bound absorbs the small implicit-Euler / per-step quadrature residual.
+    // (and grew with N); the fix (report vapour + surface liquid) brought it to
+    // ≲ 1.4 %, and the implicit surface node + consistent neighbour Jacobian
+    // (solver/adi.rs, "Conservation of the linearised system") to < 0.01 % in every
+    // variant above. The integral here is the backward-Euler right-Riemann sum
+    // (no substepper), i.e. exactly what the implicit update stores, so the only
+    // residual is the outer-loop exit tolerance: 0.5 % leaves a 50× margin over
+    // what is measured and still fails the pre-fix solver (+1.09 % at N=12).
     for (tag, p) in all {
         assert!(
-            off_total(p).abs() < 2.0,
+            off_total(p).abs() < 0.5,
             "{tag}: reported moisture_flux deviates {:.2}% from the wall's stored-water change \
              — surface mass conservation regression (see doc/flux_offset_investigation.md)",
             off_total(p)

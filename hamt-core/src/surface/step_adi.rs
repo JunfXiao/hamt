@@ -90,7 +90,27 @@ impl Surface {
         self.sync_state_from(surface_curr)?;
         self.apply_boundary_coefficients(bc, settings)?;
 
-        // ── Virtual-cell refresh (3-D-correct port of the block-tridiag step) ──
+        // Virtual-cell refresh. The assembler no longer READS the Virtual (surface)
+        // nodes — it eliminates them implicitly (`solver::adi::eliminate_surface_node`)
+        // — so this refresh only keeps the diagnostic state (surface T / RH / vapour
+        // pressure used by the flux queries and `report`) current for the iterate.
+        self.refresh_virtual_cells(bc);
+
+        self.update_cell_properties(bc, settings)?;
+
+        Ok(())
+    }
+
+    /// Recompute every Virtual (surface) cell from its neighbours' CURRENT state.
+    ///
+    /// The Virtual cell is massless, so its state is the quasi-steady balance of its
+    /// neighbours (the adjacent material cell and the boundary cells of its face).
+    /// It is diagnostic state: the flux queries ([`Surface::moisture_flux`],
+    /// [`Surface::heat_flux`]) and [`Surface::report`] read it. It must therefore be
+    /// refreshed from the FINAL converged material state before a substep's fluxes
+    /// are read — `run_outer_loop` does so on exit. (Left as the prologue value it
+    /// reflects the PREVIOUS outer iterate, stale by the last iteration's change.)
+    pub(crate) fn refresh_virtual_cells(&mut self, bc: &BoundaryCondition) {
         // Virtual cells aren't updated by `apply_boundary_coefficients`; the
         // sweep scatter writes only material cells. Compute each Virtual cell as
         // the conductance-weighted average of its non-Virtual neighbours' state —
@@ -165,10 +185,6 @@ impl Surface {
             cell.cell_temp = t * kelvin;
             cell.cell_rh = rh * dimensionless;
         }
-
-        self.update_cell_properties(bc, settings)?;
-
-        Ok(())
     }
 
     /// Run a single ADI sweep along `axis`: for each material line parallel to

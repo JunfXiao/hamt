@@ -462,6 +462,28 @@ fn test_room_air_coupling_converges_and_conserves() -> Result<()> {
         conv_rel * 100.0
     );
 
+    // ── Thermal response must be grid-independent too ───────────────────────
+    // The room temperature swing is set by the wall's thermal admittance seen
+    // through the film (here ≈ a lumped 20 mm layer behind h = 8 W/m²K, i.e. about
+    // 3.3 K peak-to-peak for this load). With the old lagged surface node the
+    // surface cell's temperature stalled between outer iterations, so the swing
+    // fell from 1.35 K (N=12) to 0.47 K (N=24) to 0.37 K (N=48) — a wall that
+    // seemed to buffer 9× too much, getting worse the finer the mesh. It now
+    // converges (3.12 / 3.25 / 3.27 K). Assert the two finest meshes agree to 5 %
+    // (measured 0.8 %; the old solver: 24 %).
+    let t_fine = results[2].temp_swing_last_day_k;
+    let t_med = results[1].temp_swing_last_day_k;
+    let t_conv_rel = (t_fine - t_med).abs() / t_fine;
+    assert!(
+        t_conv_rel < 0.05,
+        "Room temperature swing not grid-converged: N={} → {:.3} K vs N={} → {:.3} K          ({:.1}% apart) — the wall's thermal response depends on the mesh",
+        results[1].n_material,
+        t_med,
+        results[2].n_material,
+        t_fine,
+        t_conv_rel * 100.0
+    );
+
     // ── AUDIT: diagnostic flux-query vs true stored-water offset ─────────────
     // At peak uptake, the cumulative interior surface-flux integral
     // (`moisture_flux`, the value reported to TRNSYS) must match the wall's true
