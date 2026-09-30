@@ -157,7 +157,11 @@ pub(super) fn build_x_column(
     let mut cells: Vec<Cell> = vec![];
 
     // --- Exterior Boundary Cells (4) ---
-    // All four share the same base_pt; no x-advance between them.
+    // All four share the same base_pt; no x-advance between them. Only the Convection
+    // cell is an active film (h_ext, T_out, β — `apply_boundary_coefficients`); the
+    // Radiation / Sky / Ground cells are inert placeholders (htc = vtc = 0) kept so the
+    // cell layout and the output column indices stay stable: the deck's side-2
+    // coefficient is convective only, side-2 radiation arrives through `qWG2`.
     let ext_con_cell = Cell::new(
         CellType::Boundary(Boundary::Convection, BoundaryLocation::Exterior),
         get_origin(*base_pt, boundary_cell_size),
