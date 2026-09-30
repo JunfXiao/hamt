@@ -26,9 +26,10 @@ use super::settings::{PiControllerSettings, RhRate, TempRate};
 /// stored in the wall.
 #[derive(Debug, Clone)]
 pub struct SubstepFluxAccumulator {
-    /// ∫ q_int dt  [J/m²]
+    /// ∫ q_int dt  [J/m²] — the TOTAL interior film heat flux (convective + longwave,
+    /// [`Surface::heat_flux`]), not the convective film alone.
     pub q_int_dt: ArealEnergyDensity<f64>,
-    /// ∫ q_ext dt  [J/m²]
+    /// ∫ q_ext dt  [J/m²] — the exterior film heat flux (the single convective film).
     pub q_ext_dt: ArealEnergyDensity<f64>,
     /// ∫ m_int dt  [kg/m²]
     pub m_int_dt: ArealMassDensity<f64>,
@@ -55,7 +56,8 @@ impl SubstepFluxAccumulator {
         *self = Self::default();
     }
 
-    /// Time-averaged interior heat flux [W/m²].
+    /// Time-averaged TOTAL interior film heat flux [W/m²] (convective film to the air +
+    /// longwave film to TMR; `qWG1` excluded). Type 395 output 8 is this × area.
     pub fn avg_q_int(&self) -> EnergyFluxDensity<f64> {
         if self.total_time > 0.0 * seconds {
             self.q_int_dt / self.total_time
@@ -64,7 +66,8 @@ impl SubstepFluxAccumulator {
         }
     }
 
-    /// Time-averaged exterior heat flux [W/m²].
+    /// Time-averaged exterior film heat flux [W/m²] (`qWG2` excluded). Type 395 output 9 is
+    /// this × area.
     pub fn avg_q_ext(&self) -> EnergyFluxDensity<f64> {
         if self.total_time > 0.0 * seconds {
             self.q_ext_dt / self.total_time
@@ -368,6 +371,7 @@ impl HamtManager {
 
         {
             // Boundary fluxes at the END of this substep (surface_curr, just converged).
+            // The heat fluxes are the TOTAL film fluxes (interior: convective + longwave film).
             let q_int_end = self.surface_curr.heat_flux(BoundaryLocation::Interior)?;
             let q_ext_end = self.surface_curr.heat_flux(BoundaryLocation::Exterior)?;
             let m_int_end = self
