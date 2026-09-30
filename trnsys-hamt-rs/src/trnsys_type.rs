@@ -799,7 +799,7 @@ impl TrnSysType {
             manager.boundary_condition = BoundaryCondition::from_trnsys_inputs(&input_values);
 
             debug!(
-                "Time = {}, bc: \n{:#?}",
+                "Time = {}, bc: {:?}",
                 get_simulation_time(),
                 manager.boundary_condition
             );
