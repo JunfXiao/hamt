@@ -176,9 +176,9 @@ dependencies = [
 
 [[package]]
 name = "diman"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc2e5d605b325d3ee5e1ae397bc443327314843f2b10e594d80622665034c56d"
+checksum = "bc0d7757205c64e5bc27792926a7885e63739f5d1133c20e1fc4116779826552"
 dependencies = [
  "diman_lib",
  "diman_unit_system",
@@ -187,18 +187,18 @@ dependencies = [
 
 [[package]]
 name = "diman_lib"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf9739004e5a32a01e0fec56dc0d06ed78cc135c3f854ee2373b844f3c74cc9b"
+checksum = "7c8f350e6e911d78537baad502370000192d45ba28b262150463e178d8f09263"
 dependencies = [
  "num-traits",
 ]
 
 [[package]]
 name = "diman_unit_system"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73de846cb1a9737f3ea6764094cddb3feac0f4103dc1bbb2d47ba337f94a371f"
+checksum = "b4f8378b86cfcc4151f6273443ca8964cb741df2c2e89da6cc48cf5f272e5780"
 dependencies = [
  "diman_lib",
  "proc-macro2",
