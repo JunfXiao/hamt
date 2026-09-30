@@ -8,6 +8,134 @@ use crate::{
     physics::geometry::{Pt3D, Size3D},
 };
 
+/// Hard ceiling on the per-`factor` growth-ratio cap `r_max(factor)` used by
+/// [`geometric_norm_pos`]. The two-sided geometric grading grows each cell by a
+/// factor `r` relative to its inward neighbour. `r` is no longer a fixed
+/// function of `factor`; it is SOLVED so the first cell hits a target size (see
+/// [`geometric_norm_pos`]), then CAPPED at the legacy fixed-ratio formula
+/// `r_max(factor) = 1 + factor·(MAX - 1)`. This constant is the `factor = 1`
+/// end of that cap. Capping `r` keeps the size jump between adjacent cells
+/// modest (a finite-volume accuracy concern — large size ratios degrade the
+/// second-order spatial truncation). 1.5 (a 50 % max growth per cell) resolves
+/// the EN 15026 wetting front while keeping adjacent ratios bounded; values in
+/// [1.3, 1.6] behave similarly. Because the cap equals the legacy ratio, the
+/// solved-ratio grid is a strict refinement of the legacy grid: identical
+/// wherever the solve saturates at `r_max(factor)` (low/moderate n, where the
+/// legacy grid did not underflow), and only finer below the cap at high n
+/// (where the legacy fixed-ratio grid underflowed exponentially).
+const GRID_GROWTH_RATIO_MAX: f64 = 1.5;
+
+/// Most-aggressive target for the FIRST (end) cell, expressed as a fraction of
+/// the uniform cell width `1/n`. `factor = 0` maps to fraction `1.0` (uniform);
+/// `factor -> 1` maps to this floor (tightest near-surface/interface
+/// clustering). The first cell is then `frac/n` of the layer thickness, so it
+/// shrinks LINEARLY in `1/n` as the cell count grows — there is no exponential
+/// end-cell underflow.
+///
+/// Calibration: reproduces the EN 15026 benchmark's existing first-cell size at
+/// `n = 60`, `factor = 0.7`. The old fixed-ratio grid had total
+/// `Σ = 46440 ⇒ frac = 60/46440 ≈ 1.29e-3`; matching that means
+/// `FLOOR^0.7 ≈ 1.29e-3 ⇒ FLOOR ≈ 7.5e-5`.
+const FIRST_CELL_FRACTION_FLOOR: f64 = 7.5e-5;
+
+/// Freeze guard — hard ceiling on cell divisions per material layer. The fully
+/// implicit solver is unconditionally stable, so this is a COMPUTE/MEMORY ceiling
+/// (annual TRNSYS cost scales with total cell count × substeps × outer iterations),
+/// NOT an accuracy clamp: exceeding it is a hard, explicit error — never a silent
+/// reduction of the requested resolution (unlike the removed adj_length/max_div).
+const MAX_DIVS_PER_LAYER: usize = 500;
+/// Soft threshold: a large-but-runnable per-layer division count is warned (not rejected).
+const WARN_DIVS_PER_LAYER: usize = 250;
+/// Freeze guard — hard ceiling on the total material divisions in one x-column.
+const MAX_CELLS_TOTAL: usize = 2500;
+/// Soft threshold: a large-but-runnable total is warned (not rejected).
+const WARN_CELLS_TOTAL: usize = 1250;
+
+/// `Σ_{j=0}^{n-1} r^min(j, n-1-j)` — the unnormalized total layer length for a
+/// two-sided symmetric geometric grading with adjacent-cell ratio `r`.
+fn geometric_total(n: usize, r: f64) -> f64 {
+    (0..n).map(|j| r.powi(j.min(n - 1 - j) as i32)).sum()
+}
+
+/// Largest `r` in `(1, r_max]` with
+/// `geometric_total(n, r) ~= target_total` (the total is monotone increasing in
+/// `r`). If even `r = r_max` can't reach `target_total` (too few cells to cluster
+/// that hard), return `r_max` (clustering is accuracy-capped — correct, benign).
+fn solve_growth_ratio(n: usize, target_total: f64, r_max: f64) -> f64 {
+    let hi = r_max;
+    if geometric_total(n, hi) <= target_total {
+        return hi;
+    }
+    let (mut lo, mut hi) = (1.0_f64, r_max);
+    for _ in 0..100 {
+        let mid = 0.5 * (lo + hi);
+        if geometric_total(n, mid) < target_total {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    hi
+}
+
+/// Normalized boundary position `p(i)` in `[0,1]` for `i` in `0..=n`, two-sided
+/// symmetric geometric clustering.
+///
+/// `factor` in `[0,1]`: `0` = uniform; `->1` = stronger clustering at BOTH ends.
+/// Because `build_x_column` applies this per material layer, clustering at both
+/// ends of every layer fines the exterior/interior wall surfaces AND every
+/// internal layer interface.
+///
+/// Parameterization (target-fraction -> solved-ratio): rather than fixing the
+/// adjacent-cell growth ratio `r` from `factor` directly, we TARGET a first-cell
+/// SIZE as a fraction of the uniform cell `1/n` — `factor = 0` -> fraction `1.0`
+/// (uniform), `factor -> 1` -> [`FIRST_CELL_FRACTION_FLOOR`] — and then SOLVE for
+/// the geometric ratio `r` that yields it. The solved `r` is CAPPED at the
+/// legacy fixed-ratio formula `r_max(factor) = 1 + factor·([`GRID_GROWTH_RATIO_MAX`] - 1)`,
+/// which makes this scheme a strict refinement of the legacy grid: identical
+/// wherever the solve saturates at `r_max(factor)` (the legacy ratio — low/moderate
+/// `n`, where the legacy grid did not underflow), and only finer below the cap at
+/// high `n`. The first cell is therefore `frac/n` of the layer, which shrinks
+/// LINEARLY in `1/n` as the cell count grows: NO exponential end-cell underflow
+/// (the old fixed-`r` scheme made the end cell `~1/r^(n/2)`, underflowing to
+/// sub-nanometre at high `n`). The solved `r -> 1` as `n` grows.
+///
+/// Properties: `p(0)=0`, `p(n)=1`, strictly increasing, and symmetric
+/// (`p(i) = 1 - p(n-i)`). `O(n)` per call — the grid is built once with small
+/// `n`, so this is not a hot path.
+fn geometric_norm_pos(i: usize, n: usize, factor: f64) -> f64 {
+    if n == 0 {
+        return 0.0;
+    }
+    if i == 0 {
+        return 0.0;
+    }
+    if i >= n {
+        return 1.0;
+    }
+    if factor <= 1e-6 {
+        return i as f64 / n as f64; // uniform
+    }
+
+    // Target first-cell fraction of the uniform cell (1/n): factor 0 -> 1.0
+    // (uniform), factor -> 1 -> FIRST_CELL_FRACTION_FLOOR. Solve for the growth
+    // ratio that yields it, so the first cell is `frac/n` (linear in 1/n — no
+    // exponential underflow as n grows).
+    let frac = FIRST_CELL_FRACTION_FLOOR.powf(factor.clamp(0.0, 1.0));
+    let target_total = n as f64 / frac; // first cell (normalized) = 1/target_total = frac/n
+    // Cap the solved ratio at the old fixed-ratio formula r_max(factor), so this grid equals the legacy grid wherever the legacy grid did not underflow (low/moderate n); it only refines below the cap at high n (where the legacy grid underflowed exponentially).
+    let r_max = 1.0 + factor.clamp(0.0, 1.0) * (GRID_GROWTH_RATIO_MAX - 1.0);
+    let r = solve_growth_ratio(n, target_total, r_max);
+
+    // Relative size of cell j (j in 0..n): smallest at the two ends (j=0 and
+    // j=n-1), largest in the middle — symmetric about the layer centre.
+    let size = |j: usize| -> f64 { r.powi(j.min(n - 1 - j) as i32) };
+
+    let total: f64 = (0..n).map(size).sum();
+    let partial: f64 = (0..i).map(size).sum();
+    partial / total
+}
+
 /// Build ONE x-column of cells (exterior boundary stack -> material layers ->
 /// interior boundary stack), advancing `base_pt.x` as it goes. `col_y`/`col_z`
 /// are the cross-section extents (y,z) used for EVERY cell in this column
@@ -79,57 +207,81 @@ pub(super) fn build_x_column(
         .into());
     }
 
+    let mut total_divs: usize = 0;
     for mat_arc in construction.layers.iter() {
         let mat_thickness_m = mat_arc.thickness;
         let div_len_m = settings.div_length;
 
-        // 1. Initial guess for divisions
-        let mut divs = mat_arc.num_div.unwrap_or(
-            ((mat_thickness_m / div_len_m).value().ceil() as i32)
-                .max(settings.min_div)
-                .min(settings.max_div) as usize,
+        // 1. Number of divisions for this layer
+        let divs = mat_arc.num_div.unwrap_or(
+            ((mat_thickness_m / div_len_m).value().ceil() as i32).max(settings.n_div) as usize,
         );
 
-        // Helper closure to calculate the position of the i-th boundary (0..=divs)
-        // proportional to thickness (range 0.0 to 1.0)
-        let get_norm_pos = |i: usize, n: usize, factor: f64| -> f64 {
-            let frac = i as f64 / n as f64;
-            if factor <= 1e-6 {
-                return frac; // Pure Uniform
-            }
-
-            // Sine distribution formula (clusters points at 0.0 and 1.0)
-            // Range of inside term: -pi/2 to -3pi/2
-            // sin map: -1.0 to 1.0
-            // result map: 0.0 to 1.0
-            let sin_pos = ((std::f64::consts::PI * (-frac) - std::f64::consts::PI / 2.0).sin()
-                / 2.0)
-                - (-1.0 / 2.0); // sin(-pi/2) is -1
-
-            // Linear interpolation between Uniform and Sine
-            frac * (1.0 - factor) + sin_pos * factor
-        };
-
-        // 2. Safety Check: Ensure the smallest cell is not too small
-        // The smallest cell in Sine distribution is at the boundary (i=1)
-        while divs > 1 {
-            // Calculate the normalized length of the first cell (usually the smallest)
-            let norm_len_first =
-                get_norm_pos(1, divs, dist_factor) - get_norm_pos(0, divs, dist_factor);
-            let test_len = mat_thickness_m * norm_len_first;
-
-            if test_len > settings.adj_length {
-                break;
-            }
-            divs -= 1;
+        // --- Freeze guard (compute/memory ceiling, NOT an accuracy clamp) ---
+        if divs > MAX_DIVS_PER_LAYER {
+            return Err(crate::error::Error::InvalidInput(
+                format!("cell divisions for layer '{}'", mat_arc.name),
+                divs.to_string(),
+                crate::error::InvalidInputReason::Other(format!(
+                    "exceeds the per-layer ceiling of {MAX_DIVS_PER_LAYER} cells (freeze guard); \
+                     reduce n_div / num_div or increase div_length"
+                )),
+            )
+            .into());
+        }
+        if divs > WARN_DIVS_PER_LAYER {
+            tracing::warn!(
+                material = %mat_arc.name,
+                divs,
+                ceiling = MAX_DIVS_PER_LAYER,
+                "large per-layer cell count — TRNSYS runs will be slow; consider reducing n_div / num_div"
+            );
+        }
+        total_divs += divs;
+        if total_divs > MAX_CELLS_TOTAL {
+            return Err(crate::error::Error::InvalidInput(
+                "total material cell divisions per column".to_string(),
+                total_divs.to_string(),
+                crate::error::InvalidInputReason::Other(format!(
+                    "exceeds the total ceiling of {MAX_CELLS_TOTAL} cells (freeze guard); \
+                     reduce n_div / num_div or increase div_length"
+                )),
+            )
+            .into());
         }
 
-        // 3. Generate Cells
+        // Diagnostic: derived first-cell size and solved growth ratio for this
+        // layer (target-fraction -> solved-ratio parameterization).
+        if dist_factor > 1e-6 && divs > 1 {
+            let frac = FIRST_CELL_FRACTION_FLOOR.powf(dist_factor.clamp(0.0, 1.0));
+            let r_max = 1.0 + dist_factor.clamp(0.0, 1.0) * (GRID_GROWTH_RATIO_MAX - 1.0);
+            let r = solve_growth_ratio(divs, divs as f64 / frac, r_max);
+            let first_cell_m = (mat_thickness_m * geometric_norm_pos(1, divs, dist_factor))
+                .value_in(meter); // strip: tracing log field
+            tracing::debug!(
+                material = %mat_arc.name,
+                divs,
+                factor = dist_factor,
+                solved_ratio = r,
+                first_cell_m,
+                "geometric grid layer"
+            );
+        }
+
+        // The position of the i-th boundary (0..=divs) within this layer is given
+        // by `geometric_norm_pos` (two-sided symmetric geometric clustering),
+        // proportional to layer thickness (range 0.0 to 1.0). The solver is fully
+        // implicit (backward-Euler / block-Thomas / ADI) and therefore
+        // unconditionally stable, so there is no minimum-cell-size constraint:
+        // every requested division is honoured regardless of how small the
+        // resulting first cell is.
+
+        // 2. Generate Cells
         let mut prev_pos_m = 0.0 * meter; // Start at 0 relative to material layer
 
         for did in 1..=divs {
             // Calculate current boundary position
-            let norm_pos = get_norm_pos(did, divs, dist_factor);
+            let norm_pos = geometric_norm_pos(did, divs, dist_factor);
             let curr_pos_m = mat_thickness_m * norm_pos;
 
             // Length is difference between current boundary and previous boundary
@@ -149,6 +301,14 @@ pub(super) fn build_x_column(
             // Update base pointer for the NEXT cell
             base_pt.0 += length;
         }
+    }
+
+    if total_divs > WARN_CELLS_TOTAL {
+        tracing::warn!(
+            total_divs,
+            ceiling = MAX_CELLS_TOTAL,
+            "large total cell count per column — TRNSYS runs will be slow; consider reducing n_div / num_div"
+        );
     }
 
     // --- Interior Virtual Surface Cell ---
@@ -426,5 +586,308 @@ mod tests {
 
         // Side (y-min) face stays Adiabatic.
         assert_eq!(surface.face_bcs[FACE_Y_MIN], FaceBc::Adiabatic);
+    }
+
+    // ---- geometric_norm_pos distribution tests ----
+
+    #[test]
+    fn geometric_norm_pos_endpoints() {
+        for &n in &[1usize, 2, 3, 5, 8, 60, 480] {
+            for &f in &[0.0, 0.3, 0.5, 0.7, 0.9, 1.0] {
+                assert_eq!(geometric_norm_pos(0, n, f), 0.0, "p(0) for n={n}, f={f}");
+                assert_eq!(geometric_norm_pos(n, n, f), 1.0, "p(n) for n={n}, f={f}");
+                // Out-of-range i clamps to 1.0.
+                assert_eq!(geometric_norm_pos(n + 1, n, f), 1.0);
+            }
+        }
+        // Degenerate n == 0.
+        assert_eq!(geometric_norm_pos(0, 0, 0.5), 0.0);
+    }
+
+    #[test]
+    fn geometric_norm_pos_monotonic_increasing() {
+        for &n in &[2usize, 3, 5, 8, 17, 60] {
+            for &f in &[0.0, 0.4, 0.7, 0.9, 1.0] {
+                let mut prev = geometric_norm_pos(0, n, f);
+                for i in 1..=n {
+                    let cur = geometric_norm_pos(i, n, f);
+                    assert!(
+                        cur > prev,
+                        "not strictly increasing at i={i}, n={n}, f={f}: {prev} -> {cur}"
+                    );
+                    prev = cur;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn geometric_norm_pos_factor_zero_is_uniform() {
+        for &n in &[1usize, 2, 5, 13, 60] {
+            for i in 0..=n {
+                let expected = i as f64 / n as f64;
+                assert!(
+                    (geometric_norm_pos(i, n, 0.0) - expected).abs() < 1e-15,
+                    "factor=0 not uniform at i={i}, n={n}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn geometric_norm_pos_symmetric() {
+        for &n in &[2usize, 3, 5, 8, 17, 60] {
+            for &f in &[0.0, 0.3, 0.5, 0.7, 0.9, 1.0] {
+                for i in 0..=n {
+                    let p = geometric_norm_pos(i, n, f);
+                    let mirror = 1.0 - geometric_norm_pos(n - i, n, f);
+                    assert!(
+                        (p - mirror).abs() < 1e-12,
+                        "not symmetric at i={i}, n={n}, f={f}: {p} vs {mirror}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn geometric_norm_pos_clusters_at_ends() {
+        for &n in &[5usize, 8, 17, 60, 120] {
+            for &f in &[0.3, 0.5, 0.7, 0.9, 1.0] {
+                let first = geometric_norm_pos(1, n, f) - geometric_norm_pos(0, n, f);
+                // Middle cell: pick the cell straddling the layer centre.
+                let mid = n / 2;
+                let middle = geometric_norm_pos(mid + 1, n, f) - geometric_norm_pos(mid, n, f);
+                let uniform = 1.0 / n as f64;
+                assert!(
+                    first < middle,
+                    "first cell not finer than middle at n={n}, f={f}: {first} vs {middle}"
+                );
+                assert!(
+                    first < uniform,
+                    "first cell not finer than uniform at n={n}, f={f}: {first} vs {uniform}"
+                );
+            }
+        }
+    }
+
+    /// The first (end) cell must shrink ~LINEARLY in `1/n`, not exponentially:
+    /// the target-fraction -> solved-ratio parameterization makes the normalized
+    /// first cell `fc(n) = frac/n` with `frac` independent of `n` (in the
+    /// uncapped regime). The OLD fixed-ratio grid made `fc(n) ~ 1/r^(n/2)`, which
+    /// underflowed to ~1e-30 by n=480.
+    #[test]
+    fn geometric_norm_pos_no_exponential_underflow() {
+        let factor = 0.7;
+        let fc = |n: usize| geometric_norm_pos(1, n, factor); // normalized first-cell width
+
+        let ns = [60usize, 120, 240, 480];
+        let fcs: Vec<f64> = ns.iter().map(|&n| fc(n)).collect();
+        let prods: Vec<f64> = ns.iter().zip(&fcs).map(|(&n, &f)| n as f64 * f).collect();
+
+        // (a) n*fc(n) ~ constant (= frac): each of n=120,240,480 within 5% of n=60.
+        let ref_prod = prods[0];
+        for (k, &p) in prods.iter().enumerate().skip(1) {
+            let rel = (p - ref_prod).abs() / ref_prod;
+            assert!(
+                rel < 0.05,
+                "n*fc not constant: n={}, n*fc={p} vs ref(n=60)={ref_prod} (rel {rel})",
+                ns[k]
+            );
+        }
+
+        // (b) fc(480) must NOT underflow (old fixed-ratio grid would give ~1e-30).
+        assert!(
+            fcs[3] > 1e-7,
+            "fc(480)={} underflowed (expected linear ~frac/480)",
+            fcs[3]
+        );
+
+        // (c) FLOOR calibration reproduces the EN-15026 benchmark operating point:
+        //     fc(60) ~ old 2.15µm-equivalent normalized first cell (2.15e-5) within ~15%.
+        let expected_fc60 = 2.15e-5;
+        let rel60 = (fcs[0] - expected_fc60).abs() / expected_fc60;
+        assert!(
+            rel60 < 0.15,
+            "fc(60)={} not within 15% of calibration target {expected_fc60} (rel {rel60})",
+            fcs[0]
+        );
+    }
+
+    /// MULTI-LAYER INTERFACE refinement: build a 2-layer construction and assert
+    /// that material cells adjacent to the internal layer interface (and to the
+    /// outer surfaces) are finer in x than the cells in the middle of a layer.
+    #[test]
+    fn geometric_two_layer_interface_refinement() {
+        use crate::material::{MaterialLibrary, SurfaceVaporCoef};
+
+        // Reuse the single-layer test material twice to form a 2-layer stack.
+        // `build_test_construction` registers "GridTestMat" in its own library;
+        // build a fresh library here with two copies so we control divisions.
+        let base = build_test_construction();
+        let mat0 = base.layers[0].as_ref().clone();
+        let mut mat_a = mat0.clone();
+        mat_a.name = "LayerA".to_string();
+        mat_a.thickness = 0.1 * meter;
+        mat_a.num_div = Some(9);
+        mat_a.div_distribution_factor = 0.9;
+        let mut mat_b = mat0;
+        mat_b.name = "LayerB".to_string();
+        mat_b.thickness = 0.1 * meter;
+        mat_b.num_div = Some(9);
+        mat_b.div_distribution_factor = 0.9;
+
+        let lib = MaterialLibrary::new();
+        lib.add_material(mat_a).expect("add LayerA");
+        lib.add_material(mat_b).expect("add LayerB");
+        let surface_coeff = SurfaceVaporCoef {
+            is_external_const: false,
+            external_value: 1e-12,
+            is_internal_const: false,
+            internal_value: 1e-8,
+        };
+        lib.create_construction(
+            "TwoLayer".to_string(),
+            vec!["LayerA".to_string(), "LayerB".to_string()],
+            surface_coeff,
+        )
+        .expect("create two-layer construction");
+        let construction = lib.get_construction("TwoLayer").unwrap();
+
+        let mut settings = HamtSettings::default();
+        settings.div_distribution_factor = 0.9;
+        let bc = BoundaryCondition::default();
+
+        let surface = Surface::from_construction(
+            &settings,
+            construction,
+            "TwoLayerSurface".to_string(),
+            1.0 * square_meter,
+            &bc,
+        )
+        .expect("build surface");
+
+        // Collect the x-sizes of material cells in order (1-D: ny=nz=1).
+        let mat_sizes: Vec<f64> = surface
+            .cells
+            .iter()
+            .filter(|c| matches!(c.cell_type, CellType::Material(_)))
+            .map(|c| c.size.x().value_in(meter)) // strip: scalar comparison
+            .collect();
+
+        assert_eq!(mat_sizes.len(), 18, "expected 9 + 9 material cells");
+
+        // Layer A spans indices 0..9, Layer B spans 9..18 (each 9 cells).
+        // With two-sided clustering, the smallest cells are at the four faces:
+        //   - exterior surface (cell 0),
+        //   - interface, layer-A side (cell 8, last of A),
+        //   - interface, layer-B side (cell 9, first of B),
+        //   - interior surface (cell 17).
+        // The largest cells are in the middle of each layer (cell 4 and cell 13).
+        let mid_a = mat_sizes[4];
+        let mid_b = mat_sizes[13];
+
+        // Cells adjacent to the internal interface (A side = idx 8, B side = idx 9).
+        assert!(
+            mat_sizes[8] < mid_a,
+            "interface (A-side) cell {} not finer than layer-A middle {}",
+            mat_sizes[8],
+            mid_a
+        );
+        assert!(
+            mat_sizes[9] < mid_b,
+            "interface (B-side) cell {} not finer than layer-B middle {}",
+            mat_sizes[9],
+            mid_b
+        );
+        // Outer surface cells are also fine.
+        assert!(
+            mat_sizes[0] < mid_a,
+            "exterior surface cell not finer than layer-A middle"
+        );
+        assert!(
+            mat_sizes[17] < mid_b,
+            "interior surface cell not finer than layer-B middle"
+        );
+    }
+
+    // ---- Freeze-guard tests (compute/memory ceiling, NOT accuracy clamp) ----
+
+    /// Build an `n_layers`-layer construction; every layer is a clone of the test
+    /// material with `num_div = Some(divs_per_layer)`. No solve — grid only.
+    fn build_construction_with_divs(
+        n_layers: usize,
+        divs_per_layer: usize,
+    ) -> Arc<Construction> {
+        let base = build_test_construction();
+        let mat0 = base.layers[0].as_ref().clone();
+
+        let lib = MaterialLibrary::new();
+        let mut layer_names = Vec::with_capacity(n_layers);
+        for i in 0..n_layers {
+            let mut mat = mat0.clone();
+            mat.name = format!("FreezeLayer{i}");
+            mat.thickness = 0.1 * meter;
+            mat.num_div = Some(divs_per_layer);
+            layer_names.push(mat.name.clone());
+            lib.add_material(mat).expect("add layer material");
+        }
+        let surface_coeff = SurfaceVaporCoef {
+            is_external_const: false,
+            external_value: 1e-12,
+            is_internal_const: false,
+            internal_value: 1e-8,
+        };
+        lib.create_construction("FreezeConstruction".to_string(), layer_names, surface_coeff)
+            .expect("create construction");
+        lib.get_construction("FreezeConstruction").unwrap()
+    }
+
+    fn build_freeze_surface(construction: Arc<Construction>) -> Result<Surface> {
+        let settings = HamtSettings::default();
+        let bc = BoundaryCondition::default();
+        Surface::from_construction(
+            &settings,
+            construction,
+            "FreezeSurface".to_string(),
+            1.0 * square_meter,
+            &bc,
+        )
+    }
+
+    /// A single layer just over the per-layer ceiling is rejected; exactly at the
+    /// ceiling is accepted.
+    #[test]
+    fn freeze_guard_rejects_oversized_layer() {
+        // 501 > 500 -> hard error.
+        let over = build_construction_with_divs(1, MAX_DIVS_PER_LAYER + 1);
+        let err = build_freeze_surface(over).expect_err("oversized layer must error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("freeze guard") && msg.contains("per-layer ceiling"),
+            "error should name the freeze guard / per-layer ceiling, got: {msg}"
+        );
+
+        // Exactly 500 -> ok (single layer, total = 500 <= 2500).
+        let at = build_construction_with_divs(1, MAX_DIVS_PER_LAYER);
+        build_freeze_surface(at).expect("layer count exactly at ceiling must build");
+    }
+
+    /// Per-layer counts each within the per-layer ceiling, but their sum exceeds
+    /// the total ceiling -> hard error naming the total ceiling.
+    /// 6 layers × 500 = 3000 > 2500 (each layer 500 <= 500).
+    #[test]
+    fn freeze_guard_rejects_oversized_total() {
+        let over = build_construction_with_divs(6, MAX_DIVS_PER_LAYER);
+        let err = build_freeze_surface(over).expect_err("oversized total must error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("freeze guard") && msg.contains("total ceiling"),
+            "error should name the freeze guard / total ceiling, got: {msg}"
+        );
+
+        // A total exactly at the ceiling (5 layers × 500 = 2500) is accepted.
+        let at = build_construction_with_divs(5, MAX_DIVS_PER_LAYER);
+        build_freeze_surface(at).expect("total exactly at ceiling must build");
     }
 }

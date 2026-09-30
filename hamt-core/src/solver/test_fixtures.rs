@@ -111,8 +111,7 @@ pub(crate) fn build_fixture_manager(n_div: usize) -> HamtManager {
 
     let settings = {
         let mut s = crate::config::HamtSettings::default();
-        s.min_div = n_div as i32;
-        s.max_div = n_div as i32;
+        s.n_div = n_div as i32;
         s.coupled_heat_moisture_enabled = true;
         s
     };
@@ -266,8 +265,7 @@ pub(crate) fn build_fixture_manager_3d(
     };
 
     let settings = crate::config::HamtSettings {
-        min_div: n_div_x as i32,
-        max_div: n_div_x as i32,
+        n_div: n_div_x as i32,
         coupled_heat_moisture_enabled: true,
         ..crate::config::HamtSettings::default()
     };
@@ -422,8 +420,7 @@ pub(crate) fn build_fixture_manager_2d(
     };
 
     let settings = crate::config::HamtSettings {
-        min_div: n_div_x as i32,
-        max_div: n_div_x as i32,
+        n_div: n_div_x as i32,
         coupled_heat_moisture_enabled: true,
         ..crate::config::HamtSettings::default()
     };

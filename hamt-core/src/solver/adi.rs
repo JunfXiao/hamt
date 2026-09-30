@@ -210,7 +210,7 @@ pub(crate) fn assemble_line_sweep(
             phioosum,
             phiorsum: 0.0 * kg_per_s,
         };
-        let inertia = Surface::cell_inertia(idx[0], cell_curr);
+        let inertia = Surface::cell_inertia(idx[0], cell_curr, cell_prev);
         let sources = surface.cell_sources(idx, surface, bc);
 
         let (block, (b_t0, b_p0)) =
@@ -398,7 +398,7 @@ impl Surface {
                 phioosum,
                 phiorsum: 0.0 * kg_per_s,
             };
-            let inertia = Surface::cell_inertia(idx[0], cell_curr);
+            let inertia = Surface::cell_inertia(idx[0], cell_curr, cell_prev);
             let sources = self.cell_sources(idx, self, bc);
 
             let (block, (b_t0, b_p0)) = Surface::build_cell_block(

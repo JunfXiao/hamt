@@ -49,9 +49,27 @@ const CROSS_LINE_TOL_W: f64 = 1e-6; // kg/m3
 // 3-D comparison helpers.
 // ---------------------------------------------------------------------------
 
-/// Read a material-cell quantity along the `(j, k)` line at the depth nearest
-/// `depth_m`. Returns (value, [i,j,k]). Mirrors `cell_value_at_depth_row` in
-/// `adi_2d.rs` but takes explicit `j` AND `k` indices.
+/// Read a material-cell quantity along the `(j, k)` line at `depth_m`,
+/// **x-interpolated** to match the 1-D EN-15026 benchmark (`compare_results`),
+/// which samples via `Surface::interpolate_at_depth` (linear interpolation
+/// between the bracketing cell centres, clamped — no extrapolation — outside the
+/// material range). Returns (value, [i,j,k]) where the index is the nearest
+/// material cell on the line (diagnostic only). Mirrors `cell_value_at_depth_row`
+/// in `adi_2d.rs` but takes explicit `j` AND `k` indices.
+///
+/// Why interpolate: on the geometric grid (clustered at layer faces, coarse in
+/// the interior) nearest-cell sampling reads a quantization-offset value at
+/// interior / near-front depths; interpolation removes that offset so a
+/// (y,z)-uniform wall reproduces the 1-D reference exactly (same fix as the 2-D
+/// gate, 5170366).
+///
+/// The x-interpolation is done here on the requested line itself rather than via
+/// `Surface::interpolate_at_point` with a (y,z)-pinned target: that routine's y/z
+/// bracketing (`compute_interpolation_weights::axis_coords`) probes cells
+/// `[0,k,0]` / `[0,0,k]`, i.e. x-index 0 = an exterior Boundary cell, which is
+/// never `Material`, so for ny>1 / nz>1 it degenerates to line (0,0). Using it
+/// here would turn the per-line and cross-line uniformity checks in `compare_3d`
+/// into a vacuous self-comparison.
 fn cell_value_at_depth_line<F, const D: Dimension>(
     surface: &hamt_core::surface::Surface,
     depth_m: f64,
@@ -62,27 +80,52 @@ fn cell_value_at_depth_line<F, const D: Dimension>(
 where
     F: Fn(&hamt_core::cell::Cell) -> Quantity<f64, D>,
 {
-    let dims = surface.cells.raw_dim();
-    let nx = dims[0];
-    let target = depth_m * meter;
-    let mut best: Option<([usize; 3], f64, f64)> = None; // (idx, dist, value)
+    let nx = surface.cells.raw_dim()[0];
+    // Material cells on this line in x order: (cell-centre x [m], value, [i,j,k]).
+    let mut pts: Vec<(f64, f64, [usize; 3])> = Vec::new();
     for i in 0..nx {
         let cell = &surface.cells[[i, j, k]];
         if !matches!(cell.cell_type, CellType::Material(_)) {
             continue;
         }
-        // strip: scalar nearest-cell distance compare in metres
-        let dist = (cell.origin.x().value_in(meter) - target.value_in(meter)).abs();
-        let take = match best {
-            Some((_, best_dist, _)) => dist < best_dist,
-            None => true,
-        };
-        if take {
-            best = Some(([i, j, k], dist, f(cell).value_unchecked()));
-        }
+        // strip: scalar x-coordinate [m] for the bracket search / distance compare
+        pts.push((
+            cell.origin.x().value_in(meter),
+            f(cell).value_unchecked(),
+            [i, j, k],
+        ));
     }
-    let (idx, _, value) = best.expect("no material cell on line");
-    (value, idx)
+    assert!(!pts.is_empty(), "no material cell on line ({j},{k})");
+
+    // Nearest cell (diagnostic index only).
+    let nearest = pts
+        .iter()
+        .min_by(|a, b| {
+            (a.0 - depth_m)
+                .abs()
+                .partial_cmp(&(b.0 - depth_m).abs())
+                .unwrap()
+        })
+        .map(|p| p.2)
+        .unwrap();
+
+    // Linear interpolation between the bracketing cell centres; clamp to the end
+    // cell outside the material range (same semantics as the x-axis of
+    // `Surface::compute_interpolation_weights`).
+    let last = pts.len() - 1;
+    let value = if depth_m <= pts[0].0 {
+        pts[0].1
+    } else if depth_m >= pts[last].0 {
+        pts[last].1
+    } else {
+        let lo = pts.iter().rposition(|p| p.0 <= depth_m).unwrap();
+        let (x0, v0, _) = pts[lo];
+        let (x1, v1, _) = pts[lo + 1];
+        let span = x1 - x0;
+        let frac = if span > 0.0 { (depth_m - x0) / span } else { 0.0 };
+        (1.0 - frac) * v0 + frac * v1
+    };
+    (value, nearest)
 }
 
 /// Compare a 3-D uniform surface against the 1-D reference at `duration_day`,
@@ -244,10 +287,10 @@ fn adi_3d_uniform_reduces_to_1d() -> Result<()> {
     settings.max_iterations = 3000;
     settings.temp_convergence_tolerance = 1e-6 * kelvin;
     settings.rh_convergence_tolerance = 1e-4 * dimensionless;
-    settings.max_div = 50;
-    settings.min_div = 20;
+    settings.n_div = 20;
     settings.div_length = 1e-5 * meter;
-    settings.adj_length = 1e-4 * meter;
+    // Match the 1-D benchmark's near-surface clustering (geometric, factor 0.7) so the wetting front is resolved to the EN-15026 reference.
+    settings.div_distribution_factor = 0.7;
     settings.min_relaxation_factor = 1.0;
     settings.solver_method = SolverMethod::Adi;
 
@@ -512,10 +555,10 @@ fn adi_3d_nynz1_routes_to_1d() -> Result<()> {
     settings.max_iterations = 3000;
     settings.temp_convergence_tolerance = 1e-6 * kelvin;
     settings.rh_convergence_tolerance = 1e-4 * dimensionless;
-    settings.max_div = 50;
-    settings.min_div = 20;
+    settings.n_div = 20;
     settings.div_length = 1e-5 * meter;
-    settings.adj_length = 1e-4 * meter;
+    // Match the 1-D benchmark's near-surface clustering (geometric, factor 0.7) so the wetting front is resolved to the EN-15026 reference.
+    settings.div_distribution_factor = 0.7;
     settings.min_relaxation_factor = 1.0;
     settings.solver_method = SolverMethod::Adi;
 
@@ -1027,7 +1070,9 @@ fn adi_3d_spatial_order_richardson() -> Result<()> {
     // Primary Richardson estimate: levels[0..3] = [8, 16, 32].
     // Second estimate (informational): levels[1..4] = [16, 32, 64].
     // Cell sizes: 12.5, 6.25, 3.125, 1.5625 mm.
-    // adj_length = 1 mm < 3.125 mm (finest primary cell) → no safety-trim.
+    // The geometric cell-division model has no min-cell clamp (adj_length /
+    // max_div were removed): every `num_div` is honoured, and `factor = 0.0`
+    // (base_settings) makes `geometric_norm_pos` exactly uniform `i/n`.
     let levels: &[usize] = &[8, 16, 32, 64];
     let layer_thickness_m = 0.1_f64; // 0.1 m = 10 cm
 
@@ -1043,10 +1088,8 @@ fn adi_3d_spatial_order_richardson() -> Result<()> {
         let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
 
         let mut settings = base_settings.clone();
-        settings.max_div = (nd * 2) as i32;
-        settings.min_div = nd as i32;
+        settings.n_div = nd as i32;
         settings.div_length = 1e-6 * meter;
-        settings.adj_length = 1e-3 * meter; // 1 mm < 1.5625 mm (nd=64 cell)
 
         let mut mgr = HamtManager::new_3d(
             Some(settings),

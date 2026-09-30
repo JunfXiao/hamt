@@ -123,16 +123,13 @@ pub struct HamtSettings {
     pub max_latent_heat: Power<f64>,
     /// Cell division size [m]
     pub div_length: Length<f64>,
-    /// Minimum cell amount for a material after division
-    pub min_div: i32,
-    /// Maximum cell amount for a material after division
-    pub max_div: i32,
-    /// Allowed length for adjacent check [m]
-    pub adj_length: Length<f64>,
-    /// Cell division distribution factor.
-    ///
-    /// When set to 1.0, the cells are divided by sine distribution.
-    /// When set to 0.0, the cells are divided by linear distribution.
+    /// minimum number of divisions per material layer (a floor on the
+    /// div_length-derived count; per-material `num_div` overrides it entirely)
+    pub n_div: i32,
+    /// Clustering aggressiveness in [0,1]: 0 = uniform; ->1 = finer
+    /// near-surface/interface cells (internally converted to a target first-cell
+    /// size and a solved geometric growth ratio bounded by the FV accuracy cap).
+    /// The cell COUNT is set separately (num_div / n_div / div_length).
     pub div_distribution_factor: f64,
     /// user defined depth [m]
     pub user_defined_depth: Option<Length<f64>>,
@@ -187,9 +184,7 @@ impl Default for HamtSettings {
             rain_enabled: false,
             max_latent_heat: 100_000.0 * units::watts,
             div_length: 0.05 * units::meter,
-            min_div: 3,
-            max_div: 20,
-            adj_length: 0.00005 * units::meter,
+            n_div: 3,
             div_distribution_factor: 0.5,
             user_defined_depth: None,
             min_relaxation_factor: 0.1,

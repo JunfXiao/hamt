@@ -463,9 +463,9 @@ impl Surface {
                 .get(*idx)
                 .with_context(|| format!("Failed to get virtual cell {:?}", idx))?;
 
+            // Convective VAPOUR flux through the air film: vtc·(vp_air − vp_surf).
             let delta_vp: Pressure<f64> = boundary_conv_cell.cell_vp - surf.cell_vp;
             let cell_area: Area<f64> = surf.size.area_along(0);
-
             if vtc > ECLIPSE * kg_per_m2_s_pa {
                 accum_flux += vtc * delta_vp * cell_area;
                 total_area += cell_area;
@@ -613,24 +613,29 @@ impl Surface {
             0.0 * pa_s_per_kg
         };
 
-        let rh_r1: MassResistance<f64> =
-            if cell1.dw > 1e-20 * m2_per_s && cell1.dwd_phi > 1e-20 * kg_per_m3 {
-                dist1 / (overlap * cell1.dw * cell1.dwd_phi)
-            } else {
-                0.0f64 * s_per_kg
-            };
+        // Liquid (capillary) coupling exists ONLY when BOTH cells transport liquid.
+        // Ported from EnergyPlus HeatBalanceHAMTManager.cc:1482 (`if (rhr1 * rhr2 > 0)`)
+        // and Fortran Type395_module.f90:2608 (`IF(rhr1*rhr2>0)`): the liquid flux is
+        // included only if both half-resistances are nonzero, i.e. both cells have
+        // liquid transport. At an air↔material interface (one cell is non-liquid) the
+        // product is zero, so there is NO liquid coupling across that face.
+        let cell1_liquid = cell1.dw > 1e-20 * m2_per_s && cell1.dwd_phi > 1e-20 * kg_per_m3;
+        let cell2_liquid = cell2.dw > 1e-20 * m2_per_s && cell2.dwd_phi > 1e-20 * kg_per_m3;
         // dist2 is already axis-aware (extent_along(axis) * 0.5 above)
-        let rh_r2: MassResistance<f64> =
-            if cell2.dw > 1e-20 * m2_per_s && cell2.dwd_phi > 1e-20 * kg_per_m3 {
-                dist2 / (overlap * cell2.dw * cell2.dwd_phi)
-            } else {
-                0.0f64 * s_per_kg
-            };
+        let liquid: MassResistance<f64> = if cell1_liquid && cell2_liquid {
+            let rh_r1 = dist1 / (overlap * cell1.dw * cell1.dwd_phi);
+            let rh_r2 = dist2 / (overlap * cell2.dw * cell2.dwd_phi);
+            rh_r1 + rh_r2
+        } else {
+            // No coupling sentinel (matches the per-cell else-branch convention);
+            // callers' `r.liquid > 1e-13` guard then drops the liquid term.
+            0.0 * s_per_kg
+        };
 
         ResistanceTriple {
             therm: thermr1 + thermr2,
             vapor: vaporr1 + vaporr2,
-            liquid: rh_r1 + rh_r2,
+            liquid,
         }
     }
 
@@ -742,22 +747,19 @@ mod resistance_triple_tests {
             expected_liquid,
         );
 
-        // ── 3. liquid is zero when dw/dwd_phi are below the guard threshold ────
+        // ── 3. liquid is OPEN (zero coupling) when either cell lacks liquid transport ──
+        // Product guard (EnergyPlus rhr1*rhr2>0): liquid coupling exists only when BOTH
+        // cells transport liquid. With cell1.dw=0, the product is zero, so the liquid
+        // resistance is the no-coupling sentinel 0.0 — NOT cell2's half-resistance.
         // Clone a cell with dw = 0 (below 1e-20 m²/s guard).
         let mut cell_no_dw = cell1.clone();
         cell_no_dw.dw = 0.0 * m2_per_s;
         let triple_no_dw =
             Surface::calculate_resistance_triple(&cell_no_dw, cell2, bc.pressure_air, 0);
-        // rh_r1 should be zero; only rh_r2 contributes (if cell2.dw is above threshold).
-        let expected_no_dw = if cell2.dw > 1e-20 * m2_per_s && cell2.dwd_phi > 1e-20 * kg_per_m3 {
-            (cell2.size.x().abs() * 0.5) / (overlap * cell2.dw * cell2.dwd_phi)
-        } else {
-            0.0 * s_per_kg
-        };
         assert_eq!(
             triple_no_dw.liquid.value_unchecked(),
-            expected_no_dw.value_unchecked(),
-            "liquid should be zero for cell1 side when dw=0"
+            0.0,
+            "liquid must be 0 (no coupling) when cell1 lacks liquid transport (product guard)"
         );
 
         // Clone both cells with dw = 0.

@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "hamt-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "trnsys_hamt_rs"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "csv",

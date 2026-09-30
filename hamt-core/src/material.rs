@@ -107,10 +107,15 @@ pub struct Material {
     // Division Parameters
     pub num_div: Option<usize>,
 
-    /// Cell division distribution factor.
+    /// Cell division distribution factor, in `[0, 1]`.
     ///
-    /// When set to 1.0, the cells are divided by sine distribution.
-    /// When set to 0.0, the cells are divided by linear distribution.
+    /// Controls a two-sided symmetric GEOMETRIC clustering of cells within this
+    /// material layer (see `surface::grid::geometric_norm_pos`). `0.0` = uniform
+    /// (linear) spacing; increasing toward `1.0` clusters cells more tightly at
+    /// BOTH ends of the layer, so the layer's two faces (exterior/interior wall
+    /// surfaces or internal layer interfaces) get fine cells while the layer
+    /// interior stays coarse. The adjacent-cell growth ratio is bounded by
+    /// `GRID_GROWTH_RATIO_MAX` for accuracy.
     pub div_distribution_factor: f64,
 }
 

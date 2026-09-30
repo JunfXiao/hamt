@@ -18,8 +18,8 @@ use crossterm::{
 };
 use hamt_core::uom::dimensions::{Dimensionless, Temperature, Time};
 use hamt_core::uom::units::{
-    days, dimensionless, hours, j_per_kg_k, kelvin, kg_per_m2_s_pa, kg_per_m3, kilograms, m_per_s,
-    m2_per_s, meter, pascals, square_meter, w_per_m2_k, w_per_m_k,
+    days, dimensionless, hours, j_per_kg_k, kelvin, kg_per_m2_s, kg_per_m2_s_pa, kg_per_m3,
+    kilograms, m_per_s, m2_per_s, meter, pascals, square_meter, w_per_m2_k, w_per_m_k,
 };
 use hamt_core::{
     boundary::{BoundaryCondition, celsius_to_kelvin, kelvin_to_celsius},
@@ -56,6 +56,26 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
         // 1. Surface (0.1m): Fine grid for moisture profile
         // 2. Transition (1.0m): Intermediate grid
         // 3. Bulk (48.9m): Coarse grid for semi-infinite thermal mass
+        //
+        // The FIRST (0.1 m surface) layer carries the EN 15026 wetting front, which
+        // is concentrated in the first ~1 mm. The two-sided symmetric GEOMETRIC cell
+        // distribution (see surface::grid::geometric_norm_pos) clusters cells at BOTH
+        // ends of the layer, so the wetted exterior face AND the layer-1/layer-2
+        // interface get fine cells while the layer interior stays coarse. This is
+        // ~10x more cell-efficient than the old sine blend: the previous mesh needed
+        // 480 surface divisions (factor 0.9, ~22 µm first cell) to resolve the front;
+        // the geometric grading resolves it with just 60 divisions (factor 0.7,
+        // ~2.2 µm first cell, 25 cells inside the first 0.01 m). The other four layers
+        // (deep thermal mass) stay at 60 uniform-ish divisions.
+        //
+        // The previously coarse mesh only passed because a spurious surface-LIQUID flux
+        // through the air film — since removed by the EnergyPlus-style product guard in
+        // calculate_resistance_triple — was MASKING the under-resolution at depth 0.01 m.
+        // See doc/flux_offset_investigation.md.
+        //
+        // NOTE: the solver is fully implicit (backward-Euler / block-Thomas), hence
+        // unconditionally stable, so there is no min-cell constraint. All 60 requested
+        // first-layer divisions are honoured regardless of how small the first cell is.
         let library = create_library(
             20.0,
             0.5,
@@ -69,10 +89,11 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
         settings.max_iterations = 3000;
         settings.temp_convergence_tolerance = 1e-6 * kelvin;
         settings.rh_convergence_tolerance = 1e-4 * dimensionless;
-        settings.max_div = 50;
-        settings.min_div = 20;
+        settings.n_div = 20;
         settings.div_length = 1e-5 * meter;
-        settings.adj_length = 1e-4 * meter;
+        // Two-sided geometric clustering so the wetting front (first ~1 mm) is
+        // resolved at the exterior face (and the layer interface) with few cells.
+        settings.div_distribution_factor = 0.7;
         settings.min_relaxation_factor = 1.0;
         settings.solver_method = method;
 
@@ -635,8 +656,7 @@ fn run_total_release_with_timestep_and_solver(
     // splitter even with very small sub-dt.
     settings.temp_convergence_tolerance = 1e-3 * kelvin;
     settings.rh_convergence_tolerance = 1e-4 * dimensionless;
-    settings.min_div = 15;
-    settings.max_div = 30;
+    settings.n_div = 15;
     settings.min_relaxation_factor = 0.5;
     settings.solver_method = method;
 
@@ -801,6 +821,213 @@ fn test_total_release_invariance_block_tridiag() -> Result<()> {
             allowed_rel_err * 100.0,
         );
     }
+    Ok(())
+}
+
+// =====================================================================
+// Grid-convergence probe for moisture buffering (CORE SOLVER, no TRNSYS).
+//
+// Question: does increasing the number of material cells slow / damp the
+// moisture-release response (apparent "more inertia"), and does the response
+// CONVERGE as N grows? Direction of coarse-grid deviation tells us whether the
+// cell-count sensitivity lives in the core solver (a discretisation/lumping
+// effect) or must come from the TRNSYS coupling.
+//
+// Setup: single thin hygroscopic layer (EN 15026 material), interior face with
+// a finite β, exterior face effectively sealed. Equilibrate at RH 0.5, then
+// STEP the interior boundary RH to 0.3 and watch the wall dry out.
+//
+// Metrics per cell count N:
+//   - peak interior surface moisture flux [kg/m2/s] (Surface::moisture_flux)
+//   - total water released over 24 h [kg/m2]  (∫ flux dt at the interior face)
+//   - time-to-half-release [h]  (time to reach 50% of the 24 h release)
+//   - net wall water-content drop over 24 h [kg/m2] (water_total start-end)
+// =====================================================================
+
+struct ProbeResult {
+    n_cells_material: usize,
+    peak_flux_kg_m2_s: f64,
+    total_release_24h_kg_m2: f64,
+    time_to_half_h: f64,
+    water_drop_kg_m2: f64,
+}
+
+fn run_cell_count_probe(num_div: usize) -> Result<ProbeResult> {
+    use hamt_core::cell::{BoundaryLocation, CellType};
+
+    init_tracing();
+
+    // Single thin layer so the drying transient lives within the 24 h window.
+    // num_divs = Some(N) pins the material-cell count to exactly N regardless of
+    // div_length / n_div (see grid.rs::build_x_column: num_div takes
+    // precedence over the div_length-derived guess).
+    let library = create_library(20.0, 0.5, vec![0.02], vec![Some(num_div)]);
+    let construction = library.get_construction(CONSTRUCTION_NAME).unwrap();
+
+    let mut settings = HamtSettings::default();
+    settings.timestep = 0.1 * hours; // small macro-step: resolve the transient
+    settings.max_iterations = 1500;
+    settings.temp_convergence_tolerance = 1e-3 * kelvin;
+    settings.rh_convergence_tolerance = 1e-4 * dimensionless;
+    // num_div on the material wins; keep the floor low so it never raises it.
+    settings.n_div = 1;
+    settings.min_relaxation_factor = 0.5;
+    settings.solver_method = SolverMethod::BlockTridiagonal;
+
+    let bc_init = BoundaryCondition {
+        heat_transfer_coeff_ext: 1e-9 * w_per_m2_k,
+        heat_transfer_coeff_int: 5.0 * w_per_m2_k,
+        vapor_transport_coeff_ext: 1e-12 * kg_per_m2_s_pa,
+        vapor_transport_coeff_int: 1e-8 * kg_per_m2_s_pa,
+        temp_outside_air: celsius_to_kelvin(20.0),
+        temp_inside_air: celsius_to_kelvin(20.0),
+        temp_outside_air_moisture: celsius_to_kelvin(20.0),
+        temp_inside_air_moisture: celsius_to_kelvin(20.0),
+        rh_outside_air: 0.5 * dimensionless,
+        rh_inside_air: 0.5 * dimensionless,
+        ..Default::default()
+    };
+
+    let mut mgr = HamtManager::new(
+        Some(settings),
+        Some(bc_init),
+        construction,
+        "CellCountProbe".to_string(),
+        1.0 * square_meter,
+    )?;
+
+    // create_library imprints a near-infinite internal β; reset to realistic.
+    mgr.boundary_condition.vapor_transport_coeff_int = 1e-8 * kg_per_m2_s_pa;
+    mgr.boundary_condition.vapor_transport_coeff_ext = 1e-12 * kg_per_m2_s_pa;
+
+    let n_material = mgr
+        .surface_curr
+        .cells
+        .iter()
+        .filter(|c| matches!(c.cell_type, CellType::Material(_)))
+        .count();
+
+    // --- Equilibrate at RH 0.5 so we start from a clean fixed point. ---
+    let mut adap_state: AdaptiveState<()> = AdaptiveState::default();
+    let mut eq_time: Time<f64> = 0.0 * hours;
+    while eq_time < 48.0 * hours {
+        mgr.solve_timestep_adaptive(&mut adap_state, None)?;
+        mgr.tick_timestep()?;
+        eq_time += mgr.settings.timestep;
+    }
+
+    let area = mgr.surface_curr.area;
+    let water_start = mgr.surface_curr.report(&mgr.boundary_condition)?.water_total;
+
+    // --- STEP: drop interior boundary RH 0.5 -> 0.3, hold for 24 h. ---
+    mgr.boundary_condition.rh_inside_air = 0.3 * dimensionless;
+
+    let total_duration: Time<f64> = 24.0 * hours;
+    let mut elapsed: Time<f64> = 0.0 * hours;
+    let mut adap_state: AdaptiveState<()> = AdaptiveState::default();
+
+    let mut peak_flux: f64 = 0.0;
+    let mut cum_release_kg_m2: f64 = 0.0;
+    // (time_h, cumulative_release_kg_m2) samples for time-to-half interpolation.
+    let mut samples: Vec<(f64, f64)> = vec![(0.0, 0.0)];
+
+    while elapsed < total_duration {
+        mgr.solve_timestep_adaptive(&mut adap_state, None)?;
+        mgr.tick_timestep()?;
+        elapsed += mgr.settings.timestep;
+
+        // Interior surface moisture flux at end of this macro-step. Flux INTO
+        // the wall is positive; drying gives negative, so flip sign to read as
+        // released-per-area-per-second.
+        // strip: external-boundary scalar for table + comparison
+        let m_int = mgr
+            .surface_curr
+            .moisture_flux(BoundaryLocation::Interior, &mgr.boundary_condition)?
+            .value_in(kg_per_m2_s);
+        let release_rate = -m_int;
+        if release_rate > peak_flux {
+            peak_flux = release_rate;
+        }
+
+        // Time-weighted cumulative release via the substep accumulator (mass-
+        // conservative ∫q dt for this macro-step), independent of substep count.
+        // strip: raw kg from typed integral
+        let mass_in_kg = (adap_state.flux_accumulator.m_int_dt * area).value_in(kilograms);
+        // per unit area, released (positive when drying).
+        // strip: scalar area for per-m2 normalisation
+        let area_m2 = area.value_in(square_meter);
+        cum_release_kg_m2 += -mass_in_kg / area_m2;
+        samples.push((elapsed.value_in(hours), cum_release_kg_m2));
+    }
+
+    let water_end = mgr.surface_curr.report(&mgr.boundary_condition)?.water_total;
+    // strip: scalar masses for table
+    let water_drop_kg_m2 =
+        (water_start - water_end).value_in(kilograms) / area.value_in(square_meter);
+
+    // time-to-half: first sample crossing 50 % of total cumulative release.
+    let half = 0.5 * cum_release_kg_m2;
+    let mut time_to_half = f64::NAN;
+    for w in samples.windows(2) {
+        let (t0, c0) = w[0];
+        let (t1, c1) = w[1];
+        if c0 < half && c1 >= half {
+            time_to_half = if (c1 - c0).abs() > 0.0 {
+                t0 + (half - c0) / (c1 - c0) * (t1 - t0)
+            } else {
+                t1
+            };
+            break;
+        }
+    }
+
+    println!(
+        "  N(mat)={:>3} | peak flux={:>11.4e} kg/m2/s | release 24h={:>11.4e} kg/m2 | t_half={:>6.2} h | water drop={:>11.4e} kg/m2",
+        n_material, peak_flux, cum_release_kg_m2, time_to_half, water_drop_kg_m2
+    );
+
+    Ok(ProbeResult {
+        n_cells_material: n_material,
+        peak_flux_kg_m2_s: peak_flux,
+        total_release_24h_kg_m2: cum_release_kg_m2,
+        time_to_half_h: time_to_half,
+        water_drop_kg_m2,
+    })
+}
+
+#[test]
+fn test_zz_cell_count_convergence_probe() -> Result<()> {
+    println!("=== Grid-convergence probe: moisture release vs cell count (BlockTridiagonal) ===");
+    println!("    Single 0.02 m EN-15026 layer, interior RH step 0.5 -> 0.3, 24 h window");
+
+    let cell_counts = [3usize, 6, 12, 24, 48];
+    let mut results: Vec<ProbeResult> = Vec::new();
+    for &n in &cell_counts {
+        results.push(run_cell_count_probe(n)?);
+    }
+
+    // Treat the FINEST grid as the converged reference.
+    let reference = results.last().unwrap();
+    println!("\n=== Deviation vs finest grid (N={} material cells) ===", reference.n_cells_material);
+    println!(
+        "{:>5} | {:>14} | {:>14} | {:>10} | {:>14}",
+        "N", "peak flux %", "release24h %", "t_half %", "water drop %"
+    );
+    for r in &results {
+        let pf = (r.peak_flux_kg_m2_s - reference.peak_flux_kg_m2_s) / reference.peak_flux_kg_m2_s
+            * 100.0;
+        let rl = (r.total_release_24h_kg_m2 - reference.total_release_24h_kg_m2)
+            / reference.total_release_24h_kg_m2
+            * 100.0;
+        let th = (r.time_to_half_h - reference.time_to_half_h) / reference.time_to_half_h * 100.0;
+        let wd = (r.water_drop_kg_m2 - reference.water_drop_kg_m2) / reference.water_drop_kg_m2
+            * 100.0;
+        println!(
+            "{:>5} | {:>+13.2}% | {:>+13.2}% | {:>+9.2}% | {:>+13.2}%",
+            r.n_cells_material, pf, rl, th, wd
+        );
+    }
+
     Ok(())
 }
 
