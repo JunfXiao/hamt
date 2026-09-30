@@ -311,22 +311,24 @@ fn check_grid_independence(
 
 /// Production driver (adaptive substepper + flux accumulator), k = 1, 2, 4, 8.
 ///
-/// Tolerances: the reported flux is the substepper's composite-trapezoidal integral
-/// whereas the solver stores exactly `Σ flux_end·dt` (backward Euler); the
-/// per-macro-step difference `½·dt·(F_first − F_last)` is measured at ≤ 1.3 % of the
-/// exchanged mass in the transient windows and 0.00 g in the hold window, so 2 % is a
-/// bound on that quadrature effect — 1–2 orders of magnitude tighter than the
-/// 60–1000 % violations of the lagged-surface-node assembly. Grid independence is
-/// measured at ≤ 0.3 % (window sums) / 0.002 K / 0.0005 RH.
+/// The accumulator integrates the flux with the END-POINT rule `Σ flux_end·dt`,
+/// which is exactly what the backward-Euler update stores in the wall, so the
+/// reported interior flux must reproduce the stored-water change to the outer-loop
+/// exit tolerance: measured ≤ 0.02 % of the exchanged mass in every window (with the
+/// previous composite-trapezoidal accumulator the quadrature alone left 1.2 % /
+/// 0.8 % in the two transient windows). The limit is 0.5 %, i.e. > 20× the measured
+/// value and 2–3 orders of magnitude tighter than the 60–1000 % violations of the
+/// lagged-surface-node assembly. Grid independence is measured at ≤ 0.3 % (window
+/// sums) / 0.002 K / 0.0005 RH.
 #[test]
 fn split_lining_conserves_moisture_production_driver() -> Result<()> {
     println!("=== production driver (adaptive substepper), n_div = 30 ===");
     let reference = run_production_driver(1, 30)?;
-    check_conservation("k=1 (1x25 mm)", &reference, 0.02);
+    check_conservation("k=1 (1x25 mm)", &reference, 0.005);
     for k in [2usize, 4, 8] {
         let run = run_production_driver(k, 30)?;
         let label = format!("k={k} ({k}x{:.4} m)", 0.025 / k as f64);
-        check_conservation(&label, &run, 0.02);
+        check_conservation(&label, &run, 0.005);
         check_grid_independence(&label, &run, &reference, 0.01, 0.01, 0.002);
     }
     Ok(())
@@ -361,8 +363,110 @@ fn surface_cell_refinement_is_grid_independent() -> Result<()> {
     for n_div in [20, 40, 60] {
         let run = run_production_driver(1, n_div)?;
         let label = format!("k=1, n_div={n_div}");
-        check_conservation(&label, &run, 0.02);
+        check_conservation(&label, &run, 0.005);
         check_grid_independence(&label, &run, &reference, 0.01, 0.01, 0.002);
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Exposed exterior under a harsh outdoor climate
+// ---------------------------------------------------------------------------
+
+/// Hourly outdoor climate of hour `h`: T swings ≈ −10…+30 °C with a cold day every
+/// third day (abrupt day-to-day jumps), RH 30…99.9 % with a saturation spike every
+/// 7th hour — the sub-zero (ice-branch `P_sat`), near-saturation (steep isotherm,
+/// liquid transport) and rapid-transient regime the room-side scenario never visits.
+fn outdoor_at(h: usize) -> (f64, f64) {
+    let phase = 2.0 * std::f64::consts::PI * (h as f64 - 15.0) / 24.0;
+    let t = 10.0 + 14.0 * phase.cos() + if (h / 24) % 3 == 1 { -14.0 } else { 0.0 };
+    let rh =
+        (0.68 - 0.32 * phase.cos()).clamp(0.3, 1.0) + if h.is_multiple_of(7) { 0.2 } else { 0.0 };
+    (t, rh.clamp(0.3, 0.999))
+}
+
+/// Interior SEALED (h = 0, β ≈ 0), exterior exposed with the production
+/// coefficients (h_out = 64 kJ/(h m2 K), β_out = 1.244e-7 kg/(m2 s Pa)).
+fn exposed_exterior_inputs(t_out: f64, rh_out: f64) -> [f64; 14] {
+    [
+        20.0,
+        t_out,
+        50.0,
+        rh_out * 100.0,
+        0.0,
+        64.0,
+        0.0,
+        0.0,
+        1e-20,
+        1.244e-7,
+        0.0,
+        20.0,
+        0.0,
+        20.0,
+    ]
+}
+
+/// (Δstored, ∫exterior flux) in g over `hours` hourly macro steps.
+fn run_exposed_exterior(k: usize, hours_total: usize) -> Result<(f64, f64)> {
+    let (t0, rh0) = outdoor_at(0);
+    let mut settings = HamtSettings {
+        timestep: 1.0 * hours,
+        n_div: 30,
+        ..Default::default()
+    };
+    settings.min_relaxation_factor = 0.1;
+    let mut mgr = HamtManager::new(
+        Some(settings),
+        Some(BoundaryCondition::from_trnsys_inputs(
+            &exposed_exterior_inputs(t0, rh0),
+        )),
+        build_construction(k)?,
+        format!("exposed{k}"),
+        AREA_M2 * square_meter,
+    )?;
+    let mut adaptive: AdaptiveState<()> = AdaptiveState::default();
+    let area = mgr.surface_curr.area;
+    let w0 = stored_kg(&mgr)?;
+    let mut flux_kg = 0.0;
+    for h in 0..hours_total {
+        let (t, rh) = outdoor_at(h);
+        mgr.boundary_condition =
+            BoundaryCondition::from_trnsys_inputs(&exposed_exterior_inputs(t, rh));
+        adaptive.current_time = (h as f64) * hours;
+        mgr.solve_timestep_adaptive(&mut adaptive, None)?;
+        flux_kg += (adaptive.flux_accumulator.m_ext_dt * area).value_in(kilograms);
+        mgr.tick_timestep()?;
+    }
+    Ok(((stored_kg(&mgr)? - w0) * 1000.0, flux_kg * 1000.0))
+}
+
+/// The same mass balance on the EXTERIOR surface (four boundary cells behind one
+/// surface node, steep isotherm / liquid transport near saturation, sub-zero
+/// temperatures) under a harsh outdoor climate, for the gypsum lining split into 1
+/// and 8 sub-layers. Old assembly, 240 h: k = 1 stored +839 g vs ∫flux +445 g;
+/// k = 8 created 30.5 kg of water and took 5.4 min instead of 20 s. Fixed:
+/// imbalance < 0.1 % and k-independent.
+#[test]
+fn exposed_exterior_conserves_moisture_harsh_climate() -> Result<()> {
+    const HOURS: usize = 72;
+    println!("=== exposed exterior, harsh outdoor climate, {HOURS} h ===");
+    let (ds1, fl1) = run_exposed_exterior(1, HOURS)?;
+    let (ds8, fl8) = run_exposed_exterior(8, HOURS)?;
+    for (label, ds, fl) in [("k=1", ds1, fl1), ("k=8", ds8, fl8)] {
+        let imb = ds - fl;
+        let scale = ds.abs().max(fl.abs());
+        println!(
+            "  {label}: dStored {ds:>+9.2} g | int.flux {fl:>+9.2} g | imbalance {imb:>+7.2} g ({:>+5.2} %)",
+            100.0 * imb / scale
+        );
+        assert!(
+            imb.abs() <= 0.005 * scale + 0.05,
+            "{label}: exterior moisture balance violated: stored {ds:+.2} g vs reported flux              {fl:+.2} g (imbalance {imb:+.2} g)"
+        );
+    }
+    assert!(
+        (ds8 - ds1).abs() <= 0.01 * ds1.abs().max(ds8.abs()) + 0.05,
+        "identical layers give different walls under the exterior climate: k=1 {ds1:+.2} g vs          k=8 {ds8:+.2} g"
+    );
     Ok(())
 }

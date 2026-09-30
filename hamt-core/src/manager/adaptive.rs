@@ -19,6 +19,11 @@ use super::settings::{PiControllerSettings, RhRate, TempRate};
 /// Accumulates time-weighted boundary fluxes across adaptive substeps.
 /// After all substeps, dividing each `*_dt` field by `total_time` yields the
 /// time-averaged flux density over the macro-timestep.
+///
+/// Each `*_dt` is the END-POINT (right-Riemann) sum `Σ F_end·dt` over the accepted
+/// substeps — exactly what the backward-Euler update stores in the wall (see
+/// `advance_accepted_substep`), so `∫ m_int dt · A` equals the change of the water
+/// stored in the wall.
 #[derive(Debug, Clone)]
 pub struct SubstepFluxAccumulator {
     /// ∫ q_int dt  [J/m²]
@@ -336,11 +341,10 @@ impl HamtManager {
 
     /// ACCEPT: commit the substep. Refreshes the per-cell extrapolation rates from
     /// the accepted state, advances `substep_time` / `current_time`, accumulates the
-    /// boundary fluxes into the `SubstepFluxAccumulator` by a composite trapezoidal
-    /// rule in time (end-point / right-Riemann for the FIRST accepted substep — whose
-    /// macro-start left endpoint is the unreliable pre-BC-change left-limit — and
-    /// trapezoidal for substeps 2..N, whose start is the previous substep's exact
-    /// converged end), and rotates the accepted state into `surface_prev`.
+    /// boundary fluxes into the `SubstepFluxAccumulator` by the END-POINT
+    /// (right-Riemann) rule — the quadrature that is exact for the backward-Euler
+    /// update the solver performs — and rotates the accepted state into
+    /// `surface_prev`.
     fn advance_accepted_substep<T>(
         &mut self,
         adaptive_state: &mut AdaptiveState<T>,
@@ -373,34 +377,22 @@ impl HamtManager {
                 .surface_curr
                 .moisture_flux(BoundaryLocation::Exterior, &self.boundary_condition)?;
 
-            // Composite trapezoidal in time. For substeps 2..N within a macro-step the BC
-            // is constant, so surface_prev (this substep's start = the previous substep's
-            // converged end) gives the exact left endpoint and we average start & end. For
-            // the FIRST accepted substep, surface_prev still carries the PREVIOUS macro-
-            // step's boundary state (left-limit, pre-BC-change) — not a valid left endpoint
-            // (it can be ~0 after a BC step-change from rest, which would halve a single-
-            // substep integral), so we drop it and use the end-point (right-Riemann) for
-            // that first panel. The trapezoidal average is second-order in dt; this only
-            // sharpens the *reported* boundary-flux integral — solver state is unaffected.
-            if adaptive_state.flux_accumulator.total_time <= 0.0 * seconds {
-                adaptive_state.flux_accumulator.q_int_dt += q_int_end * dt_step;
-                adaptive_state.flux_accumulator.q_ext_dt += q_ext_end * dt_step;
-                adaptive_state.flux_accumulator.m_int_dt += m_int_end * dt_step;
-                adaptive_state.flux_accumulator.m_ext_dt += m_ext_end * dt_step;
-            } else {
-                let q_int_start = self.surface_prev.heat_flux(BoundaryLocation::Interior)?;
-                let q_ext_start = self.surface_prev.heat_flux(BoundaryLocation::Exterior)?;
-                let m_int_start = self
-                    .surface_prev
-                    .moisture_flux(BoundaryLocation::Interior, &self.boundary_condition)?;
-                let m_ext_start = self
-                    .surface_prev
-                    .moisture_flux(BoundaryLocation::Exterior, &self.boundary_condition)?;
-                adaptive_state.flux_accumulator.q_int_dt += (q_int_start + q_int_end) * dt_step * 0.5;
-                adaptive_state.flux_accumulator.q_ext_dt += (q_ext_start + q_ext_end) * dt_step * 0.5;
-                adaptive_state.flux_accumulator.m_int_dt += (m_int_start + m_int_end) * dt_step * 0.5;
-                adaptive_state.flux_accumulator.m_ext_dt += (m_ext_start + m_ext_end) * dt_step * 0.5;
-            }
+            // END-POINT (right-Riemann) quadrature for EVERY substep. The implicit-Euler
+            // update stores exactly `dt·F_end` in the wall: summed over all cells the
+            // interior fluxes cancel pairwise and what is left of the balance is the
+            // boundary flux evaluated at the END of the step. Reporting the composite
+            // trapezoid `dt·(F_start + F_end)/2` instead hands the zone `½·dt·(F_start −
+            // F_end)` more (or less) water/energy per substep than the wall actually
+            // took up — first order in dt, with the sign of the flux decay, so it
+            // creates water in every drying transient and destroys it in every wetting
+            // one (measured: up to 1.3 % of the exchanged mass on the production lining
+            // under a sharp heating step, 6.5 % on a harsh outdoor climate). The
+            // end-point sum makes ∫ flux dt equal the wall's stored-water change, so
+            // the wall↔zone coupling conserves mass. Solver state is unaffected.
+            adaptive_state.flux_accumulator.q_int_dt += q_int_end * dt_step;
+            adaptive_state.flux_accumulator.q_ext_dt += q_ext_end * dt_step;
+            adaptive_state.flux_accumulator.m_int_dt += m_int_end * dt_step;
+            adaptive_state.flux_accumulator.m_ext_dt += m_ext_end * dt_step;
             adaptive_state.flux_accumulator.total_time += dt_step;
         }
 
