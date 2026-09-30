@@ -52,13 +52,14 @@ impl Surface {
         // refresh produces the same result as the former x-only inline block).
         self.prepare_iteration_prologue(settings, bc, surface_curr)?;
 
-        // Assemble from `self`, not `surface_curr`: the BC and Virtual cells on
-        // `self` were just refreshed against the current iterate's surface
-        // temperature, while the same cells on `surface_curr` still reflect the
+        // Assemble from `self`, not `surface_curr`: the BC cells on `self` were
+        // just refreshed against the current iterate's surface temperature
+        // (h_rad), while the same cells on `surface_curr` still reflect the
         // previous iterate. Material-cell coefficients are identical between the
         // two (sync_state_from copied them and update_cell_properties is idempotent
-        // on that data), so this only swaps lagged BC/Virtual coefficients for
-        // current-iter ones — restoring near-Newton convergence.
+        // on that data). The massless Virtual (surface) nodes are not read at all:
+        // the assembler eliminates them implicitly (series conductance to the
+        // boundary cells), so the boundary coupling carries no iteration lag.
         let system = crate::solver::assembly::assemble_1d(self, surface_prev, bc, settings);
         let solution = crate::solver::block_tridiag::solve(
             &system.lower,
@@ -233,14 +234,14 @@ mod block_tridiag_tests {
         }
     }
 
-    /// Property: one orchestrator iteration must read BC and Virtual cell
-    /// state from `self` (just refreshed via `apply_boundary_coefficients`
-    /// and the virtual-cell update against the current-iterate material
-    /// state) — NOT from `surface_curr` (where those cells still reflect
-    /// the previous outer iteration). At convergence the two are equal,
-    /// but mid-iteration the lag matters: if the assembly reads
-    /// `surface_curr`, stale BC/Virtual coefficients leak into the linear
-    /// system and convergence drops from near-Newton to slow BlockJacobi.
+    /// Property: one orchestrator iteration must read BC cell state from
+    /// `self` (just refreshed via `apply_boundary_coefficients`) — NOT from
+    /// `surface_curr` (where those cells still reflect the previous outer
+    /// iteration) — and must not read the massless Virtual (surface) nodes at
+    /// all (the assembler eliminates them implicitly). At convergence the two
+    /// are equal, but mid-iteration the lag matters: if the assembly read
+    /// `surface_curr`, stale BC/Virtual coefficients would leak into the linear
+    /// system and convergence would drop from near-Newton to slow Picard.
     ///
     /// Test: build two runs that differ ONLY in the Virtual(Interior)
     /// cell state of `surface_curr` (the Virtual cell sits between

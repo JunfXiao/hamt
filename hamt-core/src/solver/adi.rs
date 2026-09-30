@@ -6,21 +6,49 @@
 //! [`crate::solver::assembly::assemble_1d`]:
 //!
 //! * **Along-axis** material neighbours (the previous/next cell on the same
-//!   line) are coupled *implicitly* via the off-diagonal blocks `upper`/`lower`.
-//! * **Cross-axis** material neighbours AND **boundary** neighbours are *lagged*:
-//!   their current-iterate value is treated as known and folded into the RHS,
-//!   exactly like `assemble_1d` folds boundary neighbours into the RHS. The
-//!   outer loop (`AdiStep` over x→y sweeps) iterates the cross-axis coupling to
+//!   line) are coupled *implicitly* via the off-diagonal blocks `upper`/`lower`,
+//!   INCLUDING the temperature dependence of the neighbour's vapour pressure
+//!   (see "Conservation" below).
+//! * **Cross-axis** material neighbours are *lagged*: their current-iterate
+//!   value is treated as known and folded into the RHS. The outer loop
+//!   (`AdiStep` over x→y sweeps) iterates the cross-axis coupling to
 //!   convergence.
+//! * The massless **surface (Virtual) node** between the first/last material cell
+//!   and the boundary cells is eliminated *implicitly* (series conductance, see
+//!   [`eliminate_surface_node`]); the boundary cells carry prescribed values
+//!   (Dirichlet) that go straight to the RHS.
 //!
 //! ## 1-D equivalence (the keystone invariant)
 //!
 //! On a 1-D wall (ny=1, nz=1) the single x-line has only axis-0 neighbours, so
 //! every material neighbour is an along-axis line neighbour (→ off-diagonal) and
-//! every boundary neighbour is lagged (→ RHS). The partition therefore collapses
-//! to `assemble_1d`'s material-vs-boundary partition, and
-//! `assemble_line_sweep(.., axis=0, &x_line)` reproduces `assemble_1d`
-//! field-by-field. This is pinned by the equivalence test below.
+//! every boundary/surface-node neighbour goes to the diagonal + RHS. The
+//! partition therefore collapses to `assemble_1d`'s material-vs-boundary
+//! partition, and `assemble_line_sweep(.., axis=0, &x_line)` reproduces
+//! `assemble_1d` field-by-field. This is pinned by the equivalence test below.
+//!
+//! ## Conservation of the linearised system
+//!
+//! Each outer iterate solves a LINEAR system. The moisture balance holds at every
+//! iterate — not just at the fixed point — only if that system is itself
+//! conservative, i.e. (a) the vapour flux across an internal interface is the same
+//! expression in the two cells' equations, and (b) the flux the boundary cell
+//! receives is the flux the reporting queries integrate. Two properties are
+//! therefore required of the assembly:
+//!
+//! 1. **Consistent (Newton) linearisation of `P_v = φ·P_sat(T)`.** Both cells of
+//!    an interface linearise `P_v^{k+1} ≈ P_sat(T^k)·φ^{k+1} + φ^k·P_sat'(T^k)·(T^{k+1}−T^k)`.
+//!    Dropping the neighbour's `T` term makes `F_ij + F_ji = −G_v·(φ_i P'_i ΔT_i +
+//!    φ_j P'_j ΔT_j) ≠ 0` — a spurious moisture source proportional to the last
+//!    iterate's `ΔT` and to the interface conductance `G_v ∝ 1/Δx`, i.e. it grows as
+//!    cells shrink. [`implicit_material_coupling`] carries the neighbour's `T` term.
+//! 2. **Implicit surface node.** Treating the massless Virtual node as a *lagged*
+//!    neighbour couples the surface cell to the previous iterate through the
+//!    half-cell conductance `G_1 ∝ 1/Δx_1` instead of the film conductance: the
+//!    Picard contraction factor becomes `≈ 1 − (h + G_in)/G_1 → 1` as the surface
+//!    cell shrinks, the step-size exit test fires long before convergence, and the
+//!    converged-looking state violates the mass balance. [`eliminate_surface_node`]
+//!    removes the lag exactly (Schur complement of the massless node).
 //!
 //! Strip discipline: typed quantities cross into raw f64 only inside the 2×2
 //! block / RHS construction (the linear-algebra kernel boundary), mirroring
@@ -29,28 +57,169 @@
 use std::collections::HashMap;
 
 use crate::boundary::BoundaryCondition;
+use crate::cell::{Cell, CellType};
 use crate::config::HamtSettings;
 use crate::surface::{NeighborSums, Surface};
 use crate::uom::constants::WATER_LATENT_HEAT;
-use crate::uom::dimensions::{MassFlux, ThermalConductance, VaporConductance};
+use crate::uom::dimensions::{
+    MassFlux, MassFluxPerTemperature, Power, SpecificEnergy, ThermalConductance, VaporConductance,
+};
 use crate::uom::units::{
-    dimensionless, j_per_kg, k_per_w, kelvin, kg_per_s, pa_s_per_kg, pascals, w_per_k, watts,
+    dimensionless, j_per_kg, k_per_w, kelvin, kg_per_s, kg_per_s_k, pa_s_per_kg, pascals, w_per_k,
+    watts,
 };
 
 use super::assembly::AssembledSystem;
 use super::block_2x2::Block2x2;
 
+/// Result of eliminating a massless Virtual (surface) node seen from ONE material
+/// cell: equivalent conductances to the boundary cells and the matching RHS terms.
+///
+/// The node has no storage, so its temperature and vapour pressure are the
+/// quasi-steady balance of the material cell `m` (conductance `g_m`, half-cell
+/// resistance) and the boundary cells `b_j` (conductances `g_j`, film
+/// resistances): `X_v = (g_m·X_m + Σ g_j·X_bj) / (g_m + Σ g_j)` for `X ∈ {T, P_v}`.
+/// The flux into `m` is `g_m·(X_v − X_m) = Σ_j g_eff,j·(X_bj − X_m)` with
+/// `g_eff,j = g_m·g_j / (g_m + Σ_k g_k)` — a series connection of the half cell
+/// with the (parallel) surface films. This is exactly the fixed point of the old
+/// lagged-node iteration, but without the lag.
+pub(crate) struct SurfaceNodeCoupling {
+    /// `Σ_j g_eff,j` thermal [W/K] → adds to the cell's `oorsum`.
+    pub cond_th: ThermalConductance<f64>,
+    /// `Σ_j g_eff,j` vapour [kg/(s·Pa)] → adds to the cell's `vpoosum`.
+    pub cond_vap: VaporConductance<f64>,
+    /// `Σ_j g_eff,j·T_bj` [W] → RHS of the energy balance.
+    pub rhs_th: Power<f64>,
+    /// `Σ_j g_eff,j·P_bj` [kg/s] → RHS of the moisture balance.
+    pub rhs_vap: MassFlux<f64>,
+}
+
+/// Eliminate the Virtual node `virtual_idx` that neighbours the material cell
+/// `material_idx`. `g_m_th` / `g_m_vap` are the material-cell↔node conductances
+/// (from [`Surface::calculate_resistance_triple`]). The node's OTHER neighbours are
+/// its boundary cells; their prescribed `(T, P_v)` and film conductances are read
+/// from `surface`. See [`SurfaceNodeCoupling`].
+pub(crate) fn eliminate_surface_node(
+    surface: &Surface,
+    virtual_idx: [usize; 3],
+    material_idx: [usize; 3],
+    g_m_th: ThermalConductance<f64>,
+    g_m_vap: VaporConductance<f64>,
+    bc: &BoundaryCondition,
+) -> SurfaceNodeCoupling {
+    let node = &surface.cells[virtual_idx];
+
+    let mut g_th_sum: ThermalConductance<f64> = 0.0 * w_per_k;
+    let mut g_vap_sum: VaporConductance<f64> = 0.0 * kg_per_s / pascals;
+    let mut gt_sum: Power<f64> = 0.0 * watts; // Σ g_j·T_bj
+    let mut gp_sum: MassFlux<f64> = 0.0 * kg_per_s; // Σ g_j·P_bj
+
+    for b_idx in surface.axis_neighbors(virtual_idx, 0) {
+        if b_idx == material_idx {
+            continue;
+        }
+        let b = &surface.cells[b_idx];
+        if !b.is_boundary() {
+            continue;
+        }
+        // The node itself has zero thermal/vapour resistance, so the pair
+        // resistance is the boundary film (1/(h·A), 1/(β·A)).
+        let (therm_r, vapor_r) = Surface::calculate_resistance_pair(node, b, bc.pressure_air, 0);
+        if therm_r > 1e-12 * k_per_w {
+            let g: ThermalConductance<f64> = 1.0 / therm_r;
+            g_th_sum += g;
+            gt_sum += g * b.cell_temp;
+        }
+        if vapor_r > 1e-12 * pa_s_per_kg {
+            let g: VaporConductance<f64> = 1.0 / vapor_r;
+            g_vap_sum += g;
+            gp_sum += g * b.cell_vp;
+        }
+    }
+
+    // Series factor g_m / (g_m + Σ g_j); zero when nothing is connected.
+    let s_th = if g_m_th + g_th_sum > 0.0 * w_per_k {
+        g_m_th / (g_m_th + g_th_sum)
+    } else {
+        0.0 * dimensionless
+    };
+    let s_vap = if g_m_vap + g_vap_sum > 0.0 * kg_per_s / pascals {
+        g_m_vap / (g_m_vap + g_vap_sum)
+    } else {
+        0.0 * dimensionless
+    };
+
+    SurfaceNodeCoupling {
+        cond_th: s_th * g_th_sum,
+        cond_vap: s_vap * g_vap_sum,
+        rhs_th: s_th * gt_sum,
+        rhs_vap: s_vap * gp_sum,
+    }
+}
+
+/// Off-diagonal 2×2 block (plus linearisation-constant RHS terms) coupling a cell
+/// to a MATERIAL neighbour `n` that is solved implicitly in the same system.
+///
+/// Both cells of an interface must linearise `P_v = φ·P_sat(T)` identically,
+/// `P_v^{k+1} ≈ P_sat(T^k)·φ^{k+1} + φ^k·P_sat'(T^k)·(T^{k+1} − T^k)`, so the vapour
+/// flux `G_v·(P_v,n − P_v,i)` is the same number in both cells' balances (exact
+/// moisture conservation at every iterate). The cell's OWN `T` term is the
+/// `cross` entry of the diagonal block ([`Surface::build_cell_block`]); this is
+/// the matching NEIGHBOUR term. With `cross_n = G_v·φ_n^k·P_sat'(T_n^k)`:
+///
+/// ```text
+///   energy  row:  a = −G_th − L·cross_n   b = −L·G_v·P_sat,n        rhs −= L·cross_n·T_n^k
+///   moisture row: c = −cross_n            d = −(G_φ + G_v·P_sat,n)  rhs −=   cross_n·T_n^k
+/// ```
+pub(crate) struct MaterialCoupling {
+    pub block: Block2x2,
+    /// Constant to ADD to the energy RHS [W].
+    pub rhs_t: f64,
+    /// Constant to ADD to the moisture RHS [kg/s].
+    pub rhs_p: f64,
+}
+
+pub(crate) fn implicit_material_coupling(
+    cond_th: ThermalConductance<f64>,
+    cond_vapor: VaporConductance<f64>,
+    cond_phi: MassFlux<f64>,
+    l_eff: SpecificEnergy<f64>,
+    n: &Cell,
+) -> MaterialCoupling {
+    let cross_n: MassFluxPerTemperature<f64> = cond_vapor * n.cell_rh * n.d_psat_d_t;
+    // strip: linear-algebra kernel boundary
+    let inv_th = cond_th.value_in(w_per_k);
+    let inv_vapor = cond_vapor.value_in(kg_per_s / pascals);
+    let inv_phi = cond_phi.value_in(kg_per_s);
+    let l_eff_v = l_eff.value_in(j_per_kg);
+    let psat_n = n.vp_sat.value_in(pascals);
+    let cross_v = cross_n.value_in(kg_per_s_k);
+    let t_n = n.cell_temp.value_in(kelvin);
+    MaterialCoupling {
+        block: Block2x2 {
+            a: -inv_th - l_eff_v * cross_v,
+            b: -l_eff_v * inv_vapor * psat_n,
+            c: -cross_v,
+            d: -(inv_phi + inv_vapor * psat_n),
+        },
+        rhs_t: -l_eff_v * cross_v * t_n,
+        rhs_p: -cross_v * t_n,
+    }
+}
+
 /// Assemble the block-tridiagonal system for ONE material line parallel to
 /// `axis`. Reuses [`Surface::build_cell_block`] for each cell's diagonal +
 /// cell-local RHS. ALONG-axis material neighbours go to the off-diagonals
-/// (upper/lower by position in `line`); CROSS-axis material neighbours AND
-/// boundary neighbours are LAGGED into the RHS (their current-iterate value
-/// treated as known). `line` is the ordered list of `[i,j,k]` material cells
-/// along `axis` (one entry of [`Surface::material_lines_along`]).
+/// (upper/lower by position in `line`) with the neighbour's `T` dependence
+/// ([`implicit_material_coupling`]); CROSS-axis material neighbours are LAGGED
+/// into the RHS (their current-iterate value treated as known); the massless
+/// surface node is eliminated implicitly ([`eliminate_surface_node`]). `line` is
+/// the ordered list of `[i,j,k]` material cells along `axis` (one entry of
+/// [`Surface::material_lines_along`]).
 ///
 /// `surface` carries the freshly-prepared iteration state (material cells hold
-/// the current iterate's (T, φ); boundary/virtual cells were refreshed against
-/// that same iterate); `surface_prev` is the t-1 anchor for the inertial term.
+/// the current iterate's (T, φ); boundary cells were refreshed from the BC);
+/// `surface_prev` is the t-1 anchor for the inertial term.
 /// `update_cell_properties` must already have refreshed `vp_sat`, etc.
 pub(crate) fn assemble_line_sweep(
     surface: &Surface,
@@ -135,39 +304,50 @@ pub(crate) fn assemble_line_sweep(
                 0.0 * kg_per_s
             };
 
+            // ── Massless surface (Virtual) node: eliminate it IMPLICITLY ──────────
+            // The node carries no storage, so it is not an unknown of the system:
+            // it is folded into the cell as series conductances to the boundary
+            // cells (prescribed values → RHS). Lagging it instead (reading its
+            // previous-iterate T / P_v) couples the cell to its own previous
+            // iterate through the half-cell conductance ∝ 1/Δx and stalls the outer
+            // iteration on fine meshes (module docs, "Conservation").
+            if matches!(nbr_curr.cell_type, CellType::Virtual(_)) {
+                let e = eliminate_surface_node(surface, nbr_idx, idx, cond_th, cond_vapor, bc);
+                oorsum += e.cond_th;
+                vpoosum += e.cond_vap;
+                phioosum += cond_phi; // 0 across the air film (liquid product guard)
+                // strip: linear-algebra kernel boundary
+                let l_eff_v = l_eff.value_in(j_per_kg);
+                let rhs_th = e.rhs_th.value_in(watts);
+                let rhs_vap = e.rhs_vap.value_in(kg_per_s);
+                b_t_lag += rhs_th + l_eff_v * rhs_vap;
+                b_p_lag += rhs_vap;
+                continue;
+            }
+
             // All-neighbour conductance sums for the diagonal block.
             oorsum += cond_th;
             vpoosum += cond_vapor;
             phioosum += cond_phi;
 
-            // strip: linear-algebra kernel boundary
-            let inv_th = cond_th.value_in(w_per_k);
-            let inv_vapor = cond_vapor.value_in(kg_per_s / pascals);
-            let inv_phi = cond_phi.value_in(kg_per_s);
-            let l_eff_v = l_eff.value_in(j_per_kg);
-            let psat_n = nbr_curr.vp_sat.value_in(pascals);
-
             // An along-axis material neighbour that lies on THIS line at row±1
-            // is coupled implicitly (off-diagonal). Everything else
-            // (cross-axis material neighbour OR boundary neighbour) is lagged
-            // into the RHS as a known value for this sweep.
+            // is coupled implicitly (off-diagonal). A cross-axis material
+            // neighbour (ADI) or any other non-line neighbour is lagged into the
+            // RHS as a known value for this sweep.
             let along_axis_line_nbr = nbr_axis == axis
                 && pos_in_line
                     .get(&nbr_idx)
                     .is_some_and(|&nrow| nrow + 1 == row || nrow == row + 1);
 
             if along_axis_line_nbr {
-                // Off-diagonal block for this side (same form as assemble_1d):
-                //   block_tt = -inv_th
-                //   block_tp = -L_eff · inv_vapor · Psat_n
-                //   block_pt = 0
-                //   block_pp = -(inv_phi + inv_vapor · Psat_n)
-                let off = Block2x2 {
-                    a: -inv_th,
-                    b: -l_eff_v * inv_vapor * psat_n,
-                    c: 0.0,
-                    d: -(inv_phi + inv_vapor * psat_n),
-                };
+                // Off-diagonal block for this side, incl. the neighbour's own
+                // P_sat(T) term so the interface flux is identical in both cells'
+                // balances (see `implicit_material_coupling`).
+                let coupling =
+                    implicit_material_coupling(cond_th, cond_vapor, cond_phi, l_eff, nbr_curr);
+                b_t_lag += coupling.rhs_t;
+                b_p_lag += coupling.rhs_p;
+                let off = coupling.block;
                 let nbr_row = pos_in_line[&nbr_idx];
                 // Safety-net: along-axis material neighbour must be the immediately-adjacent
                 // member in the line ordering (|row − nbr_row| == 1) so it maps to a
@@ -184,11 +364,15 @@ pub(crate) fn assemble_line_sweep(
                     lower[row] = off;
                 }
             } else {
-                // Lagged neighbour (cross-axis material OR boundary): fold the
-                // neighbour-VALUE coupling into the RHS using its current
-                // iterate. Matches assemble_1d's boundary-RHS form, extended to
-                // cross-axis material neighbours (known in this sweep).
+                // Lagged neighbour (cross-axis material, or a boundary cell that
+                // neighbours the material cell directly): fold the neighbour-VALUE
+                // coupling into the RHS using its current iterate (known in this
+                // sweep).
                 // strip: linear-algebra kernel boundary — RHS scalars fed into raw f64 accumulator
+                let inv_th = cond_th.value_in(w_per_k);
+                let inv_vapor = cond_vapor.value_in(kg_per_s / pascals);
+                let inv_phi = cond_phi.value_in(kg_per_s);
+                let l_eff_v = l_eff.value_in(j_per_kg);
                 let temp_n = nbr_curr.cell_temp.value_in(kelvin);
                 let vp_n = nbr_curr.cell_vp.value_in(pascals);
                 let phi_or_rh = nbr_curr.cell_rh.value();
@@ -199,8 +383,8 @@ pub(crate) fn assemble_line_sweep(
 
         // ── Cell-local diagonal block + cell-local RHS via the SHARED builder ──
         // The or-sums (neighbour-VALUE coupling) are zero here: the along-axis
-        // material part is in the off-diagonals and the lagged part is in the
-        // RHS via b_t_lag/b_p_lag.
+        // material part is in the off-diagonals and the lagged / surface-node
+        // part is in the RHS via b_t_lag/b_p_lag.
         let sums = NeighborSums {
             oorsum,
             torsum: 0.0 * watts,
@@ -355,32 +539,44 @@ impl Surface {
                     0.0 * kg_per_s
                 };
 
+                // Massless surface node: eliminated implicitly, exactly as the
+                // sweeps do (same helper, so the oracle cannot drift from ADI).
+                if matches!(nbr_curr.cell_type, CellType::Virtual(_)) {
+                    let e = eliminate_surface_node(self, nbr_idx, idx, cond_th, cond_vapor, bc);
+                    oorsum += e.cond_th;
+                    vpoosum += e.cond_vap;
+                    phioosum += cond_phi;
+                    // strip: dense Gaussian-elimination oracle (small linear-algebra kernel)
+                    let l_eff_v = l_eff.value_in(j_per_kg);
+                    let rhs_th = e.rhs_th.value_in(watts);
+                    let rhs_vap = e.rhs_vap.value_in(kg_per_s);
+                    b_t_boundary += rhs_th + l_eff_v * rhs_vap;
+                    b_p_boundary += rhs_vap;
+                    continue;
+                }
+
                 oorsum += cond_th;
                 vpoosum += cond_vapor;
                 phioosum += cond_phi;
 
-                // strip: linear-algebra kernel boundary
-                let inv_th = cond_th.value_in(w_per_k);
-                let inv_vapor = cond_vapor.value_in(kg_per_s / pascals);
-                let inv_phi = cond_phi.value_in(kg_per_s);
-                let l_eff_v = l_eff.value_in(j_per_kg);
-                let psat_n = nbr_curr.vp_sat.value_in(pascals);
-
                 if let Some(&nbr_row) = block_row.get(&nbr_idx) {
                     // Material neighbour (ANY axis): fully-coupled off-diagonal
-                    // block — the SAME `off` pattern AdiStep uses along-axis,
-                    // here applied to EVERY material face neighbour with no lag.
-                    let off = Block2x2 {
-                        a: -inv_th,
-                        b: -l_eff_v * inv_vapor * psat_n,
-                        c: 0.0,
-                        d: -(inv_phi + inv_vapor * psat_n),
-                    };
-                    off_blocks.push((nbr_row, off));
+                    // block — the SAME block (incl. the neighbour's P_sat(T) term)
+                    // AdiStep uses along-axis, here applied to EVERY material face
+                    // neighbour with no lag.
+                    let coupling =
+                        implicit_material_coupling(cond_th, cond_vapor, cond_phi, l_eff, nbr_curr);
+                    b_t_boundary += coupling.rhs_t;
+                    b_p_boundary += coupling.rhs_p;
+                    off_blocks.push((nbr_row, coupling.block));
                 } else {
                     // Boundary neighbour → RHS, exactly as the sweeps fold it.
                     // strip: dense Gaussian-elimination oracle (small linear-algebra kernel) —
                     // RHS scalars fed into raw f64 accumulator at the kernel boundary
+                    let inv_th = cond_th.value_in(w_per_k);
+                    let inv_vapor = cond_vapor.value_in(kg_per_s / pascals);
+                    let inv_phi = cond_phi.value_in(kg_per_s);
+                    let l_eff_v = l_eff.value_in(j_per_kg);
                     let temp_n = nbr_curr.cell_temp.value_in(kelvin);
                     let vp_n = nbr_curr.cell_vp.value_in(pascals);
                     let phi_b = nbr_curr.cell_rh.value();
@@ -914,14 +1110,17 @@ mod tests {
     ///   runs. With raw Picard exposed, the per-sweep update must carry the z-coupling
     ///   explicitly via the z-sweep, else each outer iteration barely progresses the
     ///   z-lagged residual.
-    /// * `max_iter = 1000` (tight budget): WITH z-sweep ADI converges ≈ 750 iters
-    ///   (within budget); WITHOUT z-sweep ADI needs ≈ 1400 iters (exceeds budget →
-    ///   test RED). DIRECT runs with `max_iter_dir = 2000` separately to get the
-    ///   correctness oracle when it converges.
+    /// * `max_iter = 400` (tight budget): WITH z-sweep ADI converges in ≈ 142
+    ///   iters (within budget); WITHOUT z-sweep ADI needs ≈ 761 iters (exceeds
+    ///   budget → test RED). (The budget was 1000 while the lagged surface node
+    ///   made both counts 3–5× larger — 503 / ≈ 1010; once the surface node and the
+    ///   neighbour Jacobian are implicit the mutant converges at 761 < 1000 and the
+    ///   old budget stopped discriminating.) DIRECT runs with `max_iter_dir = 2000`
+    ///   separately to get the correctness oracle when it converges.
     ///
     /// PRIMARY DISCRIMINATOR: `conv_adi` (Anderson OFF) — WITH z-sweep ADI converges
-    /// within `max_iter = 1000`; removing the guard (`if false && ..`) makes it need
-    /// ~1400 iters → budget exhausted → assertion fails (verified red→green).
+    /// within `max_iter = 400`; removing the guard (`if false && ..`) makes it need
+    /// ~761 iters → budget exhausted → assertion fails (verified red→green).
     ///
     /// CORRECTNESS (live): the DIRECT reference is run with Anderson ON so the
     /// fully-coupled dense solve converges quickly to the true fixed point (Anderson
@@ -1004,8 +1203,8 @@ mod tests {
         mgr_dir.settings.anderson_enabled = true;
 
         // PRIMARY discriminator budget: tight enough that WITH z-sweep ADI (Anderson
-        // OFF) converges (~750 iters) but WITHOUT z-sweep it does not (~1400 iters).
-        let max_iter_adi = 1000i32;
+        // OFF) converges (~142 iters) but WITHOUT z-sweep it does not (~761 iters).
+        let max_iter_adi = 400i32;
         // DIRECT (Anderson ON) converges in well under this; generous for safety.
         let max_iter_dir = 2000i32;
 

@@ -215,11 +215,15 @@ impl Surface {
     /// (φ_{n+1} → φ_curr), so the discrete capacity is consistent with the
     /// sorption isotherm.
     ///
-    /// NOTE: this fixes the storage term only. A separate ~20–40 % offset between
-    /// the *reported surface vapour flux* and the wall's stored-water change
-    /// remains (see `tests/room_air_coupling.rs`); it grows with N and correlates
-    /// with the latent-heat thermal swing, so it lives in the T↔φ (vp_sat(T))
-    /// coupling, NOT in this capacity term — the secant alone does not close it.
+    /// NOTE: the secant makes the storage TERM exact at convergence; it is not
+    /// what caused the ~20–40 % offset once seen between the *reported surface
+    /// vapour flux* and the wall's stored-water change (it grew with N and with
+    /// the thermal swing). That offset came from the linearised T↔φ coupling of
+    /// the tridiagonal/ADI assembly — the LAGGED surface node and the neighbour's
+    /// missing `P_sat(T)` term in the off-diagonal blocks, which left every
+    /// unconverged iterate non-conservative and stalled the outer iteration on
+    /// fine meshes. See `solver::adi` ("Conservation of the linearised system")
+    /// and `tests/mass_balance_split_layers.rs`.
     ///
     /// When Δφ is too small to form a stable secant (first iterate, near steady
     /// state) it falls back to the tangent `dwd_phi`. Both share the same
