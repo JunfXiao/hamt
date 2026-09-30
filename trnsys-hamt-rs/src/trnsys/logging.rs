@@ -10,9 +10,15 @@
 //! * Events at or above [`TRNSYS_LOG_LEVEL`] are forwarded to the TRNSYS log via
 //!   [`log_in_trnsys`]. **`ERROR` maps to a TRNSYS fatal error, i.e. every `error!` stops the
 //!   simulation.**
+//! * A debug flight recorder: every event at DEBUG and above is also kept in an in-memory ring per
+//!   unit (8 MiB by default), and `type_395_<unit>_debug.log` is written from it when an `ERROR` is
+//!   logged (which includes panics), or when the simulation ends with an error reported by another
+//!   component. See [`ring`].
 //!
-//! The level is controlled by the `TRNSYS_HAMT_RS` environment variable (`tracing` `EnvFilter`
-//! directives, default `info`). Each of the two sinks above has its own filter instance.
+//! The level of the log file and of the TRNSYS forwarding is controlled by the `TRNSYS_HAMT_RS`
+//! environment variable (`tracing` `EnvFilter` directives, default `info`), the size of the debug
+//! rings by `TRNSYS_HAMT_RS_DEBUG_RING_MB`. Every layer has its own filter (there is no global one),
+//! so the rings, which need DEBUG, do not change what the other layers receive.
 //!
 //! Everything that does not need the TRNSYS kernel lives behind [`build_subscriber`], which takes
 //! the current unit and the simulation time as injected providers, so it can be unit-tested
@@ -20,6 +26,7 @@
 
 mod files;
 mod format;
+mod ring;
 #[cfg(test)]
 mod tests;
 
@@ -27,15 +34,18 @@ use crate::TYPE_NUMBER;
 use crate::trnsys::{Severity, get_current_unit, get_simulation_time, log_message};
 use files::{FileSink, UnitFiles};
 use format::{LogTimer, event_format};
+use ring::{ErrorDumpLayer, RingSet, RingSink, parse_ring_setting};
 use std::fmt::{self, Write as _};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 use std::time::{Duration, Instant};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber, error};
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::Registry;
+
+pub use ring::ENV_RING_MB;
 
 /// Environment variable holding the `EnvFilter` directives (e.g. `debug`, or
 /// `info,hamt_core=debug`).
@@ -108,12 +118,15 @@ pub(crate) struct LogConfig {
     pub stdout: bool,
     /// Forward events to TRNSYS (`None`: do not).
     pub trnsys: Option<TrnsysForward>,
+    /// Byte budget of the debug ring buffer of each unit (`None`: no ring buffer, and no
+    /// `type_395_<unit>_debug.log`).
+    pub ring_bytes: Option<usize>,
 }
 
 impl LogConfig {
     /// The configuration of the DLL: working directory, TRNSYS kernel providers, environment
-    /// variables, stdout and TRNSYS forwarding on.
-    pub(crate) fn production() -> Self {
+    /// variables, stdout and TRNSYS forwarding on, and a debug ring of `ring_bytes` per unit.
+    pub(crate) fn production(ring_bytes: Option<usize>) -> Self {
         LogConfig {
             dir: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
             unit: Arc::new(get_current_unit),
@@ -125,6 +138,7 @@ impl LogConfig {
                 threshold: TRNSYS_LOG_LEVEL,
                 sink: Arc::new(|level, message| log_in_trnsys(level, None, message)),
             }),
+            ring_bytes,
         }
     }
 }
@@ -139,6 +153,11 @@ pub(crate) fn log_file_name(unit: i32) -> String {
     format!("type_{}_{}.log", TYPE_NUMBER, unit_key(unit))
 }
 
+/// `type_395_<unit>_debug.log`: the dump of the debug ring buffer, next to the log file.
+pub(crate) fn debug_dump_file_name(unit: i32) -> String {
+    format!("type_{}_{}_debug.log", TYPE_NUMBER, unit_key(unit))
+}
+
 /// Best-effort diagnostic on stderr for problems of the logging machinery itself. Never panics
 /// (a closed or failing stderr is ignored), never logs through `tracing`.
 pub(crate) fn diag(message: fmt::Arguments<'_>) {
@@ -149,14 +168,23 @@ pub(crate) fn diag(message: fmt::Arguments<'_>) {
 /// How long logging code waits for a contended lock before it gives up on one record.
 const LOCK_PATIENCE: Duration = Duration::from_millis(50);
 
+/// Locks `mutex` for logging code, which must never deadlock or panic: [`lock_bounded_for`] with
+/// the default patience ([`LOCK_PATIENCE`]).
+pub(crate) fn lock_bounded<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    lock_bounded_for(mutex, LOCK_PATIENCE)
+}
+
 /// Locks `mutex` for logging code, which must never deadlock or panic.
 ///
 /// * A poisoned mutex is recovered (`into_inner`): a panic elsewhere must not silence logging,
 ///   and the panic hook itself logs.
-/// * A mutex that stays locked for [`LOCK_PATIENCE`] yields `None` (the caller drops the record)
-///   instead of blocking. This covers a panic that unwinds through logging code while it holds the
-///   lock: the panic hook then logs from the very thread that owns the lock.
-pub(crate) fn lock_bounded<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+/// * A mutex that stays locked for `patience` yields `None` (the caller drops the record) instead
+///   of blocking. This covers a panic that unwinds through logging code while it holds the lock:
+///   the panic hook then logs from the very thread that owns the lock.
+pub(crate) fn lock_bounded_for<T>(
+    mutex: &Mutex<T>,
+    patience: Duration,
+) -> Option<MutexGuard<'_, T>> {
     match mutex.try_lock() {
         Ok(guard) => return Some(guard),
         Err(TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
@@ -170,7 +198,7 @@ pub(crate) fn lock_bounded<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
             Ok(guard) => return Some(guard),
             Err(TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
             Err(TryLockError::WouldBlock) => {
-                if started.elapsed() >= LOCK_PATIENCE {
+                if started.elapsed() >= patience {
                     return None;
                 }
             }
@@ -279,16 +307,46 @@ fn env_filter(source: &FilterSource) -> EnvFilter {
     }
 }
 
+/// The handle on the debug rings of a subscriber built by [`build_subscriber`] (no-op if the ring
+/// buffer is disabled).
+#[derive(Clone)]
+pub(crate) struct LogHandle {
+    rings: Option<Arc<RingSet>>,
+}
+
+impl LogHandle {
+    /// Writes `type_395_<unit>_debug.log` for every unit with a non-empty ring; see
+    /// [`dump_debug_rings`].
+    pub(crate) fn dump_debug_rings(&self, reason: &str) {
+        if let Some(rings) = &self.rings {
+            rings.dump(reason);
+        }
+    }
+
+    /// Like [`dump_debug_rings`](Self::dump_debug_rings), but only if nothing has been dumped yet.
+    pub(crate) fn dump_debug_rings_once(&self, reason: &str) {
+        if let Some(rings) = &self.rings {
+            rings.dump_once(reason);
+        }
+    }
+}
+
 /// Builds the subscriber of the DLL from `config`; it touches no global state.
 ///
 /// Every layer carries its own filter (no global filter), so a layer never sees events that were
-/// not meant for it:
+/// not meant for it. In this order (an event reaches the layers in this order, inner ones first):
 ///
-/// 1. the unit log file (and stdout), filtered by `TRNSYS_HAMT_RS`,
-/// 2. the forwarding to TRNSYS, filtered by `TRNSYS_HAMT_RS` and then by its own threshold.
+/// 1. the debug ring buffer: DEBUG and above, whatever `TRNSYS_HAMT_RS` says (not installed if the
+///    ring is disabled, which keeps the DEBUG callsites disabled at zero cost),
+/// 2. the unit log file (and stdout), filtered by `TRNSYS_HAMT_RS`,
+/// 3. the dump of the debug rings on `ERROR` events: after the ring and the log file, so both
+///    already hold the `ERROR` line, and before TRNSYS is told about it,
+/// 4. the forwarding to TRNSYS, filtered by `TRNSYS_HAMT_RS` and then by its own threshold.
 ///
-/// Inner layers receive an event first (they are earlier in the list).
-pub(crate) fn build_subscriber(config: LogConfig) -> impl Subscriber + Send + Sync + 'static {
+/// Also returns a [`LogHandle`] to dump the rings by hand.
+pub(crate) fn build_subscriber(
+    config: LogConfig,
+) -> (impl Subscriber + Send + Sync + 'static, LogHandle) {
     let LogConfig {
         dir,
         unit,
@@ -297,10 +355,25 @@ pub(crate) fn build_subscriber(config: LogConfig) -> impl Subscriber + Send + Sy
         filter,
         stdout,
         trnsys,
+        ring_bytes,
     } = config;
 
-    let files = Arc::new(UnitFiles::new(dir, unit.clone()));
+    let files = Arc::new(UnitFiles::new(dir.clone(), unit.clone()));
+    let rings =
+        ring_bytes.map(|budget| Arc::new(RingSet::new(dir, unit.clone(), timer.clone(), budget)));
+
     let mut layers: Vec<BoxedLayer> = Vec::new();
+
+    if let Some(rings) = &rings {
+        layers.push(
+            tracing_subscriber::fmt::layer::<Registry>()
+                .with_writer(RingSink::new(rings.clone()))
+                .with_ansi(false)
+                .event_format(event_format(&timer, &unit, &sim_time))
+                .with_filter(LevelFilter::DEBUG)
+                .boxed(),
+        );
+    }
 
     layers.push(
         tracing_subscriber::fmt::layer::<Registry>()
@@ -311,6 +384,14 @@ pub(crate) fn build_subscriber(config: LogConfig) -> impl Subscriber + Send + Sy
             .boxed(),
     );
 
+    if let Some(rings) = &rings {
+        layers.push(
+            ErrorDumpLayer::new(rings.clone())
+                .with_filter(LevelFilter::ERROR)
+                .boxed(),
+        );
+    }
+
     if let Some(forward) = trnsys {
         layers.push(
             TrnSysLogLayer::new(forward)
@@ -319,20 +400,58 @@ pub(crate) fn build_subscriber(config: LogConfig) -> impl Subscriber + Send + Sy
         );
     }
 
-    Registry::default().with(layers)
+    (Registry::default().with(layers), LogHandle { rings })
+}
+
+/// The handle of the subscriber installed by [`init_tracing`].
+static LOG_HANDLE: OnceLock<LogHandle> = OnceLock::new();
+
+/// Writes the debug ring buffers to disk: for every unit with a non-empty ring,
+/// `type_395_<unit>_debug.log` (next to its log file, overwritten) with a header (`reason`, time,
+/// unit, number of entries and of discarded older entries) followed by the last DEBUG-and-above
+/// lines of that unit.
+///
+/// Happens automatically on every `ERROR` event (which includes panics); this function is for
+/// other triggers. `reason` is reduced to its first line. Does nothing before [`init_tracing`] or if
+/// the ring buffer is disabled. Never panics and never blocks indefinitely, so it is safe to call
+/// from a panic hook.
+pub fn dump_debug_rings(reason: &str) {
+    if let Some(handle) = LOG_HANDLE.get() {
+        handle.dump_debug_rings(reason);
+    }
+}
+
+/// Like [`dump_debug_rings`], but only if the rings have not been dumped yet in the life of the
+/// process (neither by this function, nor by an `ERROR` event, nor by [`dump_debug_rings`]): a
+/// dump of the failure itself, which names its cause, must not be replaced by a later, vaguer one.
+pub fn dump_debug_rings_once(reason: &str) {
+    if let Some(handle) = LOG_HANDLE.get() {
+        handle.dump_debug_rings_once(reason);
+    }
 }
 
 /// Initializes tracing with custom layers and settings.
 ///
 /// Called once, on the first call of the Type. Installs the global subscriber and the panic hook.
 pub fn init_tracing() {
-    let subscriber = build_subscriber(LogConfig::production());
+    let ring = parse_ring_setting(
+        std::env::var_os(ENV_RING_MB)
+            .map(|value| value.to_string_lossy().into_owned())
+            .as_deref(),
+    );
+
+    let (subscriber, handle) = build_subscriber(LogConfig::production(ring.budget_bytes));
 
     if let Err(err) = tracing::subscriber::set_global_default(subscriber) {
         diag(format_args!("cannot install the tracing subscriber: {err}"));
     }
+    let _ = LOG_HANDLE.set(handle);
 
-    // panic hook
+    if let Some(warning) = &ring.warning {
+        tracing::warn!("{warning}");
+    }
+
+    // panic hook: the `error!` reaches the log, TRNSYS and (via the ERROR trigger) the debug dump
     std::panic::set_hook(Box::new(|panic_info| {
         error!("TrnSys Type Panicked: {:#}", panic_info);
     }));

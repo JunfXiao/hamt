@@ -1,7 +1,7 @@
 #![feature(adt_const_params, generic_const_exprs)]
 #![allow(incomplete_features)]
 
-use crate::logging::init_tracing;
+use crate::logging::{dump_debug_rings_once, init_tracing};
 use crate::trnsys::error::ErrorHandler;
 use crate::trnsys_type::TrnSysType;
 use anyhow::Result;
@@ -84,6 +84,12 @@ fn main(mut state: &mut TrnSysState) -> Result<()> {
     // read_storage(&mut state);
 
     if is_last_call_of_simulation() {
+        // A simulation that another component's error stopped ends here without this Type having
+        // logged an error of its own: keep the debug history anyway. Once per process, and not if
+        // an error of this Type has been dumped already; the dump covers the rings of all units.
+        if simulation_has_error() {
+            dump_debug_rings_once("last call of the simulation, TRNSYS reports an error");
+        }
         type_instance.simulation_ends(&mut state)?;
         return Ok(());
     }
