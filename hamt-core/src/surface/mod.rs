@@ -19,10 +19,7 @@ pub mod step_jacobi;
 pub mod step_tridiag;
 use std::{collections::HashMap, sync::Arc};
 
-use crate::parallel::{par_or_seq, par_or_seq_mut};
-
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
+use crate::parallel::{for_each_mut, zip_for_each_mut};
 
 // Re-export step types so external code can use crate::surface::BlockJacobiStep etc.
 pub use step_adi::AdiStep;
@@ -166,15 +163,23 @@ pub trait IterativeStep {
 }
 
 impl Surface {
+    /// `true` for a 2-D or 3-D lattice (`ny > 1` or `nz > 1`), `false` for a 1-D wall
+    /// `(N, 1, 1)`. Only multi-dimensional lattices run their per-cell loops with
+    /// rayon; a 1-D wall stays sequential even with the `parallel` feature (see
+    /// [`crate::parallel`]).
+    pub fn is_multi_dimensional(&self) -> bool {
+        let (_, ny, nz) = self.cells.dim();
+        ny > 1 || nz > 1
+    }
+
     /// Copy the current iteration state into `surface_next` before property updates.
     pub fn sync_state_from(&mut self, surface_curr: &Surface) -> Result<()> {
+        let parallel = self.is_multi_dimensional();
         if let (Some(dst), Some(src)) = (self.cells.as_slice_mut(), surface_curr.cells.as_slice()) {
-            par_or_seq_mut(dst)
-                .zip(par_or_seq(src))
-                .for_each(|(cell, ref_cell)| {
-                    *cell = ref_cell.clone();
-                    cell.sync_state_from(ref_cell);
-                });
+            zip_for_each_mut(dst, src, parallel, |cell, ref_cell| {
+                *cell = ref_cell.clone();
+                cell.sync_state_from(ref_cell);
+            });
         } else {
             for (cell, ref_cell) in self.cells.iter_mut().zip(surface_curr.cells.iter()) {
                 *cell = ref_cell.clone();
@@ -190,8 +195,11 @@ impl Surface {
         bc: &BoundaryCondition,
         settings: &HamtSettings,
     ) -> Result<()> {
+        let parallel = self.is_multi_dimensional();
         if let Some(cells) = self.cells.as_slice_mut() {
-            par_or_seq_mut(cells).for_each(|cell| cell.calc_dependent_state(bc, settings));
+            for_each_mut(cells, parallel, |cell| {
+                cell.calc_dependent_state(bc, settings)
+            });
         } else {
             for cell in self.cells.iter_mut() {
                 cell.calc_dependent_state(bc, settings);
@@ -320,6 +328,24 @@ impl Surface {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_2d_and_3d_lattices_are_multi_dimensional() {
+        use crate::solver::test_fixtures::{
+            build_fixture_manager, build_fixture_manager_2d, build_fixture_manager_3d,
+        };
+        use crate::uom::units::meter;
+
+        assert!(!build_fixture_manager(6).surface_curr.is_multi_dimensional());
+        assert!(
+            build_fixture_manager_2d(4, 3, false)
+                .surface_curr
+                .is_multi_dimensional()
+        );
+        // ny = 1 with nz > 1 is still a 3-D lattice.
+        let three_d = build_fixture_manager_3d(4, 1, 6, 1.0 * meter, 1.0 * meter, false, true);
+        assert!(three_d.surface_curr.is_multi_dimensional());
+    }
+
     #[test]
     fn one_d_surface_has_active_x_faces_adiabatic_sides() {
         use crate::config::{FaceBc, FACE_X_MAX, FACE_X_MIN, FACE_Y_MIN, FACE_Z_MAX};
