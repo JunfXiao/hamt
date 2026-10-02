@@ -1,16 +1,13 @@
-use crate::{
-    parallel::{par_or_seq, par_or_seq_mut},
-    uom::{
-        Quantity,
-        constants::{WATER_LATENT_HEAT, WATER_SPECIFIC_HEAT},
-        dimensions::{
-            Density, HeatCapacity, Mass, MassFlux, MassFluxPerTemperature, Power, SpecificEnergy,
-            ThermalConductance, Time, VaporConductance,
-        },
-        units::{
-            dimensionless, j_per_kg, k_per_w, kelvin, kg_per_m3, kg_per_s, kilograms, pa_s_per_kg,
-            pascals, seconds, w_per_k, watts,
-        },
+use crate::uom::{
+    Quantity,
+    constants::{WATER_LATENT_HEAT, WATER_SPECIFIC_HEAT},
+    dimensions::{
+        Density, HeatCapacity, Mass, MassFlux, MassFluxPerTemperature, Power, SpecificEnergy,
+        ThermalConductance, Time, VaporConductance,
+    },
+    units::{
+        dimensionless, j_per_kg, k_per_w, kelvin, kg_per_m3, kg_per_s, kilograms, pa_s_per_kg,
+        pascals, seconds, w_per_k, watts,
     },
 };
 
@@ -18,9 +15,6 @@ use super::*;
 
 use anyhow::Result;
 use tracing::{debug, trace};
-
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
 
 /// Block-Jacobi / Picard inner step: per-cell 2×2 (T, φ) solve with lagged
 /// neighbour values. See [`Surface::calculate_iteration`].
@@ -355,10 +349,10 @@ impl Surface {
         let dt_s = settings.timestep;
 
         let nx = self.cells.raw_dim()[0];
-        let indices: Vec<usize> = (0..nx).collect();
 
-        let results: Vec<(Temperature<f64>, Dimensionless<f64>)> = par_or_seq(&indices)
-            .map(|&i| {
+        // A 1-D step: both cell loops run sequentially (see `crate::parallel`).
+        let results: Vec<(Temperature<f64>, Dimensionless<f64>)> = (0..nx)
+            .map(|i| {
                 let cell_curr = &surface_curr.cells[[i, 0, 0]];
 
                 if !cell_curr.is_boundary() {
@@ -534,7 +528,7 @@ impl Surface {
             .collect();
 
         if let Some(cells) = self.cells.as_slice_mut() {
-            par_or_seq_mut(cells).enumerate().for_each(|(i, cell)| {
+            cells.iter_mut().enumerate().for_each(|(i, cell)| {
                 let next_temp = results[i].0;
                 let next_rh = results[i].1;
                 let curr_temp = surface_curr.cells[[i, 0, 0]].cell_temp;
