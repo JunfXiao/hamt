@@ -311,8 +311,42 @@ where
         (Quantity(y_phys), Quantity(dy_dx))
     }
 
+    /// Inverse of [`Curve::interpolate`] (Y -> X) for a monotonically increasing curve: the X at which the
+    /// PCHIP interpolation gives `in_y`, so that `interpolate(inverse_interpolate(y)) == y` also between the
+    /// knots (unlike the linear [`Curve::reverse_interpolate`]). The bracketing knot interval is found on the
+    /// physical knots, then the PCHIP is bisected inside it (PCHIP keeps the monotonicity of the knots).
+    /// Below the first / above the last knot the first / last X is returned; a NaN input returns the first X.
+    pub fn inverse_interpolate(&self, in_y: Quantity<f64, DY>) -> Quantity<f64, DX> {
+        if self.y_physical.is_empty() {
+            return Quantity::<f64, DX>::zero();
+        }
+        if !in_y.0.is_finite() {
+            return self.x_physical[0];
+        }
+        let upper = match self.y_physical.iter().position(|&yv| yv.0 >= in_y.0) {
+            None => return *self.x_physical.last().unwrap(),
+            Some(i) if i == 0 || self.y_physical[i].0 == in_y.0 => return self.x_physical[i],
+            Some(i) => i,
+        };
+        let (mut lo, mut hi) = (self.x_physical[upper - 1].0, self.x_physical[upper].0);
+        // bisection to machine precision (about 60 halvings of the knot interval)
+        loop {
+            let mid = 0.5 * (lo + hi);
+            if mid <= lo || mid >= hi {
+                break;
+            }
+            if self.interpolate(Quantity::<f64, DX>(mid)).0.0 < in_y.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        Quantity::<f64, DX>(0.5 * (lo + hi))
+    }
+
     /// Linearly interpolates a value from a curve (Reverse: Y -> X).
-    /// Note: This remains linear as analytic inversion of cubic PCHIP is complex.
+    /// Note: This remains linear as analytic inversion of cubic PCHIP is complex. Between the knots it is
+    /// therefore NOT the inverse of [`Curve::interpolate`]; use [`Curve::inverse_interpolate`] for that.
     /// Operates on the *physical* (x, y) arrays, so it is correct for `LogY`
     /// curves too — though no current call site uses reverse-interpolation on
     /// a `LogY` curve (only `sorption_isotherm`, which is `LinearY`).
@@ -534,8 +568,8 @@ fn pchip_interp_raw(target_x: f64, x_data: &[f64], y_data: &[f64], tangents: &[f
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::uom::DIM_DIMENSIONLESS;
     use crate::uom::units::{dimensionless, kg_per_m3};
+    use crate::uom::{DIM_DIMENSIONLESS, DIM_WATER_CONTENT};
 
     #[test]
     fn interpolate_linear_midpoint() {
@@ -647,6 +681,47 @@ mod tests {
         let (x, grad) = curve.reverse_interpolate(f64::NAN * kg_per_m3);
         assert!((x.value() - 0.0).abs() < 1e-12);
         assert!(grad.value_in(kg_per_m3).abs() < 1e-12);
+    }
+
+    /// Curved isotherm-like curve: between its knots the PCHIP differs from the chords.
+    fn curved_isotherm() -> Curve<DIM_DIMENSIONLESS, DIM_WATER_CONTENT> {
+        Curve::new(
+            vec![0.0 * dimensionless, 0.5 * dimensionless, 0.8 * dimensionless, 1.0 * dimensionless],
+            vec![0.0 * kg_per_m3, 10.0 * kg_per_m3, 20.0 * kg_per_m3, 60.0 * kg_per_m3],
+        )
+    }
+
+    #[test]
+    fn inverse_interpolate_returns_the_x_at_which_interpolate_gives_y_between_knots() {
+        let curve = curved_isotherm();
+        for y in [2.5, 5.0, 15.0, 30.0, 50.0] {
+            let x = curve.inverse_interpolate(y * kg_per_m3);
+            let (back, _) = curve.interpolate(x);
+            assert!(
+                (back.value_in(kg_per_m3) - y).abs() < 1e-9,
+                "inverse of {y} kg/m³ is x = {}, which interpolates to {} kg/m³",
+                x.value(),
+                back.value_in(kg_per_m3)
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_interpolate_returns_the_knot_for_a_knot_value() {
+        let x = curved_isotherm().inverse_interpolate(20.0 * kg_per_m3);
+        assert!((x.value() - 0.8).abs() < 1e-12, "x = {}", x.value());
+    }
+
+    #[test]
+    fn inverse_interpolate_clamps_to_the_first_and_last_knot() {
+        let curve = curved_isotherm();
+        assert!((curve.inverse_interpolate(-1.0 * kg_per_m3).value() - 0.0).abs() < 1e-12);
+        assert!((curve.inverse_interpolate(75.0 * kg_per_m3).value() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn inverse_interpolate_nan_input_returns_first_point_without_panic() {
+        assert!((curved_isotherm().inverse_interpolate(f64::NAN * kg_per_m3).value() - 0.0).abs() < 1e-12);
     }
 
     // ---------- LogY behavioural tests ----------
