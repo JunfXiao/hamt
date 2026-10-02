@@ -168,10 +168,11 @@ impl Material {
         self.initial_water_content * density
     }
 
+    /// RH at which the sorption isotherm gives the initial water content. The inverse of the PCHIP
+    /// isotherm the cells use, so that a cell starts at exactly the initial water content of the IDF.
     pub fn initial_rh(&self) -> Dimensionless<f64> {
         self.sorption_isotherm
-            .reverse_interpolate(self.initial_water_density())
-            .0
+            .inverse_interpolate(self.initial_water_density())
     }
 }
 
@@ -350,5 +351,40 @@ impl MaterialLibrary {
                 InvalidInputReason::Missing,
             ))
         })?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::uom::units::{dimensionless, kg_per_m3};
+
+    /// Sorption isotherm of the LivingBoard layer of the DIN 16798-1 comparison walls (knots of its IDF).
+    fn living_board_isotherm() -> Curve<DIM_DIMENSIONLESS, DIM_WATER_CONTENT> {
+        let rh = [0.0, 0.65, 0.8, 0.93, 0.95, 0.99, 0.995, 0.999, 0.9995, 0.9999, 1.0];
+        let w = [0.0, 54.4, 75.9, 113.8, 141.4, 217.8, 251.4, 359.9, 404.9, 493.8, 633.0];
+        Curve::new(
+            rh.iter().map(|&x| x * dimensionless).collect(),
+            w.iter().map(|&y| y * kg_per_m3).collect(),
+        )
+    }
+
+    /// A cell takes its water content from its RH through the (PCHIP) sorption isotherm, so the initial RH
+    /// must be the RH at which that isotherm gives the initial water content of the IDF. The linear inverse
+    /// made this LivingBoard start at 21.9 kg/m³ instead of 28.0 kg/m³ (28.0 lies between the knots 0 and 0.65).
+    #[test]
+    fn initial_rh_reproduces_the_initial_water_content_between_isotherm_knots() {
+        let mut mat = Material::new("LivingBoard".to_string());
+        mat.density = 673.0 * kg_per_m3;
+        mat.initial_water_content = Quantity(28.0 / 673.0);
+        mat.sorption_isotherm = living_board_isotherm();
+
+        let (w, _) = mat.sorption_isotherm.interpolate(mat.initial_rh());
+
+        assert!(
+            (w.value_in(kg_per_m3) - 28.0).abs() < 1e-9,
+            "the cell starts at {} kg/m³ instead of 28.0 kg/m³",
+            w.value_in(kg_per_m3)
+        );
     }
 }
