@@ -55,7 +55,7 @@ fn main() {
     }
 
     // Add Windows resources (icon, version info, etc.)
-    let mut res = winres::WindowsResource::new();
+    let mut res = winresource::WindowsResource::new();
     res.set(
         "FileDescription",
         "Type 395 HAMT Model",
@@ -75,11 +75,11 @@ fn main() {
     let version_parts: Vec<&str> = version.split('.').collect();
     if version_parts.len() >= 3 {
         res.set_version_info(
-            winres::VersionInfo::FILEVERSION,
+            winresource::VersionInfo::FILEVERSION,
             parse_version(version_parts[0], version_parts[1], version_parts[2], "0"),
         );
         res.set_version_info(
-            winres::VersionInfo::PRODUCTVERSION,
+            winresource::VersionInfo::PRODUCTVERSION,
             parse_version(version_parts[0], version_parts[1], version_parts[2], "0"),
         );
     }
@@ -99,6 +99,10 @@ fn parse_version(major: &str, minor: &str, patch: &str, build: &str) -> u64 {
 /// Watch the TRNDll64.lib file and rebuild if it changes
 fn watch_trndll64() {
     println!("cargo::rerun-if-changed=lib/TRNDll64.lib");
-    println!("cargo:rustc-link-search=native=lib");
+    // Absolute paths: rustc runs from the workspace root, not this crate's dir.
+    // TRNDll64.lib may sit in either this crate's lib/ or the workspace's lib/.
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    println!("cargo:rustc-link-search=native={manifest_dir}/lib");
+    println!("cargo:rustc-link-search=native={manifest_dir}/../lib");
     println!("cargo:rustc-link-lib=static=TRNDll64");
 }
