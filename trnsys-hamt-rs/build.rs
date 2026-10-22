@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::path;
 use std::path::Path;
 
 fn read_toml_trnsys_metadata() -> toml::Value {
@@ -69,7 +70,7 @@ fn main() {
 
     res.set(
         "LegalCopyright",
-        &format!("Copyright © 2026 {authors}. All rights reserved.W"),
+        &format!("Copyright © 2026 {authors}. All rights reserved."),
     );
 
     let version_parts: Vec<&str> = version.split('.').collect();
@@ -84,7 +85,7 @@ fn main() {
         );
     }
 
-    res.compile().unwrap();
+    res.compile().expect("Cannot compile resources");
 }
 
 fn parse_version(major: &str, minor: &str, patch: &str, build: &str) -> u64 {
@@ -101,8 +102,12 @@ fn watch_trndll64() {
     println!("cargo::rerun-if-changed=lib/TRNDll64.lib");
     // Absolute paths: rustc runs from the workspace root, not this crate's dir.
     // TRNDll64.lib may sit in either this crate's lib/ or the workspace's lib/.
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    println!("cargo:rustc-link-search=native={manifest_dir}/lib");
-    println!("cargo:rustc-link-search=native={manifest_dir}/../lib");
+    let manifest_dir = path::PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let possible_paths = [
+        manifest_dir.join("lib"),
+        manifest_dir.join("../lib")
+    ];
+    println!("cargo:rustc-link-search=native={}", possible_paths[0].display());
+    println!("cargo:rustc-link-search=native={}", possible_paths[1].display());
     println!("cargo:rustc-link-lib=static=TRNDll64");
 }
