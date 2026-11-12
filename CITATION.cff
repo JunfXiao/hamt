@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+type: software
+title: "HAMT"
+abstract: >-
+  A high-performance hygrothermal (heat, air and moisture transport) calculation
+  library written in Rust, with a TRNSYS Type 395 coupling.
+authors:
+  - family-names: Xiao
+    given-names: Junfeng
+    orcid: "https://orcid.org/0009-0007-4942-1067"
+    affiliation: "Technical University of Munich"
+# Concept DOI: always resolves to the latest version on Zenodo.
+doi: 10.5281/zenodo.24165455
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.24165455
+    description: "Concept DOI (all versions)"
+  - type: doi
+    value: 10.5281/zenodo.24165456
+    description: "Version release-0.2.1"
+repository-code: "https://github.com/JunfXiao/hamt"
+license: Apache-2.0
+keywords:
+  - hygrothermal simulation
+  - heat and moisture transport
+  - building physics
+  - TRNSYS
