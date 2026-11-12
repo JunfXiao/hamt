@@ -108,6 +108,8 @@ def merge(a):
     sys.stdout.write((body + "\n\n" if body else "") + report + "\n")
 
 
+sys.stdout.reconfigure(encoding="utf-8", newline="\n")  # Windows runners default to cp1252
+
 p = argparse.ArgumentParser()
 sub = p.add_subparsers(dest="cmd", required=True)
 r = sub.add_parser("render")
