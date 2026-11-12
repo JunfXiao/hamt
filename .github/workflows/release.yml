@@ -1,0 +1,76 @@
+name: Release build
+
+# Runs automatically only when a GitHub release is published.
+# `workflow_dispatch` allows a manual dry run (artifacts only, nothing is attached to a release).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test & build (Windows x64)
+    runs-on: windows-latest
+    # Holds the TRNDLL64_LIB_GZ_B64 secret (TRNSYS import library, not redistributable).
+    environment: trnsys
+    permissions:
+      contents: write # attach assets to the release
+    env:
+      CARGO_TERM_COLOR: always
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustc -vV
+
+      - name: Restore TRNDll64.lib from secret
+        env:
+          LIB_B64: ${{ secrets.TRNDLL64_LIB_GZ_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$LIB_B64" || { echo "::error::secret TRNDLL64_LIB_GZ_B64 is empty"; exit 1; }
+          echo "$LIB_B64" | base64 -d | gunzip > trnsys-hamt-rs/lib/TRNDll64.lib
+          echo "bd0d69192826ab88bfa0c4b57621c0f0d6cde59c7e7ecc67ed563161f6118b3c  trnsys-hamt-rs/lib/TRNDll64.lib" | sha256sum -c -
+
+      - name: Test hamt-core
+        run: cargo test -p hamt-core --release --locked
+
+      - name: Test trnsys_hamt_rs
+        # The test binary imports a few TRNDll64.dll functions, but that DLL only exists inside a
+        # TRNSYS installation. Delay-loading it lets tests that never call into TRNSYS run here.
+        # Only this step uses these flags; the released DLL is linked normally below.
+        env:
+          RUSTFLAGS: -C link-arg=/DELAYLOAD:TRNDll64.dll -C link-arg=delayimp.lib
+        run: cargo test -p trnsys_hamt_rs --release --locked
+
+      - name: Build release artifacts
+        run: cargo build --release --locked -p hamt-core -p trnsys_hamt_rs
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          rm -f trnsys-hamt-rs/lib/TRNDll64.lib
+          mkdir dist
+          cp target/release/trnsys_hamt_rs.dll dist/
+          cp target/release/libhamt_core.rlib dist/
+          (cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hamt-${{ github.event.release.tag_name || github.sha }}-windows-x64
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber --repo "${{ github.repository }}"
