@@ -273,7 +273,6 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "crossterm",
- "csv",
  "ctrlc",
  "diman",
  "ndarray",
