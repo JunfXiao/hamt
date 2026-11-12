@@ -1,4 +1,4 @@
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-09-22"  # pinned: diman needs generic_const_exprs + adt_const_params; bump deliberately
 components = ["rustfmt", "clippy"]
 profile = "minimal"
