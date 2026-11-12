@@ -13,6 +13,8 @@ constructions and ships with a drop-in TRNSYS component (Type 395).
 | [`hamt-core`](hamt-core) | Solver library: material and construction model, cell grid, boundary conditions, time stepping. |
 | [`trnsys-hamt-rs`](trnsys-hamt-rs) | TRNSYS Type 395 DLL built on `hamt-core` for complex simulation in TRNSYS. Tested with [better-trnlizard](https://github.com/JunfXiao/better-trnlizard) in TRNSYS 18. |
 
+> **Planned:** a Python package (PyO3 bindings for `hamt-core`, published on PyPI).
+
 ## Features
 
 - Coupled heat and moisture balance with moisture-dependent properties: sorption isotherm,
