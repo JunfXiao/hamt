@@ -1,7 +1,7 @@
 name: Release build
 
-# Runs automatically only when a GitHub release is published.
-# `workflow_dispatch` allows a manual dry run (artifacts only, nothing is attached to a release).
+# Runs automatically only for published releases whose tag starts with `release-`.
+# `workflow_dispatch` allows a manual dry run (artifacts + job summary only, no release is touched).
 on:
   release:
     types: [published]
@@ -13,13 +13,15 @@ permissions:
 jobs:
   build:
     name: Test & build (Windows x64)
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'release-')
     runs-on: windows-latest
     # Holds the TRNDLL64_LIB_GZ_B64 secret (TRNSYS import library, not redistributable).
     environment: trnsys
     permissions:
-      contents: write # attach assets to the release
+      contents: write # attach assets / edit the release body
     env:
       CARGO_TERM_COLOR: always
+      CI_OUT: ${{ github.workspace }}/ci-out
     defaults:
       run:
         shell: bash
@@ -29,7 +31,8 @@ jobs:
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: |
           rustup toolchain install
-          rustc -vV
+          mkdir -p ci-out
+          rustc -vV | tee ci-out/rustc-vV.txt
 
       - name: Restore TRNDll64.lib from secret
         env:
@@ -41,15 +44,20 @@ jobs:
           echo "bd0d69192826ab88bfa0c4b57621c0f0d6cde59c7e7ecc67ed563161f6118b3c  trnsys-hamt-rs/lib/TRNDll64.lib" | sha256sum -c -
 
       - name: Test hamt-core
-        run: cargo test -p hamt-core --release --locked
+        env:
+          # din_en_15026_benchmark appends every reference comparison here (release report).
+          HAMT_BENCH_REPORT: ${{ github.workspace }}/ci-out/din_en_15026_benchmark.csv
+        run: cargo test -p hamt-core --release --locked 2>&1 | tee ci-out/test-hamt-core.log
 
       - name: Test trnsys_hamt_rs
         # The test binary imports a few TRNDll64.dll functions, but that DLL only exists inside a
         # TRNSYS installation. Delay-loading it lets tests that never call into TRNSYS run here.
         # Only this step uses these flags; the released DLL is linked normally below.
+        # Single-threaded: the logging tests install scoped tracing subscribers, and tracing's
+        # global callsite-interest cache makes them race when run in parallel.
         env:
           RUSTFLAGS: -C link-arg=/DELAYLOAD:TRNDll64.dll -C link-arg=delayimp.lib
-        run: cargo test -p trnsys_hamt_rs --release --locked
+        run: cargo test -p trnsys_hamt_rs --release --locked -- --test-threads=1 2>&1 | tee ci-out/test-trnsys_hamt_rs.log
 
       - name: Build release artifacts
         run: cargo build --release --locked -p hamt-core -p trnsys_hamt_rs
@@ -61,16 +69,36 @@ jobs:
           mkdir dist
           cp target/release/trnsys_hamt_rs.dll dist/
           cp target/release/libhamt_core.rlib dist/
+          cp ci-out/din_en_15026_benchmark.csv dist/
           (cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - name: Render report
+        run: |
+          set -euo pipefail
+          python .github/scripts/release_report.py render \
+            --din ci-out/din_en_15026_benchmark.csv \
+            --test-log hamt-core=ci-out/test-hamt-core.log \
+            --test-log trnsys_hamt_rs=ci-out/test-trnsys_hamt_rs.log \
+            --sums dist/SHA256SUMS.txt \
+            --rustc ci-out/rustc-vV.txt > ci-out/report.md
+          cat ci-out/report.md >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
           name: hamt-${{ github.event.release.tag_name || github.sha }}-windows-x64
-          path: dist/*
+          path: |
+            dist/*
+            ci-out/report.md
           if-no-files-found: error
 
-      - name: Attach to release
+      - name: Attach assets and report to the release
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber --repo "${{ github.repository }}"
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body > ci-out/body-old.md
+          python .github/scripts/release_report.py merge ci-out/body-old.md ci-out/report.md > ci-out/body-new.md
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file ci-out/body-new.md
