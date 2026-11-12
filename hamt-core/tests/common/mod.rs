@@ -98,8 +98,12 @@ pub const REF_TEMPERATURE: &[(i32, f64, f64)] = &[
 // Comparison tolerances (same values used by compare_results and compare_2d).
 // ---------------------------------------------------------------------------
 
-/// Allowed relative deviation for temperature comparisons (1 %).
-pub const PERCENTAGE_RANGE_T: f64 = 0.01;
+/// Allowed absolute temperature deviation [K].
+///
+/// Formerly a relative 1 % of the reference in °C, i.e. about 0.27–0.30 K for the
+/// 26.6–29.5 °C references. A relative error on the Celsius scale depends on its zero
+/// point, so the criterion is absolute; 0.3 K keeps the previous strictness.
+pub const ABS_TOLERANCE_T_K: f64 = 0.3;
 /// Allowed relative deviation for water-content comparisons (2.5 %).
 pub const PERCENTAGE_RANGE_RH: f64 = 0.025;
 

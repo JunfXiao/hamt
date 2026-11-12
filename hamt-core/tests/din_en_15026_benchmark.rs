@@ -7,7 +7,7 @@ mod common;
 
 use anyhow::{Ok, Result};
 use common::{
-    CONSTRUCTION_NAME, PERCENTAGE_RANGE_RH, PERCENTAGE_RANGE_T, REF_TEMPERATURE, REF_WATER_CONTENT,
+    ABS_TOLERANCE_T_K, CONSTRUCTION_NAME, PERCENTAGE_RANGE_RH, REF_TEMPERATURE, REF_WATER_CONTENT,
     create_library, get_sorption_isotherm_curve, init_tracing, interpolate_data_points, rho_w,
     water_sat,
 };
@@ -39,6 +39,43 @@ use std::{cell::RefCell, rc::Rc};
 use std::collections::HashSet;
 
 const DIAGNOSTIC_SAMPLE: bool = true;
+
+/// If set, every reference comparison is appended to this CSV file (used by CI for the
+/// release report). Columns: see [`REPORT_HEADER`].
+const ENV_REPORT: &str = "HAMT_BENCH_REPORT";
+const REPORT_HEADER: &str =
+    "case,day,quantity,depth_m,sim,ref,abs_diff,abs_unit,rel_diff,criterion,tolerance,pass";
+
+/// Appends one comparison row to the `HAMT_BENCH_REPORT` CSV (no-op when unset).
+#[allow(clippy::too_many_arguments)]
+fn report_row(
+    case: &str,
+    day: i32,
+    quantity: &str,
+    depth: f64,
+    sim: f64,
+    reference: f64,
+    abs_unit: &str,
+    rel_diff: f64,
+    criterion: &str,
+    tolerance: f64,
+    pass: bool,
+) -> Result<()> {
+    let Some(path) = std::env::var_os(ENV_REPORT) else {
+        return Ok(());
+    };
+    let new_file = !std::path::Path::new(&path).exists();
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    if new_file {
+        writeln!(f, "{REPORT_HEADER}")?;
+    }
+    writeln!(
+        f,
+        "{case},{day},{quantity},{depth},{sim:.6},{reference:.6},{:.6},{abs_unit},{rel_diff:.6},{criterion},{tolerance},{pass}",
+        (sim - reference).abs()
+    )?;
+    Ok(())
+}
 
 fn run_benchmark_test(time_step: Time<f64>) -> Result<()> {
     run_benchmark_test_with_solver(time_step, SolverMethod::BlockJacobi)
@@ -353,8 +390,13 @@ fn run_benchmark_test_with_solver(time_step: Time<f64>, method: SolverMethod) ->
                     let sim_day: i32 = sim_day.value_in(days) as i32;
                     ui.borrow_mut()
                         .log(format!("Checkpoint reached: {} days", sim_day))?;
-                    let fail_count =
-                        compare_results(&mgr.surface_next, sim_day, &mut *ui.borrow_mut())?;
+                    let case = format!("{:?} dt={}h", method, time_step.value_in(hours));
+                    let fail_count = compare_results(
+                        &mgr.surface_next,
+                        sim_day,
+                        &case,
+                        &mut *ui.borrow_mut(),
+                    )?;
                     if fail_count > 0 {
                         fail_details.push((current_time, fail_count));
 
@@ -421,7 +463,7 @@ fn log_resistances(surface: &Surface, duration_day: i32) -> Option<String> {
     }
 }
 
-fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<u32> {
+fn compare_results(surface: &Surface, duration_day: i32, case: &str, ui: &mut Ui) -> Result<u32> {
     let temp_ref = REF_TEMPERATURE
         .iter()
         .filter(|(d, _, _)| *d == duration_day)
@@ -452,7 +494,7 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
             "Depth (m)".to_string(),
             "Temp (C)".to_string(),
             "Ref Temp (C)".to_string(),
-            "Diff (%)".to_string(),
+            "Diff (K)".to_string(),
             "Result".to_string(),
             "Cell Index".to_string(),
         ],
@@ -466,19 +508,33 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
         let target = *depth * meter;
         let cell_t = kelvin_to_celsius(surface.interpolate_at_depth(target, |c| c.cell_temp));
         let cell_idx = surface.find_cell_idx_at_depth(target).unwrap_or([0, 0, 0]);
-        let diviation = (cell_t - ref_t).abs() / ref_t;
+        // Absolute deviation in K (a °C difference equals a K difference).
+        let diviation = (cell_t - ref_t).abs();
 
-        let turn_passed = diviation <= PERCENTAGE_RANGE_T;
+        let turn_passed = diviation <= ABS_TOLERANCE_T_K;
         if !turn_passed {
             fail_count += 1;
         }
         t_passed &= turn_passed;
+        report_row(
+            case,
+            duration_day,
+            "temperature",
+            *depth,
+            cell_t,
+            *ref_t,
+            "K",
+            diviation / celsius_to_kelvin(*ref_t).value_in(kelvin),
+            "abs",
+            ABS_TOLERANCE_T_K,
+            turn_passed,
+        )?;
         let line = format_table_row(
             &[
                 format!("{:.2}", depth),
                 format!("{:.2}", cell_t),
                 format!("{:.2}", ref_t),
-                format!("{:.1}%", diviation * 100.0),
+                format!("{:.3} K", diviation),
                 if turn_passed { "OK✔️" } else { "FAIL💥" }.to_string(),
                 format!("{:?}", cell_idx),
             ],
@@ -523,6 +579,19 @@ fn compare_results(surface: &Surface, duration_day: i32, ui: &mut Ui) -> Result<
             fail_count += 1;
         }
         rh_passed &= turn_passed;
+        report_row(
+            case,
+            duration_day,
+            "water_content",
+            *depth,
+            cell_wc,
+            *ref_wc,
+            "kg/m3",
+            diviation,
+            "rel",
+            PERCENTAGE_RANGE_RH,
+            turn_passed,
+        )?;
         let line = format_table_row(
             &[
                 format!("{:.2}", depth),

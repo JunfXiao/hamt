@@ -20,7 +20,7 @@ mod common;
 
 use anyhow::{Ok, Result};
 use common::{
-    CONSTRUCTION_NAME, PERCENTAGE_RANGE_RH, PERCENTAGE_RANGE_T, REF_TEMPERATURE, REF_WATER_CONTENT,
+    CONSTRUCTION_NAME, ABS_TOLERANCE_T_K, PERCENTAGE_RANGE_RH, REF_TEMPERATURE, REF_WATER_CONTENT,
     create_library, init_tracing,
 };
 use hamt_core::config::FaceBc;
@@ -145,7 +145,7 @@ fn compare_3d(surface: &hamt_core::surface::Surface, duration_day: i32) -> u32 {
     // --- Temperature: each (j,k) line vs 1-D reference. ---
     println!(
         "{:>8} {:>6} {:>6} {:>9} {:>9} {:>8} {:>6}",
-        "depth", "j", "k", "T(C)", "ref(C)", "diff%", "ok"
+        "depth", "j", "k", "T(C)", "ref(C)", "dT(K)", "ok"
     );
     let mut t_xline_max_resid = 0.0_f64;
     for (d, depth, ref_t) in REF_TEMPERATURE.iter().filter(|(d, _, _)| *d == duration_day) {
@@ -166,21 +166,21 @@ fn compare_3d(surface: &hamt_core::surface::Surface, duration_day: i32) -> u32 {
         t_xline_max_resid = t_xline_max_resid.max(row_max - row_min);
 
         for (j, k, cell_t) in &line_vals {
-            let dev = (cell_t - ref_t).abs() / ref_t;
-            let ok = dev <= PERCENTAGE_RANGE_T;
+            let dev = (cell_t - ref_t).abs(); // [K]
+            let ok = dev <= ABS_TOLERANCE_T_K;
             if !ok {
                 fail_count += 1;
             }
             // Print first (j,k) line and any failures.
             if (*j == 0 && *k == 0) || !ok {
                 println!(
-                    "{:>8.2} {:>6} {:>6} {:>9.3} {:>9.3} {:>7.2}% {:>6}",
+                    "{:>8.2} {:>6} {:>6} {:>9.3} {:>9.3} {:>7.3}K {:>6}",
                     depth,
                     j,
                     k,
                     cell_t,
                     ref_t,
-                    dev * 100.0,
+                    dev,
                     if ok { "OK" } else { "FAIL" }
                 );
             }
